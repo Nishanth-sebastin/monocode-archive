@@ -267,7 +267,7 @@ export function WorktreePanel({
             >
               <ArrowLeft className="size-3.5" strokeWidth={1.75} />
             </button>
-            <span>New worktree</span>
+            <span>New branch and worktree</span>
           </div>
           <label className="flex items-center gap-2 border-b border-content/10 px-2.5 py-2.5 text-content/50">
             <GitBranch className="size-3.5 shrink-0" strokeWidth={1.75} />
@@ -275,7 +275,7 @@ export function WorktreePanel({
               autoFocus
               disabled={busy}
               className={inputClass}
-              aria-label="New worktree branch"
+              aria-label="New branch name"
               placeholder="New branch name…"
               value={branch}
               onKeyDown={(e) => {
@@ -343,7 +343,7 @@ export function WorktreePanel({
               onClick={createAndOpen}
             >
               <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
-              {busy ? "Creating…" : "Create and open"}
+              {busy ? "Creating…" : "Create branch and worktree"}
             </button>
           </div>
           {selected && (
