@@ -1,10 +1,12 @@
 # Local worktrees
 
-Open the composer **branch picker**, then **Worktrees**. The plus action beside a
-branch opens worktree creation with that base selected. Git supplies the inventory,
+Open the composer **branch picker**, then **Worktrees**. Search existing checkouts
+or type a new name and choose **Create worktree**. Arrow keys and Enter select a
+result. Creation starts from the current branch; the **From** row changes the base.
+The plus action beside a branch opens creation with that base selected. Git supplies the inventory,
 including externally created checkouts. Select an explicit local or remote-tracking
 ref, review its commit, and enter a new branch name. The suggested folder can be
-changed under **Location and base commit**. **Create and open** opens a fresh
+changed by clicking the folder row. **Create and open** opens a fresh
 conversation after Git confirms creation; it does not dispatch an agent. A later
 dispatch failure does not recreate or remove the worktree. Remote refs are cached:
 fetch with Git and refresh explicitly.

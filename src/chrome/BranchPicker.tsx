@@ -337,9 +337,9 @@ export function BranchPicker({
           <Popover
             anchor={root}
             side="top"
-            width={worktrees ? 440 : MENU_WIDTH}
+            width={worktrees ? 320 : MENU_WIDTH}
             minHeight={MENU_MIN_HEIGHT}
-            maxHeight={worktrees ? 580 : MENU_MAX_HEIGHT}
+            maxHeight={worktrees ? 380 : MENU_MAX_HEIGHT}
             onDismiss={(reason) => dismiss(reason === "escape")}
             role="dialog"
             aria-label="Branch picker"
