@@ -33,7 +33,7 @@ Record `git rev-parse HEAD`, tool versions, machine/OS, build command and any un
 - Fork orphan cleanup uses its own process marker and does not reap unmarked legacy Cursor agents. Stock MonoCode's own legacy cleanup is outside this fork's control; do not claim this patch changes stock process-management behavior.
 - Provider CLIs retain their own existing home/config/authentication mechanisms; this is not a credential sandbox for third-party CLIs. No stock app profile or credentials are copied/imported. In particular, quota refresh can use the provider's own credential store; live coexistence needs verification before claiming complete credential isolation.
 - Updater endpoints and key remain empty, updater artifact generation is off, and inherited release jobs are restricted to the upstream repository. Manual update checks explain that this fork has no configured release channel instead of directing users to install stock MonoCode. Do not supply updater overrides or fork signing/publication secrets until separately authorized.
-- Reviewed upstream through `d4cd7df` (five commits after the bootstrap); changes include Windows updater/release workflow work. They were not merged into this focused branch. Reapply/verify release guards when syncing upstream.
+- Reviewed upstream through `d4cd7df` (five commits after the bootstrap); changes include Windows updater/release workflow work. They were subsequently merged via upstream sync PR #31 and integrated into this branch; the fork release guards remain in place.
 
 ## Readiness evidence (2026-09-08)
 
