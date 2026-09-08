@@ -8,6 +8,8 @@ Priority update (2026-09-08): deliver Windows UI with WSL-hosted Git/agents, Jir
 
 Issue numbers are stable; title prefixes show delivery order. Start with #2. Hard prerequisites below allow independent work once ready. A working WSL slice can land before UI-exit durability, using the existing terminal. Jira/Azure connectors can use existing views before grouping polish. Scheduled tasks can run while the app is open before background durability is accepted.
 
+Start [#28: Windows/WSL and Jira/Azure acceptance readiness](https://github.com/kaceper11/monocode/issues/28) alongside #2. Its `[00]` prefix denotes a readiness lane, not a renumbering of the 26 feature steps. It owns test-machine/service access, safe fixture authority and reproducible handoff. Missing access blocks only the relevant live acceptance; fixtures and unrelated implementation can proceed. Readiness is not proof that a feature works.
+
 ## 01 - WSL-first foundations and core actions
 
 | Order | Work item | Hard prerequisites |
@@ -37,7 +39,7 @@ Issue numbers are stable; title prefixes show delivery order. Start with #2. Har
 | Order | Work item | Hard prerequisites |
 | --- | --- | --- |
 | 15 | [#24: Add one-shot and recurring scheduled actions](https://github.com/kaceper11/monocode/issues/24) | [#9](https://github.com/kaceper11/monocode/issues/9) |
-| 16 | [#23: Add PR, assigned-story and CI watchers with bounded actions](https://github.com/kaceper11/monocode/issues/23) | [#6](https://github.com/kaceper11/monocode/issues/6), [#7](https://github.com/kaceper11/monocode/issues/7), [#9](https://github.com/kaceper11/monocode/issues/9), [#11](https://github.com/kaceper11/monocode/issues/11), [#12](https://github.com/kaceper11/monocode/issues/12), [#13](https://github.com/kaceper11/monocode/issues/13), [#14](https://github.com/kaceper11/monocode/issues/14), [#16](https://github.com/kaceper11/monocode/issues/16) |
+| 16 | [#23: Add PR, assigned-story and CI watchers with bounded actions](https://github.com/kaceper11/monocode/issues/23) | [#6](https://github.com/kaceper11/monocode/issues/6), [#7](https://github.com/kaceper11/monocode/issues/7), [#9](https://github.com/kaceper11/monocode/issues/9); each adapter additionally requires its connector; automatic repair requires [#16](https://github.com/kaceper11/monocode/issues/16) |
 | 17 | [#21: Make agent execution durable across UI exit and reconnection](https://github.com/kaceper11/monocode/issues/21) | [#3](https://github.com/kaceper11/monocode/issues/3), [#4](https://github.com/kaceper11/monocode/issues/4), [#7](https://github.com/kaceper11/monocode/issues/7), [#22](https://github.com/kaceper11/monocode/issues/22) |
 
 ## 04 - Workspace depth and optional extensions
@@ -64,5 +66,17 @@ Issue numbers are stable; title prefixes show delivery order. Start with #2. Har
 Keep the independent provider matrix, performance requirements, source/licence guidance and upstream-merge practices in [FORK.md](FORK.md). Preserve existing GitHub/Linear capabilities while prioritizing Jira/Azure. No feature is accepted on mocks or a hosted build alone when live provider/WSL evidence is required. The final acceptance issue is a rolling checklist; useful slices can ship before the full roadmap. Optional SSH is excluded from the required gate.
 
 Scheduled tasks must expose timezone/next run, pause/resume, run history, busy-target policy, bounded execution and missed-run behavior. Provider watchers and time-based schedules are distinct triggers sharing existing actions where practical. App-open execution must not be advertised as surviving exit until the durable runtime passes its checks.
+
+## Readiness and shared ownership
+
+- #2 owns isolated development build/install instructions; #3 verifies clean-checkout checks, CI and reproducible baseline artifacts with #28's environments. Production signing/publication is not required for tester handoff.
+- #6 owns shared connection onboarding, read-only capability checks, account/credential lifecycle and explicit Windows/WSL credential ownership. Jira/Azure connectors reuse it and supply provider-specific scopes and behavior.
+- #9 owns the minimal reusable action invocation identity, status, cancellation, authority and uncertain-delivery evidence. #24 adds time triggers; #23 adds provider-event triggers; #21 extends lifetime. Reuse existing dispatch/persistence instead of creating separate job systems.
+- #22 first accepts existing local/stock capabilities on real WSL. Each later connector or feature extends that live boundary as it lands; unsupported capabilities stay explicit. Initial WSL acceptance does not wait for later review/search/terminal enhancements.
+- #23 can deliver notification/draft behavior for an available source before all adapters exist. Required remaining adapter scenarios stay open; automatic repair needs #16 and explicit authority.
+- #3 establishes and exercises the initial upstream checkpoint procedure without waiting for later features. #27 tracks the repeat after foundations and at each milestone, plus the final integrated rehearsal.
+- #13 covers existing Azure PR inspection, association and context handoff. Branch push/draft-PR creation is not promised: document the manual delivery step until an explicit publication slice is approved.
+- #19 captures a chosen browser page as an image and uses #8 to send it, with preview and optional instructions, to a fresh or existing agent session. Test actual image delivery and explicit platform fallbacks, including Windows-to-WSL attachments; do not silently drop images or substitute URLs.
+- All issues follow the architecture guidance in AGENTS.md: clear ownership and testable boundaries, DRY for genuinely shared behavior, KISS implementations and YAGNI scope. Preserve required flexibility, safety and performance without speculative frameworks.
 
 This index reflects the 2026-09-08 priority update. Keep issue dependencies and this index aligned when splitting or resequencing work. The issue bodies remain the detailed specification.

@@ -8,6 +8,10 @@ A clean, fast workspace for supervising coding work from task to review and deli
 
 Do not turn this into a plugin collection or rebuild a general-purpose IDE. Use the existing implementation where it is adequate. Optional integrations and automation should incur no recurring work until configured/enabled. Codex is the primary pilot provider; preserve other existing agent integrations and validate at least one other provider for shared lifecycle changes. Product decisions and implementation choices remain with the agent handling each bounded issue, subject to the outcomes below.
 
+Browser capture (#19) must support an explicit screenshot of the chosen page/viewport, preview and optional instructions, then attach the image through #8 to either an existing session or a fresh session with a chosen project/worktree and agent provider. Preserve URL/origin and capture-time context without automatically exposing sensitive URL parameters. Do not substitute a link for an image or silently drop it for an unsupported agent. Native capture differences need a tested explicit fallback; no silent whole-desktop capture, extra browser daemon or Electron requirement.
+
+Architecture follows DRY, KISS and YAGNI as detailed in [AGENTS.md](../AGENTS.md): clear ownership and testable boundaries, reuse of genuinely shared behavior, simple cohesive implementations, and no speculative layers. These principles must preserve the concrete mixed-provider/WSL requirements, safety and measured responsiveness. Agents choose the implementation and briefly explain consequential tradeoffs.
+
 ## Independent service bindings
 
 Delivery priority (2026-09-08): establish the first usable Windows-to-WSL workflow early, then prioritize Jira/Azure Boards tickets and Azure Repos PRs/Azure Pipelines CI. Preserve existing GitHub support, but do not require additional GitHub features or grouping/browser polish before these integrations. Implement only the runtime boundary needed by the first WSL slice; full UI-exit persistence is a later extension.
@@ -30,6 +34,10 @@ Also exercise two projects using different accounts on the same provider and col
 
 A Git remote cannot tell us the issue tracker. A PR provider cannot tell us the CI system. Bind runs/checks to the correct provider, repository, branch and commit; expose ambiguity or stale evidence rather than guessing. Credentials are account-scoped, stored through an appropriate local credential mechanism, and excluded from tracked configuration, logs, prompts, and URLs. A missing connector disables only its own capability. A configured issue provider must not be required to use local Git or agents.
 
+Shared connection onboarding, read-only capability checks, reauthentication and disconnect behavior belong to #6; connectors add their own scopes and limitations. Credential ownership must identify the host: Windows-side service access and Linux Git/agent credentials may differ. Never silently copy secrets across hosts or substitute another account. Local disconnect is not necessarily provider-side revocation.
+
+Azure PR inspection and repair handoff do not imply branch push or draft-PR creation. The first slice may use manual publication; adding in-app publication requires explicitly scoped actions and authority.
+
 ## Upstream-compatible development
 
 - Keep full upstream history; `main` is the fork's integration branch. No history replacement, permanent rebasing of shared main, or forced sync that discards fork changes.
@@ -37,6 +45,7 @@ A Git remote cannot tell us the issue tracker. A PR provider cannot tell us the 
 - Work on focused feature branches from fork main and target PRs at this fork. Add fork-owned documentation/configuration in clearly named locations and keep existing runtime changes small. Do not create an all-encompassing fork abstraction or duplicate every upstream module.
 - Upstream already has web/Rust checks and macOS/Windows/Linux CI. Reuse them. Revalidate tests, migrations, lifecycle, and the mixed-provider smoke matrix after merges.
 - Review upstream periodically and before a major feature; use an integration branch and merge the chosen upstream commit. Do not auto-resolve conflicts in favor of either side. Preserve both sets of behavior. If upstream adds our feature, converge and retire duplicate code after validation.
+- #3 establishes and exercises an initial upstream checkpoint; #27 owns repeating it after foundations and at each milestone, not just at final acceptance. Record reviewed SHAs, conflicts, checks and relevant compatibility evidence. If upstream has not advanced, record the comparison rather than inventing a sync commit. Do not hold baseline completion until later features land.
 - Keep app identity, local data, credentials, update endpoints, signing, and release authority distinct before installing a fork build alongside stock MonoCode. The first implementation issue owns this. This bootstrap publishes no tags or binaries and configures no signing or update secrets.
 - Upstream contribution policy currently pauses new coding-agent adapters. Respect that for upstream submissions. Fork ticket/PR/CI connectors are a different concern. Submit upstream fixes only when the user asks; a fork PR is not an upstream PR.
 
@@ -77,6 +86,12 @@ These are research leads inspected on 2026-09-08, not assertions that the fork i
 Diri and TUICommander use Apache-2.0 at the project level. Any source reuse requires exact-file/dependency licence checks and notices; MIT on this fork is not permission to remove third-party obligations. Waku source is not a default copy source.
 
 ## Delivery standard
+
+Start [acceptance readiness #28](https://github.com/kaceper11/monocode/issues/28) alongside implementation: identify real Windows/WSL and macOS environments, authorized Jira/Azure/GitHub resources, fixture owners, permitted test actions and secret provisioning. #2 supplies the isolated development build/install path; #3 verifies reproducible checks and baseline artifacts. Missing access blocks only the relevant live acceptance, not unrelated coding. A hosted build or ready environment does not prove a feature works; do not publish secrets or private test payloads as evidence.
+
+Accept the initial WSL slice against existing capabilities, then extend live coverage in each new connector/feature issue. Similarly, accept local app-open scheduling before service-specific schedules or durable execution. Track still-required platform/provider checks explicitly in #27 rather than creating hidden dependencies on later features.
+
+#9 owns the minimal action invocation lifecycle and bounded evidence reused by manual actions, #24 schedules, #23 watchers and #21 durability. Preserve run identity, target/host/account, authority, cancellation and uncertain dispatch across those paths; reuse existing dispatch/persistence rather than introducing separate job engines. Each watcher adapter needs its own connector; notification-only work does not wait for every connector or automatic repair.
 
 Each issue should leave a usable slice with a short explanation, appropriate tests, UI evidence where relevant, performance observations, and concrete remaining limitations. No optimistic time promises or comprehensive framework designs are required. A later agent should first inspect current upstream/fork state, decide the smallest implementation, and document only decisions that matter.
 
