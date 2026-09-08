@@ -10,6 +10,10 @@ Do not turn this into a plugin collection or rebuild a general-purpose IDE. Use 
 
 ## Independent service bindings
 
+Delivery priority (2026-09-08): establish the first usable Windows-to-WSL workflow early, then prioritize Jira/Azure Boards tickets and Azure Repos PRs/Azure Pipelines CI. Preserve existing GitHub support, but do not require additional GitHub features or grouping/browser polish before these integrations. Implement only the runtime boundary needed by the first WSL slice; full UI-exit persistence is a later extension.
+
+One-shot and recurring scheduled tasks are first-class scope alongside provider watchers, ahead of secondary workspace expansion. The first scheduler may require the app to be open and must state that clearly. Include explicit targets/instructions, timezone and next run, pause/resume, run history, busy-target policy, missed-run handling and bounded execution. Example tasks: nightly repository tests, weekday review of assigned Jira/Azure Boards stories, and scheduled Azure PR/CI checks. Reuse configurable actions; time-based scheduling must not require provider-event watchers. Durable app-closed automation is accepted separately.
+
 Each project can select its issue source(s), Git remote, PR source, CI source(s), accounts, and execution host separately. Explicit links associate a task with one or more repositories/worktrees and delivery artifacts. Issue groups may span providers and repositories; grouping must not redefine repository identity or execution ownership.
 
 Required acceptance combinations as the relevant connectors land:

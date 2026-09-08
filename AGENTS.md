@@ -8,6 +8,8 @@ Keep MonoCode's clean, compact, structured-chat-first interface and existing Tau
 
 Issue tracker, Git remote, PR provider, CI provider, and agent provider are independent choices. Never infer one from another without an explicit, visible mapping. Support mixed configurations such as GitHub issues + Azure Repos/Pipelines, Jira + Azure Repos/Pipelines, and GitHub PRs + Azure Pipelines. Preserve existing GitHub/Linear and agent behavior.
 
+Delivery priority: Windows UI with WSL-hosted Git/agents, Jira and Azure Boards tickets, and Azure Repos PRs/Azure Pipelines CI come before secondary workspace expansion. Scheduled tasks (one-shot and recurring) and provider watchers are first-class priorities. Do not make new GitHub enhancements, terminal redesign, or a full durable daemon prerequisites for an initial usable WSL/Jira/Azure slice. Clearly distinguish app-open automation from execution that survives app exit.
+
 ## Implementing an issue
 
 - Verify the current source and upstream changes first. An issue's source anchors are starting points, not instructions to edit those files blindly. If upstream already supplies a capability, integrate or verify it instead of duplicating it.
