@@ -76,5 +76,7 @@ Scheduled tasks must expose timezone/next run, pause/resume, run history, busy-t
 - #23 can deliver notification/draft behavior for an available source before all adapters exist. Required remaining adapter scenarios stay open; automatic repair needs #16 and explicit authority.
 - #3 establishes and exercises the initial upstream checkpoint procedure without waiting for later features. #27 tracks the repeat after foundations and at each milestone, plus the final integrated rehearsal.
 - #13 covers existing Azure PR inspection, association and context handoff. Branch push/draft-PR creation is not promised: document the manual delivery step until an explicit publication slice is approved.
+- #19 captures a chosen browser page as an image and uses #8 to send it, with preview and optional instructions, to a fresh or existing agent session. Test actual image delivery and explicit platform fallbacks, including Windows-to-WSL attachments; do not silently drop images or substitute URLs.
+- All issues follow the architecture guidance in AGENTS.md: clear ownership and testable boundaries, DRY for genuinely shared behavior, KISS implementations and YAGNI scope. Preserve required flexibility, safety and performance without speculative frameworks.
 
 This index reflects the 2026-09-08 priority update. Keep issue dependencies and this index aligned when splitting or resequencing work. The issue bodies remain the detailed specification.

@@ -8,6 +8,10 @@ A clean, fast workspace for supervising coding work from task to review and deli
 
 Do not turn this into a plugin collection or rebuild a general-purpose IDE. Use the existing implementation where it is adequate. Optional integrations and automation should incur no recurring work until configured/enabled. Codex is the primary pilot provider; preserve other existing agent integrations and validate at least one other provider for shared lifecycle changes. Product decisions and implementation choices remain with the agent handling each bounded issue, subject to the outcomes below.
 
+Browser capture (#19) must support an explicit screenshot of the chosen page/viewport, preview and optional instructions, then attach the image through #8 to either an existing session or a fresh session with a chosen project/worktree and agent provider. Preserve URL/origin and capture-time context without automatically exposing sensitive URL parameters. Do not substitute a link for an image or silently drop it for an unsupported agent. Native capture differences need a tested explicit fallback; no silent whole-desktop capture, extra browser daemon or Electron requirement.
+
+Architecture follows DRY, KISS and YAGNI as detailed in [AGENTS.md](../AGENTS.md): clear ownership and testable boundaries, reuse of genuinely shared behavior, simple cohesive implementations, and no speculative layers. These principles must preserve the concrete mixed-provider/WSL requirements, safety and measured responsiveness. Agents choose the implementation and briefly explain consequential tradeoffs.
+
 ## Independent service bindings
 
 Delivery priority (2026-09-08): establish the first usable Windows-to-WSL workflow early, then prioritize Jira/Azure Boards tickets and Azure Repos PRs/Azure Pipelines CI. Preserve existing GitHub support, but do not require additional GitHub features or grouping/browser polish before these integrations. Implement only the runtime boundary needed by the first WSL slice; full UI-exit persistence is a later extension.
