@@ -12,6 +12,7 @@ Delivery priority: Windows UI with WSL-hosted Git/agents, Jira and Azure Boards 
 
 ## Implementing an issue
 
+- Select actual product-development issues from the current roadmap. Fork setup, standalone benchmarking, architecture spikes and environment inventories are not prerequisite projects. Perform necessary investigation, setup, measurement and validation within the feature; preserve existing safeguards and report missing live acceptance honestly.
 - Verify the current source and upstream changes first. An issue's source anchors are starting points, not instructions to edit those files blindly. If upstream already supplies a capability, integrate or verify it instead of duplicating it.
 - The issue defines outcomes and acceptance, not a mandatory design. Choose the smallest maintainable approach that satisfies it. Reuse existing components, provider adapters, dispatch, persistence, and tests before introducing another abstraction, dependency, service, or settings surface.
 - Resolve routine implementation decisions autonomously and briefly record consequential tradeoffs in the PR. Ask only for missing product choices, credentials, or authority that the task actually requires. Do not use vague architecture uncertainty to stall an otherwise concrete slice.
