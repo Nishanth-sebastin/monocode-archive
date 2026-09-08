@@ -3,10 +3,11 @@
 Open the composer **branch picker**, then **Worktrees**. The plus action beside a
 branch opens worktree creation with that base selected. Git supplies the inventory,
 including externally created checkouts. Select an explicit local or remote-tracking
-ref, review its commit, and enter a new branch and absolute path. Remote refs are
-cached: fetch with Git and refresh explicitly. Creation does not dispatch an agent.
-Open the result in a fresh conversation when ready; a dispatch failure does not
-recreate or remove it.
+ref, review its commit, and enter a new branch name. The suggested folder can be
+changed under **Location and base commit**. **Create and open** opens a fresh
+conversation after Git confirms creation; it does not dispatch an agent. A later
+dispatch failure does not recreate or remove the worktree. Remote refs are cached:
+fetch with Git and refresh explicitly.
 
 Each conversation keeps its persisted working directory and provider session.
 Opening another worktree creates another conversation, including from an empty
