@@ -1,10 +1,10 @@
 # Product development roadmap
 
-The canonical backlog is [GitHub roadmap #1](https://github.com/kaceper11/monocode/issues/1). Read AGENTS.md and docs/FORK.md for engineering constraints. Issue numbers are stable; title prefixes now order actual product development, not setup or research.
+The canonical backlog is [GitHub roadmap #1](https://github.com/kaceper11/monocode/issues/1). Read AGENTS.md and docs/PRODUCT.md for engineering constraints. Issue numbers are stable; title prefixes now order actual product development, not setup or research.
 
 Start with **#32 worktree management**, **#6 independent provider settings**, then **#22 Windows-to-WSL execution** once its core prerequisites land. #7 agent status is independent ready product work. Continue Jira/Azure tickets and delivery, then schedules/watchers. The first WSL slice does not wait for a full daemon or terminal redesign.
 
-Each issue delivers working behavior. Research, performance measurement, tests, host-boundary decisions and credential setup are implementation steps inside that feature, not separate prerequisite projects. Preserve the current app identity and upstream history; no additional fork branding/setup work is planned.
+Each issue delivers working behavior. Research, performance measurement, tests, host-boundary decisions and credential setup are implementation steps inside that feature, not separate prerequisite projects. Preserve the current app identity and upstream history; no additional branding/setup work is planned.
 
 Ticket providers (GitHub, Azure Boards, Jira, existing Linear), Git remotes, PR providers (GitHub/Azure Repos), CI providers (Actions/Azure Pipelines) and agent accounts remain independently selectable. Preserve the compact UI and existing provider behavior.
 
@@ -64,4 +64,4 @@ Ticket providers (GitHub, Azure Boards, Jira, existing Linear), Git remotes, PR 
 
 ## Retired administrative tickets
 
-#2 (fork setup), #3 (standalone baseline), #4 (execution spike), #28 (environment inventory), and #27 (final acceptance project) are removed from the delivery queue and dependency graph. Their history remains available; closure means superseded/not planned, not that unverified checks passed. Necessary safeguards and testing remain in AGENTS.md, docs/FORK.md and each feature. No goal is activated by this roadmap update.
+#2 (repository setup), #3 (standalone baseline), #4 (execution spike), #28 (environment inventory), and #27 (final acceptance project) are removed from the delivery queue and dependency graph. Their history remains available; closure means superseded/not planned, not that unverified checks passed. Necessary safeguards and testing remain in AGENTS.md, docs/PRODUCT.md and each feature. No goal is activated by this roadmap update.

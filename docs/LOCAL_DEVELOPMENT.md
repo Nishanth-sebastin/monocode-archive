@@ -1,4 +1,4 @@
-# Local fork development
+# Local development
 
 Read AGENTS.md and the assigned issue first. The default Tauri configuration builds **MonoCode Fork**, identifier `com.kaceper11.monocode`; no special override is required. Do not override it with stock identity or stock release configuration.
 
@@ -21,19 +21,19 @@ For a compiled development binary without launching or publishing:
 npm run tauri build -- --debug --no-bundle
 ```
 
-For an unsigned/ad-hoc local macOS app bundle, use `npm run tauri build -- --bundles app`. It is written beneath `target/release/bundle/macos/MonoCode Fork.app`; open it there or copy that exact app into Applications. Windows testers can use `npm run build:windows` for the local NSIS installer, then verify its displayed fork name, install path and app-data ownership. Neither path publishes a release. A fresh build's first compile can be slow; performance measurements must use release builds, not this debug path.
+For an unsigned/ad-hoc local macOS app bundle, use `npm run tauri build -- --bundles app`. It is written beneath `target/release/bundle/macos/MonoCode Fork.app`; open it there or copy that exact app into Applications. Windows testers can use `npm run build:windows` for the local NSIS installer, then verify its displayed application name, install path and app-data ownership. Neither path publishes a release. A fresh build's first compile can be slow; performance measurements must use release builds, not this debug path.
 
-Record `git rev-parse HEAD`, tool versions, machine/OS, build command and any uncommitted changes with test evidence. Do not package secrets or a user profile in an artifact. Uninstall only the explicitly identified **MonoCode Fork** app/installer entry; retain its data by default. Delete fork data only after explicit backup/deletion approval, never the stock profile.
+Record `git rev-parse HEAD`, tool versions, machine/OS, build command and any uncommitted changes with test evidence. Do not package secrets or a user profile in an artifact. Uninstall only the explicitly identified **MonoCode Fork** app/installer entry; retain its data by default. Delete this application's data only after explicit backup/deletion approval, never the stock profile.
 
 ## Isolation audit for issue #2
 
-- Tauri's identifier owns app data/config/cache and WebView storage. The existing database, Linear token, checkpoints, notes and image storage use `app_data_dir()` and remain beneath the fork namespace without schema migration. On macOS the app data root is `~/Library/Application Support/com.kaceper11.monocode`; on Windows it is `%APPDATA%\com.kaceper11.monocode`. Verify actual runtime paths on each platform.
+- Tauri's identifier owns app data/config/cache and WebView storage. The existing database, Linear token, checkpoints, notes and image storage use `app_data_dir()` and remain beneath the application's own namespace without schema migration. On macOS the app data root is `~/Library/Application Support/com.kaceper11.monocode`; on Windows it is `%APPDATA%\com.kaceper11.monocode`. Verify actual runtime paths on each platform.
 - The custom macOS debug wrapper has a separate bundle name, plist identity and ad-hoc signing identity. Rust crate/binary and internal event names remain unchanged to minimize upstream conflicts; they are not separate installation namespaces.
 - No single-instance/deep-link plugin or URI scheme registration was found in the audited Tauri configuration/backend. Re-audit when upstream introduces these. Secondary windows reuse configured window identity.
-- Fork orphan cleanup uses its own process marker and does not reap unmarked legacy Cursor agents. Stock MonoCode's own legacy cleanup is outside this fork's control; do not claim this patch changes stock process-management behavior.
+- Application orphan cleanup uses its own process marker and does not reap unmarked legacy Cursor agents. Stock MonoCode's own legacy cleanup is outside this application's control; do not claim this patch changes stock process-management behavior.
 - Provider CLIs retain their own existing home/config/authentication mechanisms; this is not a credential sandbox for third-party CLIs. No stock app profile or credentials are copied/imported. In particular, quota refresh can use the provider's own credential store; live coexistence needs verification before claiming complete credential isolation.
-- Updater endpoints and key remain empty, updater artifact generation is off, and inherited release jobs are restricted to the upstream repository. Manual update checks explain that this fork has no configured release channel instead of directing users to install stock MonoCode. Do not supply updater overrides or fork signing/publication secrets until separately authorized.
-- Reviewed upstream through `d4cd7df` (five commits after the bootstrap); changes include Windows updater/release workflow work. They were subsequently merged via upstream sync PR #31 and integrated into this branch; the fork release guards remain in place.
+- Updater endpoints and key remain empty, updater artifact generation is off, and inherited release jobs are restricted to the upstream repository. Manual update checks explain that this build has no configured release channel instead of directing users to install stock MonoCode. Do not supply updater overrides or project signing/publication secrets until separately authorized.
+- Reviewed upstream through `d4cd7df` (five commits after the bootstrap); changes include Windows updater/release workflow work. They were subsequently merged via upstream sync PR #31 and integrated into this branch; the release guards remain in place.
 
 ## Readiness evidence (2026-09-08)
 

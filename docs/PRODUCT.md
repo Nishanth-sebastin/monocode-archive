@@ -1,6 +1,6 @@
-# MonoCode fork: product and maintenance contract
+# MonoCode product direction
 
-This is [kaceper11/monocode](https://github.com/kaceper11/monocode), a normal GitHub fork of [hardbeat920/monocode](https://github.com/hardbeat920/monocode). Initial baseline: `537ca054a215a18ece577827090e1a330fd45bad` (upstream 0.1.38), inspected 2026-09-08. Bootstrap adds guidance and a backlog only; it does not implement the planned capabilities or certify upstream performance.
+This repository is [kaceper11/monocode](https://github.com/kaceper11/monocode), based on [upstream MonoCode](https://github.com/hardbeat920/monocode). Preserve its MIT licence, attribution and Git history while developing the product described below.
 
 ## What we are building
 
@@ -40,16 +40,16 @@ Azure PR inspection and repair handoff do not imply branch push or draft-PR crea
 
 ## Upstream-compatible development
 
-- Keep full upstream history; `main` is the fork's integration branch. No history replacement, permanent rebasing of shared main, or forced sync that discards fork changes.
-- `origin` means this fork; `upstream` means hardbeat920/monocode. The initial local checkout sets `remote.pushDefault=origin`, `push.default=simple`, and a disabled upstream push URL. These settings are local and must be repeated in fresh clones when desired.
-- Work on focused feature branches from fork main and target PRs at this fork. Add fork-owned documentation/configuration in clearly named locations and keep existing runtime changes small. Do not create an all-encompassing fork abstraction or duplicate every upstream module.
+- Keep full upstream history; `main` is the integration branch. No history replacement, permanent rebasing of shared main, or forced sync that discards our changes.
+- `origin` means kaceper11/monocode; `upstream` means hardbeat920/monocode. The initial local checkout sets `remote.pushDefault=origin`, `push.default=simple`, and a disabled upstream push URL. These settings are local and must be repeated in fresh clones when desired.
+- Work on focused feature branches from this repository's main and target PRs at kaceper11/monocode. Add project-specific documentation/configuration in clearly named locations and keep existing runtime changes small. Do not create an all-encompassing compatibility layer or duplicate every upstream module.
 - Upstream already has web/Rust checks and macOS/Windows/Linux CI. Reuse them. Revalidate tests, migrations, lifecycle, and the mixed-provider smoke matrix after merges.
 - Review upstream periodically and before a major feature; use an integration branch and merge the chosen upstream commit. Do not auto-resolve conflicts in favor of either side. Preserve both sets of behavior. If upstream adds our feature, converge and retire duplicate code after validation.
 - Check relevant upstream overlap as part of each feature and normal maintenance; record selected SHAs, conflicts and compatibility evidence when syncing. This is not a separate prerequisite project or reason to delay product work.
-- Preserve the app identity, data and disabled-release safeguards already introduced by PR #30. No further fork branding/setup project is on the delivery roadmap; concrete regressions should be fixed as bounded bugs. Publication remains separately authorized.
-- Upstream contribution policy currently pauses new coding-agent adapters. Respect that for upstream submissions. Fork ticket/PR/CI connectors are a different concern. Submit upstream fixes only when the user asks; a fork PR is not an upstream PR.
+- Preserve the app identity, data and disabled-release safeguards already introduced by PR #30. No further branding/setup project is on the delivery roadmap; concrete regressions should be fixed as bounded bugs. Publication remains separately authorized.
+- Upstream contribution policy currently pauses new coding-agent adapters. Respect that for upstream submissions. Our ticket/PR/CI connectors are a different concern. Submit upstream fixes only when the user asks; a PR to this repository is not an upstream submission.
 
-Example maintenance flow (run from the fork; choose a fresh branch name and review the fetched target):
+Example maintenance flow (run from this repository; choose a fresh branch name and review the fetched target):
 
 ```sh
 git fetch upstream main
@@ -74,7 +74,7 @@ Features must not create one recursive watcher/poller per view, repeatedly scan 
 
 ## Reference patterns, not a second codebase
 
-These are research leads inspected on 2026-09-08, not assertions that the fork implements them. Recheck current source and exact licences when implementing.
+These are research leads inspected on 2026-09-08, not assertions that this application implements them. Recheck current source and exact licences when implementing.
 
 | Reference | Useful behavior to evaluate | Apply selectively |
 | --- | --- | --- |
@@ -83,7 +83,7 @@ These are research leads inspected on 2026-09-08, not assertions that the fork i
 | [Waku](https://github.com/egoist/waku), [product](https://waku.sh) | Structured provider events, queue versus steer, conversation-aware checkpoints, daemon/client boundary, contextual browser | GPL-3.0-only: independently implement behavior; browser/platform claims require explicit verification |
 | [TUICommander feature inventory](https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md) | Repository groups, smart prompts, PR/CI feedback, watchers, schedules, shared Git watching, terminal observability | Inspect current implementation and feature maturity; do not replicate its whole settings/plugin system |
 
-Diri and TUICommander use Apache-2.0 at the project level. Any source reuse requires exact-file/dependency licence checks and notices; MIT on this fork is not permission to remove third-party obligations. Waku source is not a default copy source.
+Diri and TUICommander use Apache-2.0 at the project level. Any source reuse requires exact-file/dependency licence checks and notices; MIT on this project is not permission to remove third-party obligations. Waku source is not a default copy source.
 
 ## Delivery standard
 
@@ -97,6 +97,6 @@ Accept the initial WSL slice against existing capabilities, then extend live cov
 
 #9 owns the minimal action invocation lifecycle and bounded evidence reused by manual actions, #24 schedules, #23 watchers and #21 durability. Preserve run identity, target/host/account, authority, cancellation and uncertain dispatch across those paths; reuse existing dispatch/persistence rather than introducing separate job engines. Each watcher adapter needs its own connector; notification-only work does not wait for every connector or automatic repair.
 
-Each issue should leave a usable slice with a short explanation, appropriate tests, UI evidence where relevant, performance observations, and concrete remaining limitations. No optimistic time promises or comprehensive framework designs are required. A later agent should first inspect current upstream/fork state, decide the smallest implementation, and document only decisions that matter.
+Each issue should leave a usable slice with a short explanation, appropriate tests, UI evidence where relevant, performance observations, and concrete remaining limitations. No optimistic time promises or comprehensive framework designs are required. A later agent should first inspect current upstream and local state, decide the smallest implementation, and document only decisions that matter.
 
 Roadmap order is a default sequence, not an instruction to build every feature immediately. Hard dependencies are stated per issue; independent later work can proceed when its prerequisites are met. Publication, live service writes, scheduled autonomous repairs, and remote access are separate capabilities with visible user intent and bounded execution.
