@@ -727,7 +727,7 @@ const KILL_ESCALATE: Duration = Duration::from_secs(2);
 const KILL_ALL_GRACE: Duration = Duration::from_millis(300);
 #[cfg(not(windows))]
 const KILL_ALL_KILL_WAIT: Duration = Duration::from_millis(150);
-const HARNESS_PARENT_ENV: &str = "MONOCODE_HARNESS_PARENT";
+const HARNESS_PARENT_ENV: &str = "MONOCODE_FORK_HARNESS_PARENT";
 
 /// An interactive shell has to source the user's whole rc file; nvm alone can
 /// take a second.
@@ -957,7 +957,9 @@ fn should_reap_process(
     if let Some(parent) = proc.harness_parent {
         return looks_like_harness_argv(&proc.args) && parent != our_pid && !parent_alive(parent);
     }
-    proc.ppid == 1 && is_legacy_orphaned_cursor_acp(&proc.args)
+    // Unmarked agents may belong to stock MonoCode or another application.
+    // A fork must never infer ownership from executable name alone.
+    false
 }
 
 /// Pre-marker leftovers: `cursor-agent acp` reparented to launchd.
@@ -2548,7 +2550,7 @@ mod reap_logic_tests {
     #[test]
     fn parse_ps_row_reads_harness_parent_from_env_tail() {
         let parsed = parse_ps_row(
-            " 27129 21504 /Users/n/cursor-agent acp PATH=/usr/bin MONOCODE_HARNESS_PARENT=21504 HOME=/tmp",
+            " 27129 21504 /Users/n/cursor-agent acp PATH=/usr/bin MONOCODE_FORK_HARNESS_PARENT=21504 HOME=/tmp",
         )
         .unwrap();
         assert_eq!(parsed.pid, 27129);
@@ -2633,7 +2635,7 @@ mod reap_logic_tests {
     #[test]
     fn parse_ps_pid_command_does_not_treat_the_binary_as_ppid() {
         let (pid, command) = parse_ps_pid_command(
-            " 27129 /Users/n/cursor-agent acp PATH=/usr/bin MONOCODE_HARNESS_PARENT=21504 HOME=/tmp",
+            " 27129 /Users/n/cursor-agent acp PATH=/usr/bin MONOCODE_FORK_HARNESS_PARENT=21504 HOME=/tmp",
         )
         .unwrap();
         assert_eq!(pid, 27129);
@@ -2641,12 +2643,20 @@ mod reap_logic_tests {
     }
 
     #[test]
-    fn should_reap_legacy_cursor_acp_orphaned_to_launchd() {
+    fn should_not_reap_unowned_cursor_acp_orphaned_to_launchd() {
         let args = "/Users/n/.local/bin/cursor-agent --use-system-ca /Users/n/index.js acp";
-        assert!(should_reap_process(&row(10, 1, args, None), 42, |_| false));
+        assert!(!should_reap_process(&row(10, 1, args, None), 42, |_| false));
         assert!(!should_reap_process(&row(10, 42, args, None), 42, |_| true));
         assert!(!is_legacy_orphaned_cursor_acp(
             "node /usr/local/bin/typescript-language-server --stdio"
         ));
+    }
+
+    #[test]
+    fn stock_harness_marker_does_not_establish_fork_ownership() {
+        let proc = parse_ps_row(" 27129 1 /Users/n/cursor-agent acp MONOCODE_HARNESS_PARENT=21504")
+            .unwrap();
+        assert_eq!(proc.harness_parent, None);
+        assert!(!should_reap_process(&proc, 42, |_| false));
     }
 }

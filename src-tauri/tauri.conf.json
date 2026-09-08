@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MonoCode",
+  "productName": "MonoCode Fork",
   "version": "0.1.39",
-  "identifier": "com.monocode.desktop",
+  "identifier": "com.kaceper11.monocode",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "MonoCode",
+        "title": "MonoCode Fork",
         "width": 1280,
         "height": 800,
         "minWidth": 800,
@@ -40,7 +40,7 @@
     }
   },
   "bundle": {
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "active": true,
     "targets": "all",
     "icon": [

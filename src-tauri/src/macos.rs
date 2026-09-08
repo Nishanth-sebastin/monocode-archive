@@ -540,7 +540,7 @@ fn relaunch_from_dev_bundle() -> Result<(), String> {
     let app = exe
         .parent()
         .ok_or("missing exe parent")?
-        .join("MonoCode.app");
+        .join("MonoCode Fork.app");
     let macos_dir = app.join("Contents/MacOS");
     std::fs::create_dir_all(&macos_dir).map_err(|e| e.to_string())?;
     write_dev_bundle_icons(&app)?;
@@ -590,7 +590,7 @@ fn write_dev_bundle_icons(app: &std::path::Path) -> Result<(), String> {
 
 /// Must match `CFBundleIdentifier` in `DEV_BUNDLE_PLIST` and tauri.conf.json.
 #[cfg(debug_assertions)]
-const DEV_BUNDLE_ID: &str = "com.monocode.desktop";
+const DEV_BUNDLE_ID: &str = "com.kaceper11.monocode";
 #[cfg(debug_assertions)]
 const DEV_ICNS: &[u8] = include_bytes!("../icons/icon.icns");
 #[cfg(debug_assertions)]
@@ -603,7 +603,7 @@ const DEV_BUNDLE_PLIST: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>MonoCode</string>
+	<string>MonoCode Fork</string>
 	<key>CFBundleExecutable</key>
 	<string>monocode</string>
 	<key>CFBundleIconFile</key>
@@ -611,11 +611,11 @@ const DEV_BUNDLE_PLIST: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.monocode.desktop</string>
+	<string>com.kaceper11.monocode</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>MonoCode</string>
+	<string>MonoCode Fork</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
