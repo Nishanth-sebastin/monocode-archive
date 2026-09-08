@@ -1,3 +1,5 @@
+mod bounded_process;
+mod wsl;
 use tauri::Manager;
 
 mod chat_background;
@@ -195,6 +197,9 @@ pub fn run() {
             menu::dispatch(app, event.id().as_ref());
         })
         .invoke_handler(tauri::generate_handler![
+            wsl::wsl_distributions,
+            wsl::wsl_connect,
+            wsl::wsl_connected,
             default_cwd,
             home_dir,
             notifications::notification_permission,
