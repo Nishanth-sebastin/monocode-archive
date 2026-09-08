@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Modal } from "./Modal";
 import { notifyGitChanged } from "../lib/fs";
 
 type Worktree = {
@@ -15,48 +14,23 @@ type Worktree = {
 };
 type Ref = { name: string; commit: string };
 
-export function WorktreePicker({
-  cwd,
-  onOpen,
-}: {
-  cwd: string;
-  onOpen: (path: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button
-        type="button"
-        className="text-[11px] text-content/50 hover:text-content"
-        disabled={!cwd || cwd === "~"}
-        onClick={() => setOpen(true)}
-        title={`Local worktree: ${cwd}`}
-      >
-        Worktrees
-      </button>
-      {open && (
-        <WorktreeDialog
-          cwd={cwd}
-          onClose={() => setOpen(false)}
-          onOpen={onOpen}
-        />
-      )}
-    </>
-  );
-}
-
-function WorktreeDialog({
+export function WorktreePanel({
   cwd,
   onClose,
   onOpen,
+  onBusyChange,
+  initialBase = "",
 }: {
   cwd: string;
   onClose: () => void;
   onOpen: (path: string) => void;
+  onBusyChange: (busy: boolean) => void;
+  initialBase?: string;
 }) {
   const [entries, setEntries] = useState<Worktree[]>([]);
   const [refs, setRefs] = useState<Ref[]>([]);
-  const [base, setBase] = useState("");
+  const [base, setBase] = useState(initialBase);
+  const [creating, setCreating] = useState(Boolean(initialBase));
   const [branch, setBranch] = useState("");
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState(false);
@@ -79,6 +53,7 @@ function WorktreeDialog({
     if (pending.current) return;
     pending.current = true;
     setBusy(true);
+    onBusyChange(true);
     setError("");
     try {
       await work();
@@ -92,6 +67,7 @@ function WorktreeDialog({
       }
       pending.current = false;
       setBusy(false);
+      onBusyChange(false);
     }
   };
   useEffect(() => {
@@ -100,18 +76,17 @@ function WorktreeDialog({
   const inputClass =
     "w-full rounded border border-content/15 bg-background-base px-2 py-1.5 text-[12px]";
   return (
-    <Modal
-      title="Worktrees"
-      description={`Local · ${cwd}`}
-      size="md"
-      onClose={() => {
-        if (!pending.current) onClose();
-      }}
+    <div
+      className="min-h-0 overflow-y-auto overscroll-contain p-3 text-[12px]"
+      aria-busy={busy}
     >
-      <div className="flex flex-col gap-3 p-4 text-[12px]" aria-busy={busy}>
+      <div className="flex flex-col gap-2">
+        <p className="truncate text-content/50" title={cwd}>
+          Local · {cwd}
+        </p>
         <p className="text-content/60">
-          Open in a fresh conversation. Existing chats and terminals keep their
-          checkout. Archiving or deleting a chat leaves Git untouched.
+          Open a fresh conversation; existing chats and terminals keep their
+          checkout.
         </p>
         <button
           type="button"
@@ -237,78 +212,88 @@ function WorktreeDialog({
             </div>
           </section>
         )}
-        <fieldset
+        <button
+          type="button"
           disabled={busy}
-          className="flex flex-col gap-2 border-t border-content/10 pt-3"
+          className="self-start underline"
+          onClick={() => setCreating(!creating)}
         >
-          <legend>Create isolated worktree</legend>
-          <label>
-            Base branch
-            <select
-              className={inputClass}
-              value={base}
-              onChange={(e) => setBase(e.target.value)}
-            >
-              <option value="">Choose a local or remote-tracking ref</option>
-              {refs.map((ref) => (
-                <option key={ref.name} value={ref.name}>
-                  {ref.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {selected && (
-            <p className="break-all font-mono text-content/60">
-              Commit {selected.commit}
-            </p>
-          )}
-          <p className="text-content/50">
-            Remote-tracking refs use the local cache. Fetch explicitly with Git,
-            then refresh here.
-          </p>
-          <label>
-            New branch
-            <input
-              className={inputClass}
-              value={branch}
-              placeholder="task/my-change"
-              onChange={(e) => {
-                setBranch(e.target.value);
-                if (!path || path === `${cwd}-${branch.replace(/\//g, "-")}`)
-                  setPath(`${cwd}-${e.target.value.replace(/\//g, "-")}`);
-              }}
-            />
-          </label>
-          <label>
-            New absolute path
-            <input
-              className={inputClass}
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-            />
-          </label>
-          <button
-            type="button"
-            disabled={!selected || !branch || !path}
-            className="rounded bg-content/10 px-3 py-2 disabled:opacity-40"
-            onClick={() =>
-              void run(async () => {
-                await invoke<string>("git_worktree_create", {
-                  cwd,
-                  base,
-                  commit: selected!.commit,
-                  branch,
-                  path,
-                });
-                notifyGitChanged();
-                setBranch("");
-                setPath("");
-              })
-            }
+          {creating ? "Cancel creation" : "New worktree…"}
+        </button>
+        {creating && (
+          <fieldset
+            disabled={busy}
+            className="flex flex-col gap-2 border-t border-content/10 pt-3"
           >
-            Create worktree
-          </button>
-        </fieldset>
+            <legend>Create isolated worktree</legend>
+            <label>
+              Base branch
+              <select
+                className={inputClass}
+                value={base}
+                onChange={(e) => setBase(e.target.value)}
+              >
+                <option value="">Choose a local or remote-tracking ref</option>
+                {refs.map((ref) => (
+                  <option key={ref.name} value={ref.name}>
+                    {ref.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selected && (
+              <p className="break-all font-mono text-content/60">
+                Commit {selected.commit}
+              </p>
+            )}
+            <p className="text-content/50">
+              Remote-tracking refs use the local cache. Fetch explicitly with
+              Git, then refresh here.
+            </p>
+            <label>
+              New branch
+              <input
+                className={inputClass}
+                value={branch}
+                placeholder="task/my-change"
+                onChange={(e) => {
+                  setBranch(e.target.value);
+                  if (!path || path === `${cwd}-${branch.replace(/\//g, "-")}`)
+                    setPath(`${cwd}-${e.target.value.replace(/\//g, "-")}`);
+                }}
+              />
+            </label>
+            <label>
+              New absolute path
+              <input
+                className={inputClass}
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={!selected || !branch || !path}
+              className="rounded bg-content/10 px-3 py-2 disabled:opacity-40"
+              onClick={() =>
+                void run(async () => {
+                  await invoke<string>("git_worktree_create", {
+                    cwd,
+                    base,
+                    commit: selected!.commit,
+                    branch,
+                    path,
+                  });
+                  notifyGitChanged();
+                  setBranch("");
+                  setPath("");
+                })
+              }
+            >
+              Create worktree
+            </button>
+          </fieldset>
+        )}
         <p className="text-content/50">
           Creation and opening a conversation are separate steps. Refresh after
           an error before retrying. Close cancels before creation; once started,
@@ -323,6 +308,6 @@ function WorktreeDialog({
           </p>
         )}
       </div>
-    </Modal>
+    </div>
   );
 }

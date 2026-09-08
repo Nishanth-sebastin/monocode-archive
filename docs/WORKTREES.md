@@ -1,6 +1,7 @@
 # Local worktrees
 
-Open **Worktrees** beside the composer branch controls. Git supplies the inventory,
+Open the composer **branch picker**, then **Worktrees**. The plus action beside a
+branch opens worktree creation with that base selected. Git supplies the inventory,
 including externally created checkouts. Select an explicit local or remote-tracking
 ref, review its commit, and enter a new branch and absolute path. Remote refs are
 cached: fetch with Git and refresh explicitly. Creation does not dispatch an agent.

@@ -1,4 +1,4 @@
-use super::{expand_home, git_cmd, path_to_js};
+use super::{expand_home, git_cmd};
 use serde::Serialize;
 use std::io::Read;
 use std::path::Path;
@@ -9,6 +9,18 @@ use tauri::{Manager, State};
 
 // Serializes removal against process startup, not against running agents.
 pub(crate) static LIFECYCLE: RwLock<()> = RwLock::new(());
+
+fn path_to_js(path: &Path) -> String {
+    let text = super::path_to_js(path);
+    // Rust canonicalization uses extended Windows paths; Git's inventory does not.
+    if cfg!(windows) {
+        if let Some(unc) = text.strip_prefix("//?/UNC/") {
+            return format!("//{unc}");
+        }
+        return text.strip_prefix("//?/").unwrap_or(&text).to_owned();
+    }
+    text
+}
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,7 +40,7 @@ pub struct Worktree {
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let mut child = git_cmd()
         .arg("-C")
-        .arg(root)
+        .arg(path_to_js(root))
         .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")

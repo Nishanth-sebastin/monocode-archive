@@ -89,7 +89,6 @@ import { ComposerRunner } from "./ComposerRunner";
 import { ContextMeter } from "./ContextMeter";
 import { AttachmentChip } from "./AttachmentChip";
 import { BranchPicker } from "./BranchPicker";
-import { WorktreePicker } from "./WorktreePicker";
 import { CwdPicker } from "./CwdPicker";
 import { FileMentionPicker } from "./FileMentionPicker";
 import { FileTypeIcon } from "./FileTypeIcon";
@@ -1181,11 +1180,11 @@ export function Composer({
                   branch={branch}
                   enabled={enabled && !busy}
                   onChange={onBranchChange}
+                  onOpenWorktree={(path) => onCwdChange(path, true)}
                   onClose={() => ref.current?.focus()}
                 />
               )}
               <div className="ml-auto flex shrink-0 items-center">
-                {!hideBranchPicker && <WorktreePicker cwd={cwd} onOpen={(path) => onCwdChange(path, true)} />}
                 <ContextMeter
                   usage={context}
                   onCompact={compactSupported ? onCompactContext : undefined}

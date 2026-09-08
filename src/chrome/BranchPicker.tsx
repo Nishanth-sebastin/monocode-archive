@@ -19,6 +19,7 @@ import {
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useProjectBranchesState } from "../hooks/useProjectBranches";
 import { Popover } from "./Popover";
+import { WorktreePanel } from "./WorktreePicker";
 import { SwitchBranchDialog } from "./SwitchBranchDialog";
 
 type Props = {
@@ -26,14 +27,14 @@ type Props = {
   branch?: string;
   enabled?: boolean;
   onChange?: () => void;
+  onOpenWorktree?: (path: string) => void;
   onClose?: () => void;
 };
 
 const MENU_WIDTH = 280;
 
 type Row =
-  | { kind: "create"; name: string }
-  | { kind: "branch"; branch: GitBranchInfo };
+  { kind: "create"; name: string } | { kind: "branch"; branch: GitBranchInfo };
 
 type PendingSwitch =
   | { kind: "create"; name: string }
@@ -47,9 +48,12 @@ export function BranchPicker({
   branch,
   enabled = true,
   onChange,
+  onOpenWorktree,
   onClose,
 }: Props) {
   const [open, setOpen] = useState(false);
+  const [worktrees, setWorktrees] = useState(false);
+  const [worktreeBase, setWorktreeBase] = useState("");
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -60,6 +64,7 @@ export function BranchPicker({
     null,
   );
   const root = useRef<HTMLDivElement>(null);
+  const worktreeBusy = useRef(false);
   const search = useRef<HTMLInputElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -74,7 +79,10 @@ export function BranchPicker({
   const detached = !branch && !!projectBranches?.detached;
 
   const dismiss = (restore: boolean) => {
+    if (worktreeBusy.current) return;
     setOpen(false);
+    setWorktrees(false);
+    setWorktreeBase("");
     setQuery("");
     setError(null);
     setBusy(false);
@@ -89,7 +97,7 @@ export function BranchPicker({
     setQuery("");
     setError(null);
     setActive(0);
-  }, [open]);
+  }, [open, worktrees]);
 
   useEffect(() => {
     if (open) search.current?.focus();
@@ -122,8 +130,7 @@ export function BranchPicker({
       (entry) => !entry.remote && entry.name === name,
     );
     const selected = branch || projectBranches?.current;
-    const create: Row[] =
-      name && !taken ? [{ kind: "create", name }] : [];
+    const create: Row[] = name && !taken ? [{ kind: "create", name }] : [];
     return [
       ...create,
       ...filtered.map((entry) => ({
@@ -330,50 +337,107 @@ export function BranchPicker({
           <Popover
             anchor={root}
             side="top"
-            width={MENU_WIDTH}
+            width={worktrees ? 440 : MENU_WIDTH}
             minHeight={MENU_MIN_HEIGHT}
-            maxHeight={MENU_MAX_HEIGHT}
+            maxHeight={worktrees ? 580 : MENU_MAX_HEIGHT}
             onDismiss={(reason) => dismiss(reason === "escape")}
             role="dialog"
             aria-label="Branch picker"
             data-branch-picker
             className="flex flex-col overflow-hidden"
           >
-            <label className="flex shrink-0 items-center gap-2 border-b border-content/10 px-2 py-2.5 text-content/50">
-              <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
-              <input
-                ref={search}
-                type="text"
-                value={query}
-                placeholder="Search or create a branch..."
-                aria-label="Search or create a branch"
-                spellCheck={false}
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                disabled={busy}
-                className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40 disabled:opacity-60"
-                onChange={(e) => {
-                  setQuery(e.target.value);
-                  setActive(0);
-                  setError(null);
+            {onOpenWorktree && (
+              <div
+                className="flex shrink-0 gap-3 border-b border-content/10 px-3 py-2 text-[12px]"
+                aria-label="Branch management views"
+              >
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-pressed={!worktrees}
+                  className={!worktrees ? "text-content" : "text-content/50"}
+                  onClick={() => setWorktrees(false)}
+                >
+                  Branches
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-pressed={worktrees}
+                  className={worktrees ? "text-content" : "text-content/50"}
+                  onClick={() => {
+                    setWorktreeBase("");
+                    setWorktrees(true);
+                  }}
+                >
+                  Worktrees
+                </button>
+              </div>
+            )}
+            {worktrees && onOpenWorktree ? (
+              <WorktreePanel
+                cwd={cwd}
+                initialBase={worktreeBase}
+                onBusyChange={(value) => {
+                  worktreeBusy.current = value;
+                  setBusy(value);
                 }}
-                onKeyDown={onSearchKey}
+                onOpen={onOpenWorktree}
+                onClose={() => dismiss(true)}
               />
-            </label>
-            <BranchList
-              rows={rows}
-              active={active}
-              busy={busy}
-              emptyLabel={query.trim() ? "No matching branches" : "No branches"}
-              onActive={setActive}
-              onPick={pick}
-            />
-            {error ? (
-              <p className="max-h-16 shrink-0 overflow-y-auto whitespace-pre-wrap border-t border-content/10 px-2.5 py-2 text-[11px] leading-4 text-red-400/90">
-                {error}
-              </p>
-            ) : null}
+            ) : (
+              <>
+                <label className="flex shrink-0 items-center gap-2 border-b border-content/10 px-2 py-2.5 text-content/50">
+                  <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
+                  <input
+                    ref={search}
+                    type="text"
+                    value={query}
+                    placeholder="Search or create a branch..."
+                    aria-label="Search or create a branch"
+                    spellCheck={false}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    disabled={busy}
+                    className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40 disabled:opacity-60"
+                    onChange={(e) => {
+                      setQuery(e.target.value);
+                      setActive(0);
+                      setError(null);
+                    }}
+                    onKeyDown={onSearchKey}
+                  />
+                </label>
+                <BranchList
+                  rows={rows}
+                  active={active}
+                  busy={busy}
+                  emptyLabel={
+                    query.trim() ? "No matching branches" : "No branches"
+                  }
+                  onActive={setActive}
+                  onPick={pick}
+                  onCreateWorktree={
+                    onOpenWorktree
+                      ? (entry) => {
+                          setWorktreeBase(
+                            entry.remote
+                              ? `refs/remotes/${entry.remote}/${entry.name}`
+                              : `refs/heads/${entry.name}`,
+                          );
+                          setWorktrees(true);
+                        }
+                      : undefined
+                  }
+                />
+                {error ? (
+                  <p className="max-h-16 shrink-0 overflow-y-auto whitespace-pre-wrap border-t border-content/10 px-2.5 py-2 text-[11px] leading-4 text-red-400/90">
+                    {error}
+                  </p>
+                ) : null}
+              </>
+            )}
           </Popover>
         ) : null}
       </div>
@@ -388,6 +452,7 @@ function BranchList({
   emptyLabel,
   onActive,
   onPick,
+  onCreateWorktree,
 }: {
   rows: Row[];
   active: number;
@@ -395,6 +460,7 @@ function BranchList({
   emptyLabel: string;
   onActive: (index: number) => void;
   onPick: (row: Row) => void;
+  onCreateWorktree?: (entry: GitBranchInfo) => void;
 }) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const activeRef = useRef<HTMLButtonElement>(null);
@@ -412,7 +478,7 @@ function BranchList({
   return (
     <div
       ref={lockOverscroll}
-      role="listbox"
+      role="group"
       aria-label="Branches"
       className="min-h-0 flex-1 overflow-y-auto overscroll-none px-1.5 py-1.5"
     >
@@ -420,62 +486,77 @@ function BranchList({
         const highlighted = index === active;
         const selected = row.kind === "branch" && row.branch.current;
         return (
-          <button
+          <div
+            className="flex items-center gap-1"
             key={
               row.kind === "create"
                 ? `create:${row.name}`
                 : `${row.branch.remote ?? "local"}:${row.branch.name}`
             }
-            ref={highlighted ? activeRef : undefined}
-            type="button"
-            role="option"
-            aria-selected={selected}
-            disabled={busy}
-            onMouseDown={(e) => e.preventDefault()}
-            onMouseEnter={() => onActive(index)}
-            onClick={() => onPick(row)}
-            className={
-              row.kind === "create"
-                ? `mb-1 flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left disabled:opacity-60 ${
-                    highlighted
-                      ? "bg-content/15 text-content"
-                      : "bg-content/10 text-content hover:bg-content/15"
-                  }`
-                : `flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left disabled:opacity-60 ${
-                    highlighted || selected
-                      ? "bg-content/10 text-content"
-                      : "text-content hover:bg-content/5"
-                  }`
-            }
           >
-            {row.kind === "create" ? (
-              <>
-                <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
-                <span className="min-w-0 truncate text-[12px]">
-                  Create and checkout {row.name}
-                </span>
-              </>
-            ) : (
-              <>
-                {selected ? (
-                  <Check className="size-3.5 shrink-0" strokeWidth={1.75} />
-                ) : (
-                  <GitBranch
-                    className="size-3.5 shrink-0 text-content/50"
-                    strokeWidth={1.75}
-                  />
-                )}
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
-                  {row.branch.name}
-                </span>
-                {row.branch.remote ? (
-                  <span className="shrink-0 text-[10px] text-content/40">
-                    {row.branch.remote}
+            <button
+              ref={highlighted ? activeRef : undefined}
+              type="button"
+              aria-pressed={selected}
+              disabled={busy}
+              onMouseDown={(e) => e.preventDefault()}
+              onMouseEnter={() => onActive(index)}
+              onClick={() => onPick(row)}
+              className={
+                row.kind === "create"
+                  ? `mb-1 flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left disabled:opacity-60 ${
+                      highlighted
+                        ? "bg-content/15 text-content"
+                        : "bg-content/10 text-content hover:bg-content/15"
+                    }`
+                  : `flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left disabled:opacity-60 ${
+                      highlighted || selected
+                        ? "bg-content/10 text-content"
+                        : "text-content hover:bg-content/5"
+                    }`
+              }
+            >
+              {row.kind === "create" ? (
+                <>
+                  <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
+                  <span className="min-w-0 truncate text-[12px]">
+                    Create and checkout {row.name}
                   </span>
-                ) : null}
-              </>
+                </>
+              ) : (
+                <>
+                  {selected ? (
+                    <Check className="size-3.5 shrink-0" strokeWidth={1.75} />
+                  ) : (
+                    <GitBranch
+                      className="size-3.5 shrink-0 text-content/50"
+                      strokeWidth={1.75}
+                    />
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
+                    {row.branch.name}
+                  </span>
+                  {row.branch.remote ? (
+                    <span className="shrink-0 text-[10px] text-content/40">
+                      {row.branch.remote}
+                    </span>
+                  ) : null}
+                </>
+              )}
+            </button>
+            {row.kind === "branch" && onCreateWorktree && (
+              <button
+                type="button"
+                disabled={busy}
+                title={`Create worktree from ${row.branch.remote ? row.branch.remote + "/" : ""}${row.branch.name}`}
+                aria-label={`Create worktree from ${row.branch.remote ? row.branch.remote + "/" : ""}${row.branch.name}`}
+                className="shrink-0 rounded p-1 text-content/50 hover:bg-content/10 hover:text-content disabled:opacity-40"
+                onClick={() => onCreateWorktree(row.branch)}
+              >
+                <Plus className="size-3.5" />
+              </button>
             )}
-          </button>
+          </div>
         );
       })}
     </div>
