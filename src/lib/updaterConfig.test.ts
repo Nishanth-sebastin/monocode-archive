@@ -32,7 +32,7 @@ describe("updater", () => {
     expect(message).not.toHaveBeenCalled();
   });
 
-  it("points manual checks without updater endpoints to GitHub releases", async () => {
+  it("explains the disabled fork channel without directing users to stock releases", async () => {
     getVersion.mockResolvedValue("0.1.23");
     check.mockRejectedValue(new Error("Updater does not have any endpoints set"));
 
@@ -41,8 +41,8 @@ describe("updater", () => {
       currentVersion: "0.1.23",
     });
     expect(message).toHaveBeenCalledWith(
-      expect.stringContaining("https://github.com/hardbeat920/monocode/releases/latest"),
-      { title: "MonoCode" },
+      expect.stringContaining("Automatic updates are disabled for MonoCode Fork"),
+      { title: "MonoCode Fork" },
     );
   });
 

@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   release:
+    # Preserve upstream workflow for merges; this fork has no release authority.
+    if: github.repository == 'hardbeat920/monocode'
     needs: [linux, windows]
     runs-on: macos-latest
     steps:
@@ -198,6 +200,7 @@ jobs:
             "$DMG" "$TAR" "$SIG" "${DEB[0]}" "${APPIMAGE[0]}" "${NSIS[0]}"
 
   linux:
+    if: github.repository == 'hardbeat920/monocode'
     name: Linux packages
     runs-on: ubuntu-22.04
     steps:
@@ -239,6 +242,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    if: github.repository == 'hardbeat920/monocode'
     name: Windows packages
     runs-on: windows-latest
     steps:

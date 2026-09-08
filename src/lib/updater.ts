@@ -90,8 +90,8 @@ export async function runUpdateFlow(
       onProgress?.(idle);
       if (manual) {
         await message(
-          "Automatic updates aren't configured for this build.\n\nDownload releases at https://github.com/hardbeat920/monocode/releases/latest",
-          { title: "MonoCode" },
+          "Automatic updates are disabled for MonoCode Fork. No fork release channel has been configured; use the fork's documented development build instructions.",
+          { title: "MonoCode Fork" },
         );
       }
       return idle;

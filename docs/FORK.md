@@ -87,6 +87,8 @@ Diri and TUICommander use Apache-2.0 at the project level. Any source reuse requ
 
 ## Delivery standard
 
+Use [local development instructions and isolation audit](LOCAL_DEVELOPMENT.md) for setup, build commands and the current platform verification limits.
+
 Start [acceptance readiness #28](https://github.com/kaceper11/monocode/issues/28) alongside implementation: identify real Windows/WSL and macOS environments, authorized Jira/Azure/GitHub resources, fixture owners, permitted test actions and secret provisioning. #2 supplies the isolated development build/install path; #3 verifies reproducible checks and baseline artifacts. Missing access blocks only the relevant live acceptance, not unrelated coding. A hosted build or ready environment does not prove a feature works; do not publish secrets or private test payloads as evidence.
 
 Accept the initial WSL slice against existing capabilities, then extend live coverage in each new connector/feature issue. Similarly, accept local app-open scheduling before service-specific schedules or durable execution. Track still-required platform/provider checks explicitly in #27 rather than creating hidden dependencies on later features.
