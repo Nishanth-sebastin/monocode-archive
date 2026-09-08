@@ -1,0 +1,498 @@
+use super::{expand_home, git_cmd, path_to_js};
+use serde::Serialize;
+use std::io::Read;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
+use tauri::{Manager, State};
+
+// Serializes removal against process startup, not against running agents.
+pub(crate) static LIFECYCLE: RwLock<()> = RwLock::new(());
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Worktree {
+    path: String,
+    head: String,
+    branch: Option<String>,
+    locked: Option<String>,
+    prunable: Option<String>,
+    main: bool,
+    missing: bool,
+    users: Vec<String>,
+}
+
+// Drain both pipes while retaining at most 1 MiB; hooks are disabled for these
+// explicit local operations. A timeout is uncertain, so callers always read back.
+fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+    let mut child = git_cmd()
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut buf = [0; 8192];
+            let mut truncated = false;
+            while let Ok(n) = pipe.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let keep = n.min((1024 * 1024_usize).saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&buf[..keep]);
+                truncated |= keep != n;
+            }
+            (bytes, truncated)
+        })
+    }
+    let out = drain(child.stdout.take().ok_or("Missing stdout")?);
+    let err = drain(child.stderr.take().ok_or("Missing stderr")?);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let (out, truncated) = out.join().map_err(|_| "Git reader failed")?;
+    let (err, _) = err.join().map_err(|_| "Git reader failed")?;
+    match status {
+        None => Err(
+            "Git timed out. Refresh worktrees before retrying; the operation may have completed."
+                .into(),
+        ),
+        Some(status) if !status.success() => Err(String::from_utf8_lossy(&err).trim().to_owned()),
+        _ if truncated => Err("Git output exceeds 1 MiB; narrow the repository operation.".into()),
+        _ => String::from_utf8(out).map_err(|_| "Git returned a non-UTF-8 path".into()),
+    }
+}
+
+fn inventory(root: &Path) -> Result<Vec<Worktree>, String> {
+    let text = git(root, &["worktree", "list", "--porcelain", "-z"])?;
+    let mut result = Vec::new();
+    let mut entry = Worktree::default();
+    for field in text.split('\0') {
+        if field.is_empty() {
+            if !entry.path.is_empty() {
+                entry.main = result.is_empty();
+                entry.missing = !Path::new(&entry.path).is_dir();
+                result.push(entry);
+                entry = Worktree::default();
+            }
+        } else if let Some(path) = field.strip_prefix("worktree ") {
+            entry.path = path.to_owned();
+        } else if let Some(head) = field.strip_prefix("HEAD ") {
+            entry.head = head.to_owned();
+        } else if let Some(branch) = field.strip_prefix("branch ") {
+            entry.branch = Some(branch.to_owned());
+        } else if field == "locked" || field.starts_with("locked ") {
+            entry.locked = Some(field.to_owned());
+        } else if field == "prunable" || field.starts_with("prunable ") {
+            entry.prunable = Some(field.to_owned());
+        }
+    }
+    Ok(result)
+}
+
+fn canonical(path: &str) -> Result<String, String> {
+    expand_home(path)
+        .canonicalize()
+        .map(|p| path_to_js(&p))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn git_worktrees(
+    cwd: String,
+    store: State<crate::session_store::SessionStore>,
+) -> Result<Vec<Worktree>, String> {
+    let mut entries = inventory(&expand_home(&cwd))?;
+    let conn = store.lock_conn()?;
+    for entry in &mut entries {
+        let mut stmt = conn.prepare("SELECT id, title FROM sessions WHERE (cwd = ?1 OR worktree_cwd = ?1) AND has_user_message = 1 ORDER BY updated_at DESC LIMIT 100").map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&entry.path], |r| {
+                Ok(format!(
+                    "{} ({})",
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(0)?
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        entry.users = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(entries)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRef {
+    name: String,
+    commit: String,
+}
+
+#[tauri::command(async)]
+pub fn git_worktree_refs(cwd: String) -> Result<Vec<WorktreeRef>, String> {
+    git(
+        &expand_home(&cwd),
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?
+    .lines()
+    .map(|line| {
+        let (name, commit) = line.split_once(' ').ok_or("Invalid Git ref")?;
+        Ok(WorktreeRef {
+            name: name.into(),
+            commit: commit.into(),
+        })
+    })
+    .collect()
+}
+
+fn create(
+    root: &Path,
+    base: &str,
+    commit: &str,
+    branch: &str,
+    path: &str,
+) -> Result<String, String> {
+    if !base.starts_with("refs/heads/") && !base.starts_with("refs/remotes/") {
+        return Err("Choose an explicit local or remote-tracking ref".into());
+    }
+    let actual = git(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ],
+    )?;
+    if actual.trim() != commit {
+        return Err("Base ref changed. Refresh and review its commit again.".into());
+    }
+    if branch.starts_with('-') || branch.trim() != branch {
+        return Err("Invalid branch name".into());
+    }
+    git(root, &["check-ref-format", &format!("refs/heads/{branch}")])?;
+    let target = expand_home(path);
+    if !target.is_absolute() || target.exists() {
+        return Err("Choose a new absolute worktree path; existing paths are preserved.".into());
+    }
+    let parent = target
+        .parent()
+        .ok_or("Missing parent directory")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let target = parent.join(target.file_name().ok_or("Missing directory name")?);
+    let target = path_to_js(&target);
+    let result = git(
+        root,
+        &["worktree", "add", "-b", branch, "--", &target, commit],
+    );
+    let entries = inventory(root)?;
+    if entries.iter().any(|e| {
+        e.path == target
+            && e.head == commit
+            && e.branch.as_deref() == Some(&format!("refs/heads/{branch}"))
+    }) {
+        return Ok(target);
+    }
+    result?;
+    Err(format!(
+        "Creation could not be confirmed. Refresh and inspect {target}; no data was removed."
+    ))
+}
+
+#[tauri::command(async)]
+pub fn git_worktree_create(
+    cwd: String,
+    base: String,
+    commit: String,
+    branch: String,
+    path: String,
+) -> Result<String, String> {
+    let _guard = LIFECYCLE
+        .try_write()
+        .map_err(|_| "Another worktree operation or process startup is in progress")?;
+    create(&expand_home(&cwd), &base, &commit, &branch, &path)
+}
+
+fn remove(root: &Path, path: &str, head: &str) -> Result<(), String> {
+    let entries = inventory(root)?;
+    let entry = entries
+        .iter()
+        .find(|e| e.path == path)
+        .ok_or("Worktree is no longer registered; refresh")?;
+    if entry.branch.is_none()
+        || entry.main
+        || entry.locked.is_some()
+        || entry.prunable.is_some()
+        || entry.missing
+    {
+        return Err("Main, detached, locked, missing or prunable worktrees cannot be removed here. Repair explicitly with Git.".into());
+    }
+    if entry.head != head {
+        return Err("Worktree HEAD changed; refresh and review again".into());
+    }
+    if canonical(path)? != path {
+        return Err("Worktree path changed or is a symlink; refresh".into());
+    }
+    if !git(
+        Path::new(path),
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ],
+    )?
+    .trim()
+    .is_empty()
+    {
+        return Err(
+            "Worktree has modified, untracked or ignored files; all files are preserved.".into(),
+        );
+    }
+    let result = git(root, &["worktree", "remove", "--", path]);
+    if !inventory(root)?.iter().any(|e| e.path == path) {
+        return Ok(());
+    }
+    result?;
+    Err("Removal could not be confirmed; refresh before retrying".into())
+}
+
+#[tauri::command(async)]
+pub fn git_worktree_remove(
+    app: tauri::AppHandle,
+    cwd: String,
+    path: String,
+    head: String,
+) -> Result<(), String> {
+    let _guard = LIFECYCLE
+        .try_write()
+        .map_err(|_| "Another worktree operation or process startup is in progress")?;
+    // ponytail: conservatively block all live processes; add scoped leases if cross-repo cleanup is needed.
+    if app
+        .state::<crate::harness::HarnessHost>()
+        .has_live_processes()
+        || app.state::<crate::pty::PtyHost>().has_live_processes()
+    {
+        return Err("Close running agents and terminals before removing a worktree. No processes were stopped.".into());
+    }
+    remove(&expand_home(&cwd), &path, &head)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    struct Repo(PathBuf);
+    impl Repo {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "monocode-worktree-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let path = path.canonicalize().unwrap();
+            git(&path, &["init", "-b", "main"]).unwrap();
+            git(&path, &["config", "user.name", "Test"]).unwrap();
+            git(&path, &["config", "user.email", "test@example.invalid"]).unwrap();
+            git(
+                &path,
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "base",
+                ],
+            )
+            .unwrap();
+            Self(path)
+        }
+        fn head(&self) -> String {
+            git(&self.0, &["rev-parse", "HEAD"]).unwrap().trim().into()
+        }
+        fn target(&self, name: &str) -> String {
+            path_to_js(&self.0.join(name))
+        }
+    }
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn selected_bases_unicode_collisions_and_external_discovery() {
+        let repo = Repo::new();
+        let base = repo.head();
+        git(&repo.0, &["branch", "non-default"]).unwrap();
+        git(&repo.0, &["update-ref", "refs/remotes/second/topic", &base]).unwrap();
+        let first = repo.target("space żółć");
+        let second = repo.target("second");
+        assert_eq!(
+            create(&repo.0, "refs/heads/non-default", &base, "task/one", &first).unwrap(),
+            first
+        );
+        assert!(create(&repo.0, "refs/heads/non-default", &base, "task/one", &first).is_err());
+        create(
+            &repo.0,
+            "refs/remotes/second/topic",
+            &base,
+            "task/two",
+            &second,
+        )
+        .unwrap();
+        git(
+            &repo.0,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                &repo.target("external"),
+                &base,
+            ],
+        )
+        .unwrap();
+        let entries = inventory(&repo.0).unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(entries.iter().all(|e| e.head == base));
+        assert!(entries.iter().any(|e| e.branch.is_none() && !e.main));
+        let other = Repo::new();
+        create(
+            &other.0,
+            "refs/heads/main",
+            &other.head(),
+            "task/one",
+            &other.target("space żółć"),
+        )
+        .unwrap();
+        assert_eq!(inventory(&other.0).unwrap().len(), 2);
+        assert!(create(
+            &repo.0,
+            "refs/heads/main",
+            "stale",
+            "another",
+            &repo.target("unused")
+        )
+        .is_err());
+        assert!(create(&repo.0, "--bad", &base, "another", &repo.target("unused")).is_err());
+    }
+
+    #[test]
+    fn cleanup_preserves_files_branch_and_exact_target() {
+        let repo = Repo::new();
+        let head = repo.head();
+        let path = repo.target("work");
+        create(&repo.0, "refs/heads/main", &head, "keep-branch", &path).unwrap();
+        assert!(remove(&repo.0, &path_to_js(&repo.0), &head).is_err());
+        assert!(remove(&repo.0, &repo.target("unregistered"), &head).is_err());
+        assert!(remove(&repo.0, &path, "stale").is_err());
+        std::fs::write(repo.0.join(".git/info/exclude"), ".env\n").unwrap();
+        std::fs::write(Path::new(&path).join(".env"), "keep me").unwrap();
+        assert!(remove(&repo.0, &path, &head).is_err());
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&path).join(".env")).unwrap(),
+            "keep me"
+        );
+        std::fs::remove_file(Path::new(&path).join(".env")).unwrap();
+        git(&repo.0, &["worktree", "lock", &path]).unwrap();
+        assert!(remove(&repo.0, &path, &head).is_err());
+        git(&repo.0, &["worktree", "unlock", &path]).unwrap();
+        remove(&repo.0, &path, &head).unwrap();
+        assert!(!Path::new(&path).exists());
+        assert!(git(&repo.0, &["show-ref", "--verify", "refs/heads/keep-branch"]).is_ok());
+        assert_eq!(inventory(&repo.0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn missing_detached_and_moved_refs_require_explicit_recovery() {
+        let repo = Repo::new();
+        let head = repo.head();
+        let path = repo.target("detached");
+        git(&repo.0, &["worktree", "add", "--detach", &path, &head]).unwrap();
+        assert!(remove(&repo.0, &path, &head).is_err());
+        std::fs::remove_dir_all(&path).unwrap();
+        let entries = inventory(&repo.0).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.path == path && e.missing && e.prunable.is_some()));
+        assert!(remove(&repo.0, &path, &head).is_err());
+        git(
+            &repo.0,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "moved",
+            ],
+        )
+        .unwrap();
+        assert!(create(
+            &repo.0,
+            "refs/heads/main",
+            &head,
+            "stale",
+            &repo.target("new")
+        )
+        .is_err());
+        assert!(!Path::new(&repo.target("new")).exists());
+    }
+
+    #[test]
+    #[ignore = "release measurement, run with --release --ignored --nocapture"]
+    fn inventory_release_measurement() {
+        let repo = Repo::new();
+        let head = repo.head();
+        for n in 0..10 {
+            create(
+                &repo.0,
+                "refs/heads/main",
+                &head,
+                &format!("task-{n}"),
+                &repo.target(&format!("work-{n}")),
+            )
+            .unwrap();
+        }
+        let mut samples = Vec::new();
+        for _ in 0..21 {
+            let start = Instant::now();
+            assert_eq!(inventory(&repo.0).unwrap().len(), 11);
+            samples.push(start.elapsed());
+        }
+        samples.sort();
+        println!(
+            "11 worktrees, 21 inventory calls: median {:?}, max {:?}",
+            samples[10], samples[20]
+        );
+    }
+}

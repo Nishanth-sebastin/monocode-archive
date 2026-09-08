@@ -89,6 +89,7 @@ import { ComposerRunner } from "./ComposerRunner";
 import { ContextMeter } from "./ContextMeter";
 import { AttachmentChip } from "./AttachmentChip";
 import { BranchPicker } from "./BranchPicker";
+import { WorktreePicker } from "./WorktreePicker";
 import { CwdPicker } from "./CwdPicker";
 import { FileMentionPicker } from "./FileMentionPicker";
 import { FileTypeIcon } from "./FileTypeIcon";
@@ -152,7 +153,7 @@ type Props = {
   queueStatus?: MessageQueueStatus;
   hotkeys?: boolean;
   onFocus: () => void;
-  onCwdChange: (cwd: string) => void;
+  onCwdChange: (cwd: string, fresh?: boolean) => void;
   onBranchChange?: () => void;
   onNewTerminal?: () => void;
   onModelChange: (harness: HarnessId, model: string) => void;
@@ -1184,6 +1185,7 @@ export function Composer({
                 />
               )}
               <div className="ml-auto flex shrink-0 items-center">
+                {!hideBranchPicker && <WorktreePicker cwd={cwd} onOpen={(path) => onCwdChange(path, true)} />}
                 <ContextMeter
                   usage={context}
                   onCompact={compactSupported ? onCompactContext : undefined}

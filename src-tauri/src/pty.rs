@@ -51,6 +51,13 @@ pub struct PtyHost {
 }
 
 impl PtyHost {
+    pub(crate) fn has_live_processes(&self) -> bool {
+        !self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -124,6 +131,9 @@ pub fn pty_spawn(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    let _worktree_guard = crate::fs::worktrees::LIFECYCLE
+        .try_read()
+        .map_err(|_| "Worktree operation in progress; retry terminal startup after it completes")?;
     if let Some(prev) = host.remove(&id) {
         terminate(prev.pid);
         #[cfg(unix)]

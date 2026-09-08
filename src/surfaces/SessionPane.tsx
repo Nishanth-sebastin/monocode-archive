@@ -68,7 +68,7 @@ type Props = {
   hideProjectPicker?: boolean;
   onFocus: (sessionId: string) => void;
   onClose: (sessionId: string) => void;
-  onCwdChange: (sessionId: string, cwd: string) => void;
+  onCwdChange: (sessionId: string, cwd: string, fresh?: boolean) => void;
   onBranchChange: (sessionId: string) => void;
   onModelChange: (sessionId: string, harness: HarnessId, model: string) => void;
   onModelSettingsChange: (
@@ -321,7 +321,7 @@ export const SessionPane = memo(function SessionPane({
       onHandoffCardDismiss={() => onHandoffCardDismiss?.(session.id)}
       onQuestionReply={replyQuestion}
       onFocus={() => onFocus(session.id)}
-      onCwdChange={(cwd) => onCwdChange(session.id, cwd)}
+      onCwdChange={(cwd, fresh) => onCwdChange(session.id, cwd, fresh)}
       onBranchChange={() => onBranchChange(session.id)}
       onNewTerminal={() => onNewTerminal(session.id)}
       onModelChange={(harness, model) => {

@@ -53,7 +53,7 @@ type Shared = {
   onFileDirtyChange: (fileId: string, dirty: boolean) => void;
   onFileErrorCountChange: (fileId: string, count: number) => void;
   onRatio: (splitId: string, index: number, ratio: number) => void;
-  onCwdChange: (sessionId: string, cwd: string) => void;
+  onCwdChange: (sessionId: string, cwd: string, fresh?: boolean) => void;
   onBranchChange: (sessionId: string) => void;
   onModelChange: (sessionId: string, harness: HarnessId, model: string) => void;
   onModelSettingsChange: (

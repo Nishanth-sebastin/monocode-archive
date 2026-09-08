@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { isCheckoutBlockedByChanges } from "./fs";
+import { isCheckoutBlockedByChanges, restoreSessionCheckout } from "./fs";
+
+it("restores exact worktree and provider identity without retargeting the session", () => {
+  const session = {
+    cwd: "/repo",
+    worktreeCwd: "/repo work/żółć",
+    branch: "task",
+    providerSessionId: "provider-123",
+  };
+  expect(restoreSessionCheckout(session)).toBe(session);
+});
 
 describe("isCheckoutBlockedByChanges", () => {
   it("detects git's tracked-file checkout error", () => {

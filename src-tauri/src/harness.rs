@@ -87,6 +87,14 @@ pub struct HarnessHost {
 }
 
 impl HarnessHost {
+    pub(crate) fn has_live_processes(&self) -> bool {
+        !self.lock_inner().children.is_empty()
+            || !self
+                .sse
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+    }
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HarnessInner {
@@ -327,6 +335,9 @@ pub fn harness_spawn(
     args: Vec<String>,
     cwd: String,
 ) -> Result<u32, String> {
+    let _worktree_guard = crate::fs::worktrees::LIFECYCLE
+        .try_read()
+        .map_err(|_| "Worktree operation in progress; retry startup after it completes")?;
     let (epoch, kill_all, prev) = host.begin_spawn(&session_id);
     if let Some(prev) = prev {
         terminate(prev.pid);
