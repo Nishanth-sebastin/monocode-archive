@@ -1,12 +1,53 @@
 import { IS_WIN } from "./platform";
 
 function windowsPath(path: string): boolean {
-  return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\") || path.startsWith("//");
+  return (
+    /^[A-Za-z]:[\\/]/.test(path) ||
+    path.startsWith("\\\\") ||
+    path.startsWith("//")
+  );
 }
 
 export function slash(path: string): string {
-  return windowsPath(path) || (IS_WIN && !path.startsWith("/"))
-    ? path.replace(/\\/g, "/") : path;
+  const normalized =
+    windowsPath(path) || (IS_WIN && !path.startsWith("/"))
+      ? path.replace(/\\/g, "/")
+      : path;
+  return normalized
+    .replace(/^\/\/\?\/UNC\//i, "//")
+    .replace(/^\/\/(?:wsl\$|wsl\.localhost)\//i, "//wsl.localhost/");
+}
+
+export function wslLocation(
+  path: string,
+): { distribution: string; path: string } | undefined {
+  const match = /^\/\/wsl\.localhost\/([^/]+)(\/.*)?$/i.exec(slash(path));
+  return match ? { distribution: match[1], path: match[2] || "/" } : undefined;
+}
+
+/** Build an explicit Linux identity; never reinterpret a Windows path as Linux. */
+export function wslPath(distribution: string, path: string): string {
+  if (
+    !distribution ||
+    distribution.length > 128 ||
+    /^-/.test(distribution) ||
+    /[/\\:\x00-\x1f\x7f]/.test(distribution)
+  )
+    throw new Error("Choose a named WSL distribution");
+  if (
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    path.length > 4096 ||
+    /[\\\x00-\x1f\x7f]/.test(path) ||
+    path.split("/").includes("..")
+  )
+    throw new Error(
+      "Choose an absolute Linux path without parent traversal or backslashes",
+    );
+  return `//wsl.localhost/${distribution}/${path
+    .split("/")
+    .filter((part) => part && part !== ".")
+    .join("/")}`;
 }
 
 function trimSlash(path: string): string {
@@ -16,6 +57,9 @@ function trimSlash(path: string): string {
 /** Stable comparison key for Windows paths without changing their display case. */
 export function pathKey(path: string): string {
   const normalized = trimSlash(path);
+  const wsl = wslLocation(normalized);
+  if (wsl)
+    return `//wsl.localhost/${wsl.distribution.toLowerCase()}${wsl.path === "/" ? "" : wsl.path}`;
   return /^[A-Za-z]:(?:\/|$)/.test(normalized) || normalized.startsWith("//")
     ? normalized.toLowerCase()
     : normalized;
@@ -23,6 +67,8 @@ export function pathKey(path: string): string {
 
 export function prettyCwd(cwd: string): string {
   const trimmed = trimSlash(cwd);
+  const wsl = wslLocation(trimmed);
+  if (wsl) return `WSL · ${wsl.distribution} · ${wsl.path}`;
   if (trimmed === "~") return "~";
 
   const parts = trimmed.split("/").filter(Boolean);
@@ -93,6 +139,7 @@ export function joinPath(parent: string, relative: string): string {
 export function resolveWorkspacePath(
   href: string,
   cwd?: string,
+  knownFile = false,
 ): string | undefined {
   let value = href.trim();
   if (!value || /^(https?:|mailto:|tel:)/i.test(value)) return undefined;
@@ -105,17 +152,34 @@ export function resolveWorkspacePath(
     }
   }
 
+  if (cwd && wslLocation(cwd) && value.includes("\\") && !windowsPath(value))
+    return undefined;
   value = slash(value).replace(/(?::\d+(?::\d+)?|#L\d+(?:-L\d+)?)$/, "");
-  if (!value || value === "." || value.startsWith("#") || value.startsWith("?") || value.includes("://")) {
+  if (
+    !value ||
+    value === "." ||
+    value.startsWith("#") ||
+    value.startsWith("?") ||
+    value.includes("://")
+  ) {
     return undefined;
   }
-  if (!looksLikeFilePath(value)) return undefined;
+  if (!knownFile && !looksLikeFilePath(value)) return undefined;
 
   if (/^[A-Za-z]:\//.test(value)) return value;
   if (value.startsWith("/")) {
+    const wsl = cwd ? wslLocation(cwd) : undefined;
+    if (wsl && !value.startsWith("//") && !/^\/[A-Za-z]:\//.test(value)) {
+      try {
+        return wslPath(wsl.distribution, value);
+      } catch {
+        return undefined;
+      }
+    }
     return /^\/[A-Za-z]:\//.test(value) ? value.slice(1) : value;
   }
-  if (!cwd || cwd === "~") return undefined;
+  if (!cwd || cwd === "~")
+    return knownFile ? (cwd ? joinPath(cwd, value) : value) : undefined;
   return joinPath(cwd, value);
 }
 

@@ -5726,7 +5726,7 @@ function nudgeOpenEditors(event: HarnessEvent, cwd: string) {
 
   if (!isEditTool(event.kind, event.title, event.preview)) return;
   const raw = event.preview?.path;
-  const resolved = raw ? (resolveWorkspacePath(raw, cwd) ?? raw) : undefined;
+  const resolved = raw ? resolveWorkspacePath(raw, cwd, true) : undefined;
   if (resolved) {
     nudgeWatchedFiles([resolved]);
   } else if (completed) {
