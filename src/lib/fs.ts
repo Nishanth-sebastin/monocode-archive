@@ -237,6 +237,7 @@ export type GitBranchInfo = {
   name: string;
   current: boolean;
   remote: string | null;
+  worktree: string | null;
 };
 
 export type GitBranches = {
@@ -253,8 +254,8 @@ export function gitCheckout(
   cwd: string,
   name: string,
   remote?: string | null,
-): Promise<string> {
-  return invoke<string>("git_checkout", { cwd, name, remote: remote ?? null });
+): Promise<{ branch: string; worktree: string | null }> {
+  return invoke("git_checkout", { cwd, name, remote: remote ?? null });
 }
 
 export function gitCreateBranch(cwd: string, name: string): Promise<string> {

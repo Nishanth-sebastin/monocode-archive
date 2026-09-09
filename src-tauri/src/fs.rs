@@ -698,6 +698,14 @@ pub struct GitBranchEntry {
     pub name: String,
     pub current: bool,
     pub remote: Option<String>,
+    pub worktree: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCheckout {
+    pub branch: String,
+    pub worktree: Option<String>,
 }
 
 /// Local branches, plus remote-only branches that can be checked out.
@@ -714,9 +722,9 @@ pub async fn git_checkout(
     cwd: String,
     name: String,
     remote: Option<String>,
-) -> Result<String, String> {
+) -> Result<GitCheckout, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        git_checkout_for(&expand_home(&cwd), &name, remote.as_deref())
+        git_checkout_target_for(&expand_home(&cwd), &name, remote.as_deref())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2633,6 +2641,7 @@ fn git_branches_for(root: &Path) -> GitBranches {
 
     let mut branches = Vec::new();
     let mut local_names = HashSet::new();
+    let worktrees = worktrees::branch_paths(root).unwrap_or_default();
     if let Some(text) = git_run(
         root,
         &[
@@ -2655,6 +2664,7 @@ fn git_branches_for(root: &Path) -> GitBranches {
                 name: name.to_string(),
                 current: head.trim() == "*",
                 remote: None,
+                worktree: worktrees.get(&format!("refs/heads/{name}")).cloned(),
             });
         }
     }
@@ -2666,6 +2676,7 @@ fn git_branches_for(root: &Path) -> GitBranches {
                 name: name.clone(),
                 current: true,
                 remote: None,
+                worktree: worktrees.get(&format!("refs/heads/{name}")).cloned(),
             });
         }
     }
@@ -2692,6 +2703,7 @@ fn git_branches_for(root: &Path) -> GitBranches {
                 name: name.to_string(),
                 current: false,
                 remote: Some(remote.to_string()),
+                worktree: None,
             });
         }
     }
@@ -2713,6 +2725,35 @@ fn git_branches_for(root: &Path) -> GitBranches {
         detached,
         branches,
     }
+}
+
+fn git_checkout_target_for(
+    root: &Path,
+    name: &str,
+    remote: Option<&str>,
+) -> Result<GitCheckout, String> {
+    if !git_is_work_tree(root) {
+        return Err("Not a git repository".into());
+    }
+    let name = git_branch_name(root, name)?;
+    if remote.is_none() && git_head_branch(root).as_deref() != Some(name.as_str()) {
+        if let Some(path) = worktrees::branch_paths(root)?
+            .get(&format!("refs/heads/{name}"))
+            .cloned()
+        {
+            if !git_is_work_tree(Path::new(&path)) {
+                return Err(format!("Worktree unavailable at {path}. Restore its location or repair it in Git, then retry."));
+            }
+            return Ok(GitCheckout {
+                branch: name,
+                worktree: Some(path),
+            });
+        }
+    }
+    Ok(GitCheckout {
+        branch: git_checkout_for(root, &name, remote)?,
+        worktree: None,
+    })
 }
 
 fn git_checkout_for(root: &Path, name: &str, remote: Option<&str>) -> Result<String, String> {
@@ -5234,6 +5275,57 @@ mod tests {
         assert!(git_create_branch_for(&dir.0, "feat/picker").is_err());
         assert!(git_create_branch_for(&dir.0, "bad name").is_err());
         assert!(git_checkout_for(&dir.0, "missing", None).is_err());
+    }
+
+    #[test]
+    fn git_checkout_routes_a_branch_already_used_by_a_worktree() {
+        let dir = tmp("git-branch-worktree-route");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        let sibling = dir.0.canonicalize().unwrap().join("sibling worktree ż");
+        let sibling_text = path_to_js(&sibling);
+        if !git(&dir.0, &["branch", "feature"])
+            || !git(&dir.0, &["worktree", "add", "--", &sibling_text, "feature"])
+        {
+            return;
+        }
+
+        let listed = git_branches_for(&dir.0);
+        let feature = listed
+            .branches
+            .iter()
+            .find(|branch| branch.name == "feature")
+            .unwrap();
+        assert_eq!(feature.worktree.as_deref(), Some(sibling_text.as_str()));
+
+        let target = git_checkout_target_for(&dir.0, "feature", None).unwrap();
+        assert_eq!(target.branch, "feature");
+        assert_eq!(target.worktree.as_deref(), Some(sibling_text.as_str()));
+        assert_eq!(git_head_branch(&dir.0).as_deref(), Some("main"));
+        std::fs::write(dir.0.join("a.txt"), "dirty main\n").unwrap();
+        assert!(git_checkout_target_for(&dir.0, "feature", None)
+            .unwrap()
+            .worktree
+            .is_some());
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("a.txt")).unwrap(),
+            "dirty main\n"
+        );
+        assert_eq!(
+            git_checkout_target_for(&sibling, "main", None)
+                .unwrap()
+                .worktree,
+            Some(path_to_js(&dir.0.canonicalize().unwrap()))
+        );
+        assert!(git_checkout_target_for(&sibling, "feature", None)
+            .unwrap()
+            .worktree
+            .is_none());
+        std::fs::rename(&sibling, dir.0.join("moved")).unwrap();
+        assert!(git_checkout_target_for(&dir.0, "feature", None)
+            .unwrap_err()
+            .contains("Worktree unavailable"));
     }
 
     #[test]

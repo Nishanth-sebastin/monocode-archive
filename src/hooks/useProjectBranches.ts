@@ -36,7 +36,8 @@ function branchesEqual(a: GitBranches | null, b: GitBranches | null): boolean {
       other != null &&
       branch.name === other.name &&
       branch.current === other.current &&
-      branch.remote === other.remote
+      branch.remote === other.remote &&
+      branch.worktree === other.worktree
     );
   });
 }

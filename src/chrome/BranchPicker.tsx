@@ -18,6 +18,7 @@ import {
 } from "../lib/fs";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useProjectBranchesState } from "../hooks/useProjectBranches";
+import { projectName } from "../lib/paths";
 import { Popover } from "./Popover";
 import { WorktreePanel } from "./WorktreePicker";
 import { SwitchBranchDialog } from "./SwitchBranchDialog";
@@ -152,9 +153,20 @@ export function BranchPicker({
       ? gitCreateBranch(cwd, pending.name)
       : gitCheckout(cwd, pending.name, pending.remote);
 
-  const finishSwitch = () => {
-    notifyGitChanged();
-    onChangeRef.current?.();
+  const finishSwitch = (
+    result: string | { branch: string; worktree: string | null },
+  ) => {
+    if (typeof result !== "string" && result.worktree) {
+      if (!onOpenWorktree) {
+        throw new Error(
+          `${result.branch} is open in ${projectName(result.worktree)}.`,
+        );
+      }
+      onOpenWorktree(result.worktree);
+    } else {
+      notifyGitChanged();
+      onChangeRef.current?.();
+    }
     dismiss(true);
   };
 
@@ -166,8 +178,7 @@ export function BranchPicker({
     setBusy(true);
     setError(null);
     try {
-      await applySwitch(pending);
-      finishSwitch();
+      finishSwitch(await applySwitch(pending));
     } catch (err) {
       const message = failMessage(err);
       if (isCheckoutBlockedByChanges(message)) {
@@ -195,8 +206,7 @@ export function BranchPicker({
     setBlockedError(null);
     try {
       await work();
-      await applySwitch(blocked);
-      finishSwitch();
+      finishSwitch(await applySwitch(blocked));
     } catch (err) {
       setBlockedError(failMessage(err));
       setBlockedBusy(null);
@@ -536,7 +546,11 @@ function BranchList({
                   <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
                     {row.branch.name}
                   </span>
-                  {row.branch.remote ? (
+                  {row.branch.worktree && !selected ? (
+                    <span className="max-w-[45%] shrink-0 truncate text-[10px] text-content/40">
+                      Open in {projectName(row.branch.worktree)}
+                    </span>
+                  ) : row.branch.remote ? (
                     <span className="shrink-0 text-[10px] text-content/40">
                       {row.branch.remote}
                     </span>

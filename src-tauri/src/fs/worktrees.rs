@@ -1,5 +1,6 @@
 use super::{expand_home, git_cmd};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
@@ -119,6 +120,13 @@ fn inventory(root: &Path) -> Result<Vec<Worktree>, String> {
         }
     }
     Ok(result)
+}
+
+pub(super) fn branch_paths(root: &Path) -> Result<HashMap<String, String>, String> {
+    Ok(inventory(root)?
+        .into_iter()
+        .filter_map(|entry| entry.branch.map(|branch| (branch, entry.path)))
+        .collect())
 }
 
 fn canonical(path: &str) -> Result<String, String> {
