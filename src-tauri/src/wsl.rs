@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 
@@ -368,13 +368,23 @@ struct BridgeIo {
     stdout: BufReader<ChildStdout>,
 }
 struct Bridge {
-    io: Mutex<BridgeIo>,
+    io: Mutex<Option<BridgeIo>>,
+    available: Condvar,
+    reads: Option<Box<Bridge>>,
     process: Arc<Mutex<Process>>,
-    alive: AtomicBool,
+    alive: Arc<AtomicBool>,
     owner: Option<(tauri::AppHandle, String)>,
 }
 impl Bridge {
     fn start(command: &mut Command) -> Result<Self, String> {
+        let mut bridge = Self::start_lane(command)?;
+        let mut reads = Self::start_lane(command)?;
+        reads.alive = bridge.alive.clone();
+        bridge.reads = Some(Box::new(reads));
+        Ok(bridge)
+    }
+
+    fn start_lane(command: &mut Command) -> Result<Self, String> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -389,17 +399,49 @@ impl Bridge {
         let stdin = child.stdin.take().ok_or("Missing WSL input")?;
         let stdout = BufReader::new(child.stdout.take().ok_or("Missing WSL output")?);
         Ok(Self {
-            io: Mutex::new(BridgeIo { stdin, stdout }),
+            io: Mutex::new(Some(BridgeIo { stdin, stdout })),
+            available: Condvar::new(),
+            reads: None,
             process: Arc::new(Mutex::new(Process {
                 child,
                 #[cfg(windows)]
                 _job: job,
             })),
-            alive: AtomicBool::new(true),
+            alive: Arc::new(AtomicBool::new(true)),
             owner: None,
         })
     }
     fn request(&self, request: Value) -> Result<Value, String> {
+        // Read-only filesystem operations have a separate bounded channel so a
+        // slow Git/CLI command cannot block navigation or file polling. All Git
+        // commands and mutations remain serialized on the original channel.
+        if let Some(reads) = &self.reads {
+            if matches!(
+                request["op"].as_str(),
+                Some(
+                    "stat"
+                        | "inspect"
+                        | "list"
+                        | "read"
+                        | "read_text"
+                        | "preview"
+                        | "diff_file"
+                        | "read_many"
+                        | "search_read"
+                        | "line_counts"
+                        | "files"
+                        | "canonical"
+                        | "home"
+                        | "skill_entries"
+                )
+            ) {
+                let result = reads.request(request);
+                if !self.alive.load(Ordering::SeqCst) {
+                    self.available.notify_all();
+                }
+                return result;
+            }
+        }
         struct RequestSlot;
         impl Drop for RequestSlot {
             fn drop(&mut self) {
@@ -449,18 +491,25 @@ impl Bridge {
         serde_json::to_writer(&mut encoded, &request).map_err(|e| e.to_string())?;
         encoded.push(b'\n');
         let deadline = Instant::now() + REQUEST_TIMEOUT;
-        let mut io = loop {
+        let mut slot = self.io.lock().map_err(|_| "WSL IO lock poisoned")?;
+        loop {
             if !self.alive.load(Ordering::SeqCst) {
                 return Err("WSL connection was interrupted. Reconnect the selected distribution; no action was replayed.".into());
-            }
-            if let Ok(io) = self.io.try_lock() {
-                break io;
             }
             if Instant::now() >= deadline {
                 return Err("WSL is busy. This queued action did not start.".into());
             }
-            std::thread::sleep(Duration::from_millis(10));
-        };
+            if slot.is_some() {
+                break;
+            }
+            slot = self
+                .available
+                .wait_timeout(slot, deadline.saturating_duration_since(Instant::now()))
+                .map_err(|_| "WSL IO lock poisoned")?
+                .0;
+        }
+        let mut io = slot.take().ok_or("WSL IO unavailable")?;
+        drop(slot);
         let (done, waiting) = mpsc::channel();
         let process = self.process.clone();
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -490,7 +539,19 @@ impl Bridge {
         })();
         let _ = done.send(());
         let timed_out = watchdog.join().unwrap_or(true);
-        self.finish_request(result, timed_out)
+        // Mark failures before releasing the channel: queued writes must not run
+        // after an uncertain response, even if they win the next wakeup.
+        let result = self.finish_request(result, timed_out);
+        *self.io.lock().unwrap_or_else(|error| error.into_inner()) = Some(io);
+        if self.alive.load(Ordering::SeqCst) {
+            self.available.notify_one();
+        } else {
+            self.available.notify_all();
+            if let Some(reads) = &self.reads {
+                reads.available.notify_all();
+            }
+        }
+        result
     }
 
     fn finish_request(
@@ -506,13 +567,13 @@ impl Bridge {
             result
         };
         match result {
-            Ok(response) => {
+            Ok(mut response) => {
                 if let Some(error) = response.get("error").and_then(Value::as_str) {
                     return Err(error.to_owned());
                 }
                 response
-                    .get("ok")
-                    .cloned()
+                    .get_mut("ok")
+                    .map(Value::take)
                     .ok_or_else(|| "Invalid WSL response".into())
             }
             Err(error) => {
@@ -593,6 +654,12 @@ fn connect_bridge(
 ) -> Result<Location, String> {
     fn validate(bridge: &Bridge, location: &Location) -> Result<Location, String> {
         let result = bridge.request(json!({"op":"connect", "path":location.path}))?;
+        if let Some(reads) = &bridge.reads {
+            let checked = reads.request(json!({"op":"connect", "path":location.path}))?;
+            if checked["path"] != result["path"] {
+                return Err("WSL read channel resolved a different checkout".into());
+            }
+        }
         location.with_path(
             result["path"]
                 .as_str()
@@ -614,6 +681,9 @@ fn connect_bridge(
     // Validate privately: failed opens drop their process and consume no host
     // slot. Other repositories can keep using their bridges during validation.
     let mut candidate = Bridge::start(command)?;
+    if let Some(reads) = &mut candidate.reads {
+        reads.owner = owner.clone();
+    }
     candidate.owner = owner;
     let connected = validate(&candidate, location)?;
     let mut hosts = registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -762,6 +832,63 @@ pub fn git(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn metadata_remains_available_during_git_while_mutations_stay_ordered() {
+        use super::*;
+        let mut command = Command::new("python3");
+        command.args(["-u", "-c", SCRIPT]);
+        let bridge = Bridge::start(&mut command).unwrap();
+        let root = std::env::temp_dir().join(format!("monocode-read-lane-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .unwrap();
+        let (sent, received) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let bridge = &bridge;
+            let root = &root;
+            let git = scope.spawn(move || bridge.request(json!({"op":"git","path":root,
+                "args":["-c","alias.hold=!touch started; while test ! -f release; do sleep 0.01; done","hold"]})));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !root.join("started").exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let write = scope.spawn(move || {
+                bridge.request(
+                    json!({"op":"write_text","path":root.join("write"),"content":"ordered"}),
+                )
+            });
+            scope.spawn(move || {
+                sent.send(bridge.request(json!({"op":"inspect","path":root,"paths":[root]})))
+                    .unwrap()
+            });
+            let result = received.recv_timeout(Duration::from_secs(2));
+            let wrote_early = root.join("write").exists();
+            std::fs::write(root.join("release"), []).unwrap();
+            git.join().unwrap().unwrap();
+            write.join().unwrap().unwrap();
+            assert!(result.unwrap().unwrap()[0]["isDir"] == true);
+            assert!(!wrote_early, "Mutation bypassed the serialized Git channel");
+        });
+        let escaped = root.join("escaped.txt");
+        std::fs::write(&escaped, vec![1; 8 * 1024 * 1024]).unwrap();
+        assert!(bridge
+            .request(json!({"op":"read_text", "path":escaped}))
+            .unwrap_err()
+            .contains("response exceeds"));
+        // Oversized encoding returns one complete error frame, not a partial
+        // JSON response or a disconnected channel.
+        assert!(bridge
+            .request(json!({"op":"inspect", "path":root, "paths":[root]}))
+            .is_ok());
+        drop(bridge);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     #[test]
     fn distribution_identity_and_arguments_preserve_linux_paths() {

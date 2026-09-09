@@ -21,7 +21,7 @@ These 800×600 Chromium captures render the production React components with onl
 
 - WSL 2, Python 3.9+, Linux Git and GNU `mv` are required. Agent cancellation also requires Linux pidfd support. Install/authenticate agent CLIs and optional `gh` inside the selected distribution.
 - New connections validate the selected path/Git before registration. Failed initial opens release their process and slot; a bad path on an existing host preserves that connection. Watchdog expiry marks the connection dead even if a response races the timeout; reconnect creates a fresh bridge, and interrupted mutations remain uncertain.
-- A maximum of four app-open Python stdio bridges handle filesystem/Git work. No service, socket or scheduled automation is installed. Requests have a 30-second deadline; pending requests are capped at 32 and 64 MiB of encoded data. Each message is capped at 40 MiB. Interrupted mutations are not retried automatically.
+- At most four connected distributions use two app-open Python stdio channels each: serialized Git/mutations and read-only filesystem requests (eight helper processes maximum for registered hosts). No service, socket or scheduled automation is installed. Requests have a 30-second deadline; pending requests are capped at 32 and 64 MiB of encoded data. Each message is capped at 40 MiB. Interrupted mutations are not retried automatically.
 - Metadata/read requests are batched (up to 64 files); search reads 16 files per batch, at most 512 KiB each. Directory listings are capped at 20,000 entries. Git subprocess output is capped at 8 MiB per pipe and runs for at most 25 seconds.
 - Checkpoint capture, comparison and undo read/write through Linux; saved snapshots remain in the app profile. Linux names are encoded for case-sensitive, Windows-safe storage; existing native snapshots are unchanged. The existing 500-file snapshot cap and 8 MiB file limit remain. Project/user skill discovery scans at most 2,000 entries and 300 skills per root, reading at most 16 KiB per skill; creating a user skill resolves the Linux home.
 - Explicit native attachments transfer sequentially to a private Linux temporary directory, at most 20 MiB per file, 64 distinct files/128 MiB per bridge. Repeated identical attachments reuse the file. Another distribution's attachments require an explicit transfer outside this flow. Temporary attachment paths are not durable resume data after reconnect/app exit.
@@ -71,3 +71,35 @@ Attach screenshots, commands/results, tested commit and remaining failures to dr
 Cleanup inherits the direct removal confirmation from #38: remaining files are disclosed inside the permanent-deletion confirmation, without a standing dirty-file blocker message. The bounded filesystem fingerprint runs inside Linux through the existing bridge; Windows never walks a WSL tree. Rust revalidates the distro-qualified Git family, path, HEAD and index, and rejects changed file evidence before invoking Git removal. The Linux scan caps 10,000 entries, 64 MiB, 25 seconds and 100 displayed names. Running app processes still block cleanup conservatively; no implicit process stopping or stale-registration pruning is performed.
 
 Additional production-boundary regression checks cover dirty Linux force-review refusal, changed-content rejection, fresh confirmed removal and branch preservation; concurrent bridge requests preserve their responses, and requests blocked behind a disconnected bridge fail without writing files. Native/Ubuntu/Debian paths with the same Linux suffix remain distinct repository families. These fixtures do not establish live Windows/WSL acceptance. Add force-cleanup checks to the disposable worktree scenario above, including a live Linux agent/terminal blocker and a file changed after preview.
+
+
+## Performance isolation
+
+Bridge waiters now use deadline-aware condition-variable notifications instead of
+10 ms polling. The read-only channel remains available during slow Git/CLI work;
+Git and mutations stay serialized. Both channels validate the selected canonical
+path before registration, share disconnect state and the existing global request
+count/byte budgets, and are dropped with their host. This adds one idle helper per
+connected distribution; long reads can still delay other reads on that channel.
+No daemon, network listener, unbounded worker pool or automatic replay is added.
+
+Checkpoint operations remain ordered per session and per execution host, preserving
+cross-session file ownership checks and protecting a session that changes host.
+A WSL operation cannot hold the native host's checkpoint lock. Weak lock entries
+are reclaimed, so completed sessions/hosts do not grow a permanent lock cache.
+Regression tests cover independent hosts, WSL aliases, same-host ordering and
+same-session ordering across hosts. Real process tests hold Git while metadata
+completes, verify a queued write stays blocked until Git finishes, and check that
+oversized JSON produces a complete error without disconnecting the read channel.
+
+Mac release fixtures using production Rust/Python code: eight concurrent tiny
+requests improved from 36.42 ms to 0.509 ms median (21 samples); metadata behind a
+one-second Git operation improved from 1.018 s to 0.091 ms. An 8 MiB diff response
+took 22.41 ms median (7 samples). Encoded fragments avoid full-response joins and
+newline copies, and Rust moves the parsed result instead of cloning it. Python
+worker RSS after those responses fell from 119.64 MiB to 108.94 MiB; Rust peak RSS
+was essentially unchanged (106.83 vs 105.86 MiB). These different metrics do not
+establish total app memory savings, especially with the extra idle helper. Large
+JSON/base64 responses retain substantial overhead despite the existing caps.
+Measurements exclude WebView, agents and Windows/WSL transport. Live Windows-to-WSL
+acceptance remains pending.

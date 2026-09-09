@@ -1,12 +1,11 @@
 use crate::wsl;
 use base64::Engine;
 use serde_json::json;
-#[cfg(test)]
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -23,25 +22,51 @@ const MAX_SNAPSHOT_FILES: usize = 500;
 #[derive(Clone)]
 pub struct CheckpointStore {
     root: PathBuf,
-    gate: Arc<Mutex<()>>,
+    gates: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
 }
 
 impl CheckpointStore {
     fn new(root: PathBuf) -> Self {
         Self {
             root,
-            gate: Arc::new(Mutex::new(())),
+            gates: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     fn exclusive<T>(
         &self,
+        session_id: &str,
+        cwd: &str,
         operation: impl FnOnce(&Self) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _guard = self
-            .gate
+        // Preserve cross-session ownership ordering on each host. A slow WSL
+        // request must not hold the native host (or another distribution).
+        let host = wsl::location(cwd)?
+            .map(|location| location.distribution.to_lowercase())
+            .unwrap_or_default();
+        let [session_gate, host_gate] = {
+            let mut gates = self.gates.lock().map_err(|_| "Checkpoint gates poisoned")?;
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            let mut gate_for = |key: String| {
+                gates.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
+                    let gate = Arc::new(Mutex::new(()));
+                    gates.insert(key, Arc::downgrade(&gate));
+                    gate
+                })
+            };
+            [
+                gate_for(format!("session:{session_id}")),
+                gate_for(format!("host:{host}")),
+            ]
+        };
+        // A session may change cwd: keep its manifest ordered across hosts too.
+        // Every caller takes session then host, never the inverse.
+        let _session = session_gate
             .lock()
-            .map_err(|_| "Checkpoint store lock poisoned".to_string())?;
+            .map_err(|_| "Checkpoint session lock poisoned")?;
+        let _host = host_gate
+            .lock()
+            .map_err(|_| "Checkpoint host lock poisoned")?;
         operation(self)
     }
 
@@ -487,7 +512,7 @@ pub async fn session_checkpoint_ensure(
     validate_id(&session_id, "session")?;
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.exclusive(|store| store.ensure(&session_id, &cwd))
+        store.exclusive(&session_id, &cwd, |store| store.ensure(&session_id, &cwd))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -506,7 +531,9 @@ pub async fn session_checkpoint_prepare(
     }
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.exclusive(|store| store.prepare(&session_id, &cwd, &paths))
+        store.exclusive(&session_id, &cwd, |store| {
+            store.prepare(&session_id, &cwd, &paths)
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -525,7 +552,9 @@ pub async fn session_checkpoint_capture(
     }
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.exclusive(|store| store.capture(&session_id, &cwd, &paths))
+        store.exclusive(&session_id, &cwd, |store| {
+            store.capture(&session_id, &cwd, &paths)
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -540,7 +569,7 @@ pub async fn session_checkpoint_status(
     validate_id(&session_id, "session")?;
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.exclusive(|store| store.status(&session_id, &cwd))
+        store.exclusive(&session_id, &cwd, |store| store.status(&session_id, &cwd))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -556,7 +585,9 @@ pub async fn session_checkpoint_file_diff(
     validate_id(&session_id, "session")?;
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.exclusive(|store| store.file_diff(&session_id, &cwd, &relative))
+        store.exclusive(&session_id, &cwd, |store| {
+            store.file_diff(&session_id, &cwd, &relative)
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -572,7 +603,9 @@ pub async fn session_checkpoint_undo(
     validate_id(&session_id, "session")?;
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.exclusive(|store| store.undo(&session_id, &cwd, relative.as_deref()))
+        store.exclusive(&session_id, &cwd, |store| {
+            store.undo(&session_id, &cwd, relative.as_deref())
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -588,7 +621,9 @@ pub async fn session_checkpoint_keep(
     validate_id(&session_id, "session")?;
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.exclusive(|store| store.keep(&session_id, &cwd, relative.as_deref()))
+        store.exclusive(&session_id, &cwd, |store| {
+            store.keep(&session_id, &cwd, relative.as_deref())
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1180,6 +1215,69 @@ fn validate_id(value: &str, label: &str) -> Result<(), String> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    #[test]
+    fn slow_wsl_checkpoint_does_not_hold_other_hosts_but_ownership_stays_ordered() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let store = super::CheckpointStore::new(std::env::temp_dir());
+        let (entered, ready) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let (available, availability) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let store = &store;
+            scope.spawn(move || {
+                store
+                    .exclusive("wsl-session", "//wsl.localhost/Ubuntu/repo", |_| {
+                        entered.send(()).unwrap();
+                        released.recv().unwrap();
+                        Ok(())
+                    })
+                    .unwrap()
+            });
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            for (session, cwd) in [
+                ("other-session", "//wsl$/ubuntu/other"),
+                ("wsl-session", "/native/changed-cwd"),
+            ] {
+                let finished = finished.clone();
+                scope.spawn(move || {
+                    store.exclusive(session, cwd, |_| Ok(())).unwrap();
+                    finished.send(()).unwrap();
+                });
+            }
+            scope.spawn(move || {
+                store
+                    .exclusive("native-session", "/native/repo", |_| Ok(()))
+                    .unwrap();
+                store
+                    .exclusive("debian-session", "//wsl.localhost/Debian/repo", |_| Ok(()))
+                    .unwrap();
+                available.send(()).unwrap();
+            });
+            let independent = availability.recv_timeout(Duration::from_secs(2));
+            let finished_early = done.try_recv().is_ok();
+            release.send(()).unwrap();
+            independent.unwrap();
+            assert!(!finished_early);
+            for _ in 0..2 {
+                done.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+        });
+        // Completed hosts/sessions do not leave an ever-growing lock cache.
+        for n in 0..100 {
+            store
+                .exclusive(
+                    &format!("session-{n}"),
+                    &format!("//wsl.localhost/Distro{n}/repo"),
+                    |_| Ok(()),
+                )
+                .unwrap();
+        }
+        assert_eq!(store.gates.lock().unwrap().len(), 2);
+    }
+
     use super::*;
     use std::io::ErrorKind;
     use std::process::Command;

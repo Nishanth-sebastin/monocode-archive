@@ -489,11 +489,21 @@ def serve():
             result = {"ok": handle(json.loads(line))}
         except Exception as error:
             result = {"error": str(error)}
-        encoded = json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode()
-        if len(encoded) > MAX_MESSAGE:
-            encoded = b'{"error":"WSL response exceeds its limit"}'
-        sys.stdout.buffer.write(encoded + b"\n")
+        # Keep bounded encoded fragments instead of joining and copying a large
+        # response into a second full-sized string, bytes object and newline copy.
+        chunks, size = [], 0
+        for chunk in json.JSONEncoder(ensure_ascii=True, separators=(",", ":")).iterencode(result):
+            size += len(chunk)  # ensure_ascii makes characters equal wire bytes.
+            if size + 1 > MAX_MESSAGE:
+                chunks = ['{"error":"WSL response exceeds its limit"}']
+                break
+            chunks.append(chunk)
+        del result, line
+        for chunk in chunks:
+            sys.stdout.buffer.write(chunk.encode("ascii"))
+        sys.stdout.buffer.write(b"\n")
         sys.stdout.buffer.flush()
+        del chunks, chunk
 
 
 if __name__ == "__main__":
