@@ -292,7 +292,7 @@ export function WorktreePanel({
                 : "The branch and conversations stay. Unsaved files and running work block removal."
               : "Other conversations use this folder. Their agents can change the same files."}
           </p>
-          {forceReview && (
+          {confirmation.action === "remove" && forceReview && (
             <details
               onToggle={(event) => {
                 if (!event.currentTarget.open || forceFiles || busy) return;
@@ -320,41 +320,43 @@ export function WorktreePanel({
               ))}
             </details>
           )}
-          {removalBlocked && !forceReview && (
-            <div className="space-y-1">
-              <button
-                type="button"
-                disabled={busy}
-                className={rowClass}
-                onClick={() => {
-                  onOpen(confirmation.entry.path);
-                  onClose();
-                }}
-              >
-                Review changes in worktree
-              </button>
-              <button
-                type="button"
-                disabled={busy || safety?.running || !safety?.dirty}
-                className={rowClass}
-                onClick={() =>
-                  void run(async () => {
-                    const review = await invoke<
-                      NonNullable<typeof forceReview>
-                    >("git_worktree_removal_preview", {
-                      cwd,
-                      path: confirmation.entry.path,
-                      includeFiles: false,
-                    });
-                    setForceReview(review);
-                    setForceFiles(null);
-                  })
-                }
-              >
-                Force remove…
-              </button>
-            </div>
-          )}
+          {confirmation.action === "remove" &&
+            removalBlocked &&
+            !forceReview && (
+              <div className="space-y-1">
+                <button
+                  type="button"
+                  disabled={busy}
+                  className={rowClass}
+                  onClick={() => {
+                    onOpen(confirmation.entry.path);
+                    onClose();
+                  }}
+                >
+                  Review changes in worktree
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || safety?.running || !safety?.dirty}
+                  className={rowClass}
+                  onClick={() =>
+                    void run(async () => {
+                      const review = await invoke<
+                        NonNullable<typeof forceReview>
+                      >("git_worktree_removal_preview", {
+                        cwd,
+                        path: confirmation.entry.path,
+                        includeFiles: false,
+                      });
+                      setForceReview(review);
+                      setForceFiles(null);
+                    })
+                  }
+                >
+                  Force remove…
+                </button>
+              </div>
+            )}
           {confirmation.entry.users.length > 0 && (
             <details className="max-h-24 overflow-auto text-[11px] text-content/50">
               <summary>Existing conversations</summary>
