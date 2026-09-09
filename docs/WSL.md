@@ -20,6 +20,7 @@ These 800×600 Chromium captures render the production React components with onl
 ## Runtime and limits
 
 - WSL 2, Python 3.9+, Linux Git and GNU `mv` are required. Agent cancellation also requires Linux pidfd support. Install/authenticate agent CLIs and optional `gh` inside the selected distribution.
+- New connections validate the selected path/Git before registration. Failed initial opens release their process and slot; a bad path on an existing host preserves that connection. Watchdog expiry marks the connection dead even if a response races the timeout; reconnect creates a fresh bridge, and interrupted mutations remain uncertain.
 - A maximum of four app-open Python stdio bridges handle filesystem/Git work. No service, socket or scheduled automation is installed. Requests have a 30-second deadline; pending requests are capped at 32 and 64 MiB of encoded data. Each message is capped at 40 MiB. Interrupted mutations are not retried automatically.
 - Metadata/read requests are batched (up to 64 files); search reads 16 files per batch, at most 512 KiB each. Directory listings are capped at 20,000 entries. Git subprocess output is capped at 8 MiB per pipe and runs for at most 25 seconds.
 - Checkpoint capture, comparison and undo read/write through Linux; saved snapshots remain in the app profile. Linux names are encoded for case-sensitive, Windows-safe storage; existing native snapshots are unchanged. The existing 500-file snapshot cap and 8 MiB file limit remain. Project/user skill discovery scans at most 2,000 entries and 300 skills per root, reading at most 16 KiB per skill; creating a user skill resolves the Linux home.
@@ -34,7 +35,7 @@ These 800×600 Chromium captures render the production React components with onl
 - Claude installed-plugin registry skill discovery is not implemented for WSL; fixed project/user skill directories are supported.
 - Browsers open on Windows. MonoCode does not forward ports; localhost access depends on Windows/WSL networking configuration. Run Linux editors from the terminal. Reveal in Explorer uses an explicit WSL path, after Linux validation.
 - This is an app-open runtime. Normal cancellation attempts Linux cleanup; abrupt Windows termination, app crashes or descendants surviving a provider's ordinary exit may leave work requiring inspection inside Linux. Durable supervision is #21, not implied here. Reconnect restores access, not a promise that an interrupted agent turn completed.
-- The expanded #32 hierarchy acceptance remains owned by draft #38. Its pending cleanup/repair UI and restart/concurrent-agent acceptance are not silently marked complete by this PR.
+- The compact activity/cleanup controls from #38 are included: known/unknown MonoCode activity, oldest-first sorting, reversible hiding, on-demand Linux safety checks and confirmed Git removal. Full concurrent-agent and cross-platform hierarchy acceptance remains separate.
 
 ## Runnable live acceptance
 

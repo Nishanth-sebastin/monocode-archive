@@ -406,9 +406,9 @@ export function WorktreePanel({
           </p>
           <p
             className="truncate text-[11px] text-content/70"
-            title={detail.path}
+            title={prettyCwd(detail.path)}
           >
-            {detail.path}
+            {prettyCwd(detail.path)}
           </p>
           <p
             title="Latest recorded conversation update or project open in MonoCode. External activity is not tracked."
@@ -435,7 +435,7 @@ export function WorktreePanel({
                 ? "recovery"
                 : "details"}
             </summary>
-            <p className="break-all py-1">{detail.path}</p>
+            <p className="break-all py-1">{prettyCwd(detail.path)}</p>
             <p className="font-mono">{detail.head}</p>
             {(detail.missing || detail.prunable) && (
               <p className="pt-1">
@@ -599,7 +599,10 @@ export function WorktreePanel({
             </button>
             <span>New branch and worktree</span>
           </div>
-          <p className="truncate px-2.5 py-2 text-content/50" title={prettyCwd(cwd)}>
+          <p
+            className="truncate px-2.5 py-2 text-content/50"
+            title={prettyCwd(cwd)}
+          >
             Repository · {cwd.split("/").pop()}
           </p>
           <div className="space-y-0.5 px-1.5 py-1.5">
@@ -639,8 +642,13 @@ export function WorktreePanel({
                 }}
                 onChange={(e) => {
                   setBranch(e.target.value);
-                  if (!path || path === `${rootPath}-${branch.replace(/\//g, "-")}`)
-                    setPath(`${rootPath}-${e.target.value.replace(/\//g, "-")}`);
+                  if (
+                    !path ||
+                    path === `${rootPath}-${branch.replace(/\//g, "-")}`
+                  )
+                    setPath(
+                      `${rootPath}-${e.target.value.replace(/\//g, "-")}`,
+                    );
                 }}
               />
             </label>

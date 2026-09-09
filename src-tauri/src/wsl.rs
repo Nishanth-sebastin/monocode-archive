@@ -471,7 +471,9 @@ impl Bridge {
                     .unwrap_or_else(|e| e.into_inner())
                     .child
                     .kill();
+                return true;
             }
+            false
         });
         let result = (|| {
             io.stdin.write_all(&encoded).map_err(|e| e.to_string())?;
@@ -487,7 +489,22 @@ impl Bridge {
             serde_json::from_slice::<Value>(&response).map_err(|e| e.to_string())
         })();
         let _ = done.send(());
-        let _ = watchdog.join();
+        let timed_out = watchdog.join().unwrap_or(true);
+        self.finish_request(result, timed_out)
+    }
+
+    fn finish_request(
+        &self,
+        result: Result<Value, String>,
+        timed_out: bool,
+    ) -> Result<Value, String> {
+        // A complete response can race the watchdog killing the launcher. Never
+        // retain that dead connection or imply the timed-out mutation is retryable.
+        let result = if timed_out {
+            Err("WSL request timed out".into())
+        } else {
+            result
+        };
         match result {
             Ok(response) => {
                 if let Some(error) = response.get("error").and_then(Value::as_str) {
@@ -560,27 +577,56 @@ pub fn wsl_connect(
         "/usr/bin/python3",
         &["-u".into(), "-c".into(), SCRIPT.into()],
     ));
-    let mut hosts = HOSTS
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    hosts.retain(|_, bridge| bridge.alive.load(Ordering::SeqCst));
-    let key = distribution.to_lowercase();
-    if !hosts.contains_key(&key) {
-        if hosts.len() >= 4 {
-            return Err("Four WSL distributions are already connected. Close the app before selecting another.".into());
-        }
-        let mut bridge = Bridge::start(&mut command)?;
-        bridge.owner = Some((app, distribution.to_owned()));
-        hosts.insert(key, Arc::new(bridge));
-    }
-    drop(hosts);
-    let result: Value = request(&location, "connect", json!({}))?;
-    location.with_path(
-        result["path"]
-            .as_str()
-            .ok_or("WSL did not return the selected Linux path")?,
+    connect_bridge(
+        HOSTS.get_or_init(Mutex::default),
+        &location,
+        &mut command,
+        Some((app, distribution.to_owned())),
     )
+}
+
+fn connect_bridge(
+    registry: &Mutex<HashMap<String, Arc<Bridge>>>,
+    location: &Location,
+    command: &mut Command,
+    owner: Option<(tauri::AppHandle, String)>,
+) -> Result<Location, String> {
+    fn validate(bridge: &Bridge, location: &Location) -> Result<Location, String> {
+        let result = bridge.request(json!({"op":"connect", "path":location.path}))?;
+        location.with_path(
+            result["path"]
+                .as_str()
+                .ok_or("WSL did not return the selected Linux path")?,
+        )
+    }
+    let key = location.distribution.to_lowercase();
+    {
+        let mut hosts = registry.lock().unwrap_or_else(|e| e.into_inner());
+        hosts.retain(|_, bridge| bridge.alive.load(Ordering::SeqCst));
+        if let Some(bridge) = hosts.get(&key).cloned() {
+            drop(hosts);
+            return validate(&bridge, location);
+        }
+        if hosts.len() + CONNECTING.load(Ordering::SeqCst).max(1) > 4 {
+            return Err("WSL connections are busy or four distributions are connected. Retry after pending opens finish; close the app to release connected distributions.".into());
+        }
+    }
+    // Validate privately: failed opens drop their process and consume no host
+    // slot. Other repositories can keep using their bridges during validation.
+    let mut candidate = Bridge::start(command)?;
+    candidate.owner = owner;
+    let connected = validate(&candidate, location)?;
+    let mut hosts = registry.lock().unwrap_or_else(|e| e.into_inner());
+    hosts.retain(|_, bridge| bridge.alive.load(Ordering::SeqCst));
+    if !hosts.contains_key(&key) && hosts.len() >= 4 {
+        return Err(
+            "Four WSL distributions are already connected. Close the app before selecting another."
+                .into(),
+        );
+    }
+    // Another successful open may have registered the same distro meanwhile.
+    hosts.entry(key).or_insert_with(|| Arc::new(candidate));
+    Ok(connected)
 }
 
 #[tauri::command]
@@ -1238,6 +1284,73 @@ assert not any(call[0] == 'signal' for call in calls)
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_connections_release_slots_and_preserve_existing_hosts() {
+        let registry = Mutex::new(HashMap::new());
+        let path = std::env::temp_dir().to_string_lossy().into_owned();
+        let missing = format!("{path}/monocode-missing-{}", std::process::id());
+        let connect = |name: &str, path: &str| {
+            let mut command = Command::new("python3");
+            command.args(["-u", "-c", SCRIPT]);
+            connect_bridge(
+                &registry,
+                &Location::new(name, path).unwrap(),
+                &mut command,
+                None,
+            )
+        };
+        for index in 0..4 {
+            assert!(connect(&format!("Bad-{index}"), &missing).is_err());
+            assert!(registry.lock().unwrap().is_empty());
+        }
+        connect("Valid", &path).unwrap();
+        let original = registry.lock().unwrap().get("valid").unwrap().clone();
+        assert!(connect("Valid", &missing).is_err());
+        connect("Valid", &path).unwrap();
+        assert!(Arc::ptr_eq(
+            &original,
+            registry.lock().unwrap().get("valid").unwrap()
+        ));
+        for index in 1..4 {
+            connect(&format!("Valid-{index}"), &path).unwrap();
+        }
+        assert!(connect("Fifth", &path).is_err());
+        assert_eq!(registry.lock().unwrap().len(), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watchdog_expiry_overrides_a_complete_response_and_allows_reconnect() {
+        let mut command = Command::new("python3");
+        command.args(["-u", "-c", SCRIPT]);
+        let bridge = Arc::new(Bridge::start(&mut command).unwrap());
+        // Simulate the OS deadline firing after the read completed. Exercise
+        // the production completion, process cleanup and reconnect paths.
+        let error = bridge
+            .finish_request(Ok(json!({"ok":null})), true)
+            .unwrap_err();
+        assert!(error.contains("may have completed"));
+        assert!(!bridge.alive.load(Ordering::SeqCst));
+        assert!(!bridge
+            .process
+            .lock()
+            .unwrap()
+            .child
+            .wait()
+            .unwrap()
+            .success());
+        assert!(bridge.request(json!({})).unwrap_err().contains("Reconnect"));
+        let registry = Mutex::new(HashMap::from([("ubuntu".into(), bridge.clone())]));
+        let location = Location::new("Ubuntu", &std::env::temp_dir().to_string_lossy()).unwrap();
+        let connected = connect_bridge(&registry, &location, &mut command, None).unwrap();
+        assert_eq!(connected.distribution, "Ubuntu");
+        assert!(!Arc::ptr_eq(
+            &bridge,
+            registry.lock().unwrap().get("ubuntu").unwrap()
+        ));
     }
 
     #[cfg(unix)]
