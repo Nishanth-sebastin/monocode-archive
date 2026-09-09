@@ -147,6 +147,7 @@ type Props = {
   onTogglePanel?: () => void;
   onSelectProject: (path: string) => void;
   onOpenProject: () => void;
+  onOpenWslProject?: () => void;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
   liveAgents?: LiveAgent[];
   activeSessionId?: string;
@@ -180,6 +181,7 @@ export function ProjectRail({
   onTogglePanel,
   onSelectProject,
   onOpenProject,
+  onOpenWslProject,
   onRemoveProject,
   liveAgents = [],
   activeSessionId,
@@ -495,6 +497,7 @@ export function ProjectRail({
               families={families}
               emptyLabel="No projects yet"
               onAdd={onOpenProject}
+              onOpenWsl={onOpenWslProject}
               cwd={cwd}
               busy={busy}
               sortable={projectSortable}
@@ -823,6 +826,7 @@ function ProjectSection({
   families,
   emptyLabel,
   onAdd,
+  onOpenWsl,
   cwd,
   busy,
   sortable,
@@ -843,6 +847,7 @@ function ProjectSection({
   families: ReadonlyMap<string, RepositoryFamily>;
   emptyLabel?: string;
   onAdd?: () => void;
+  onOpenWsl?: () => void;
   cwd: string;
   busy: Set<string>;
   sortable: SortableHandle;
@@ -864,6 +869,11 @@ function ProjectSection({
         <span className="min-w-0 flex-1 truncate px-1 text-xs text-content/50">
           {label}
         </span>
+        {onOpenWsl && (
+          <button type="button" title="Open WSL project" aria-label="Open WSL project" onClick={onOpenWsl} className="h-5 shrink-0 rounded-md px-1 text-[11px] text-content/50 hover:bg-content/8 hover:text-content">
+            WSL…
+          </button>
+        )}
         {onAdd ? (
           <button
             type="button"

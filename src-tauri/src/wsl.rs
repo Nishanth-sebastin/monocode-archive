@@ -8,6 +8,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 
 const SCRIPT: &str = include_str!("wsl_bridge.py");
 const MAX_MESSAGE: usize = 40 * 1024 * 1024;
@@ -15,6 +16,7 @@ const MAX_QUEUED_BYTES: usize = 64 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 static QUEUED_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 static QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
+static CONNECTING: AtomicUsize = AtomicUsize::new(0);
 static HOSTS: OnceLock<Mutex<HashMap<String, Arc<Bridge>>>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +180,7 @@ struct Bridge {
     io: Mutex<BridgeIo>,
     process: Arc<Mutex<Process>>,
     alive: AtomicBool,
+    owner: Option<(tauri::AppHandle, String)>,
 }
 impl Bridge {
     fn start(command: &mut Command) -> Result<Self, String> {
@@ -202,6 +205,7 @@ impl Bridge {
                 _job: job,
             })),
             alive: AtomicBool::new(true),
+            owner: None,
         })
     }
     fn request(&self, request: Value) -> Result<Value, String> {
@@ -305,6 +309,9 @@ impl Bridge {
             }
             Err(error) => {
                 self.alive.store(false, Ordering::SeqCst);
+                if let Some((app, distribution)) = &self.owner {
+                    let _ = app.emit("wsl:disconnected", distribution);
+                }
                 let _ = self
                     .process
                     .lock()
@@ -331,7 +338,24 @@ pub fn request<T: DeserializeOwned>(
 }
 
 #[tauri::command(async)]
-pub fn wsl_connect(distribution: String, path: String) -> Result<Location, String> {
+pub fn wsl_connect(
+    app: tauri::AppHandle,
+    distribution: String,
+    path: String,
+) -> Result<Location, String> {
+    if CONNECTING.fetch_add(1, Ordering::SeqCst) >= 4 {
+        CONNECTING.fetch_sub(1, Ordering::SeqCst);
+        return Err(
+            "WSL connection attempts are busy. Wait for the current open to finish.".into(),
+        );
+    }
+    struct Connecting;
+    impl Drop for Connecting {
+        fn drop(&mut self) {
+            CONNECTING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let _connecting = Connecting;
     let known = wsl_distributions()?;
     let distribution = known
         .iter()
@@ -355,7 +379,9 @@ pub fn wsl_connect(distribution: String, path: String) -> Result<Location, Strin
         if hosts.len() >= 4 {
             return Err("Four WSL distributions are already connected. Close the app before selecting another.".into());
         }
-        hosts.insert(key, Arc::new(Bridge::start(&mut command)?));
+        let mut bridge = Bridge::start(&mut command)?;
+        bridge.owner = Some((app, distribution.to_owned()));
+        hosts.insert(key, Arc::new(bridge));
     }
     drop(hosts);
     let result: Value = request(&location, "connect", json!({}))?;

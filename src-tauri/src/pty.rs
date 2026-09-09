@@ -131,6 +131,12 @@ pub fn pty_spawn(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    if crate::wsl::location(&cwd)?.is_some() {
+        return Err(
+            "WSL terminals are not available in this draft yet; a Windows shell was not started."
+                .into(),
+        );
+    }
     let _worktree_guard = crate::fs::worktrees::LIFECYCLE
         .try_read()
         .map_err(|_| "Worktree operation in progress; retry terminal startup after it completes")?;

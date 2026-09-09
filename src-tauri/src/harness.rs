@@ -335,6 +335,12 @@ pub fn harness_spawn(
     args: Vec<String>,
     cwd: String,
 ) -> Result<u32, String> {
+    if crate::wsl::location(&cwd)?.is_some() {
+        return Err(
+            "WSL agent startup is not available in this draft yet; Windows execution was not used."
+                .into(),
+        );
+    }
     let _worktree_guard = crate::fs::worktrees::LIFECYCLE
         .try_read()
         .map_err(|_| "Worktree operation in progress; retry startup after it completes")?;
@@ -680,6 +686,18 @@ pub async fn harness_exec(
     args: Vec<String>,
     cwd: Option<String>,
 ) -> Result<String, String> {
+    if cwd
+        .as_deref()
+        .map(crate::wsl::location)
+        .transpose()?
+        .flatten()
+        .is_some()
+    {
+        return Err(
+            "WSL agent probes are not available in this draft yet; Windows execution was not used."
+                .into(),
+        );
+    }
     if !exec_args_allowed(&args) {
         return Err("harness_exec: unsupported arguments".into());
     }

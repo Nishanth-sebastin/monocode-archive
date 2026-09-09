@@ -216,6 +216,7 @@ type Props = {
   onSelectAgent?: (sessionId: string) => void;
   onSelectProject?: (path: string) => void;
   onOpenProject?: () => void;
+  onOpenWslProject?: () => void;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
   onNew?: () => string | void;
   onNewTerminal?: () => void;
@@ -288,6 +289,7 @@ function SidebarComponent({
   onSelectAgent,
   onSelectProject,
   onOpenProject,
+  onOpenWslProject,
   onRemoveProject,
   onNew,
   onSearch,
@@ -1101,6 +1103,7 @@ function SidebarComponent({
               busy={projectPathBusy(busyProjectPaths, cwd)}
               onSelectProject={onSelectProject}
               onOpenProject={onOpenProject}
+              onOpenWslProject={onOpenWslProject}
               onNew={onNew}
               onSearch={onSearch}
               onOpenInbox={onOpenInbox}
@@ -1514,6 +1517,7 @@ function SidebarComponent({
           onTogglePanel={onToggleProjectRail}
           onSelectProject={onSelectProject}
           onOpenProject={onOpenProject}
+              onOpenWslProject={onOpenWslProject}
           onRemoveProject={onRemoveProject}
           settingsOpen={settingsOpen}
           settingsSection={settingsSection}
@@ -1538,6 +1542,7 @@ function SidebarProjectPicker({
   busy,
   onSelectProject,
   onOpenProject,
+  onOpenWslProject,
   onNew,
   onSearch,
   onOpenInbox,
@@ -1552,6 +1557,7 @@ function SidebarProjectPicker({
   busy: boolean;
   onSelectProject: (path: string) => void;
   onOpenProject?: () => void;
+  onOpenWslProject?: () => void;
   onNew?: () => void;
   onSearch?: () => void;
   onOpenInbox?: () => void;
@@ -1793,6 +1799,12 @@ function SidebarProjectPicker({
                   <Plus className="size-4 shrink-0" strokeWidth={1.75} />
                   <span>New project</span>
                 </button>
+                {onOpenWslProject && (
+                  <button type="button" onClick={() => { closePicker(); onOpenWslProject(); }} className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8 hover:text-content">
+                    <Plus className="size-4 shrink-0" strokeWidth={1.75} />
+                    <span>Open WSL project…</span>
+                  </button>
+                )}
               </div>
             ) : null}
           </Popover>
