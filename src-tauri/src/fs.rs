@@ -120,7 +120,7 @@ fn git_ls_files(root: &Path) -> Option<Vec<ProjectFile>> {
         if relative.ends_with('/') || path_has_skipped_dir(&relative) {
             continue;
         }
-        let path = root.join(&relative);
+        let path = host_path(root, &relative);
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -881,7 +881,7 @@ fn git_diff_index_with(root: &Path, include_sync: bool) -> GitDiffIndex {
     for (relative, acc) in files {
         additions += acc.additions;
         deletions += acc.deletions;
-        let abs = root.join(&relative);
+        let abs = host_path(root, &relative);
         let status = if acc.untracked {
             "untracked"
         } else if let Some(status) = statuses.get(&relative) {
@@ -984,7 +984,7 @@ fn add_untracked_map(root: &Path, files: &mut HashMap<String, FileAcc>) {
             let paths: Vec<_> = stdout
                 .split('\0')
                 .filter(|rel| !rel.is_empty())
-                .map(|rel| path_to_js(&root.join(rel)))
+                .map(|rel| path_to_js(&host_path(root, rel)))
                 .collect();
             wsl::file_batches::<serde_json::Value>(&paths, "line_counts")
                 .unwrap_or_default()
@@ -1006,8 +1006,8 @@ fn add_untracked_map(root: &Path, files: &mut HashMap<String, FileAcc>) {
         entry.untracked = true;
         if entry.additions == 0 {
             entry.additions = match &remote_counts {
-                Some(counts) => *counts.get(&path_to_js(&root.join(rel))).unwrap_or(&0),
-                None => text_line_count(&root.join(rel)),
+                Some(counts) => *counts.get(&path_to_js(&host_path(root, rel))).unwrap_or(&0),
+                None => text_line_count(&host_path(root, rel)),
             };
         }
     }
@@ -1070,7 +1070,7 @@ fn git_file_diff_for(root: &Path, relative: &str) -> Result<GitFileDiff, String>
     {
         return Err("Invalid path".into());
     }
-    let abs = root.join(&relative);
+    let abs = host_path(root, &relative);
     if !abs.starts_with(root) {
         return Err("Invalid path".into());
     }
@@ -1349,7 +1349,7 @@ fn git_commit_files_for(root: &Path, sha: &str) -> Result<Vec<GitChangedFile>, S
         seen.insert(relative.clone());
         let status = statuses.get(&relative).copied().unwrap_or("modified");
         out.push(GitChangedFile {
-            path: path_to_js(&root.join(&relative)),
+            path: path_to_js(&host_path(root, &relative)),
             relative,
             status: status.to_string(),
             additions: acc.additions,
@@ -1363,7 +1363,7 @@ fn git_commit_files_for(root: &Path, sha: &str) -> Result<Vec<GitChangedFile>, S
             continue;
         }
         out.push(GitChangedFile {
-            path: path_to_js(&root.join(&relative)),
+            path: path_to_js(&host_path(root, &relative)),
             relative,
             status: status.to_string(),
             additions: 0,
@@ -1407,7 +1407,7 @@ fn git_commit_file_diff_for(root: &Path, sha: &str, relative: &str) -> Result<Gi
         )
     };
     Ok(GitFileDiff {
-        path: path_to_js(&root.join(&relative)),
+        path: path_to_js(&host_path(root, &relative)),
         relative,
         status: status.to_string(),
         original,
@@ -1507,7 +1507,7 @@ fn git_unstage_file_for(root: &Path, relative: &str) -> Result<(), String> {
 
 fn git_discard_file_for(root: &Path, relative: &str) -> Result<(), String> {
     let relative = resolve_repo_path(root, relative)?;
-    let abs = root.join(&relative);
+    let abs = host_path(root, &relative);
     if git_checked(root, &["ls-files", "--error-unmatch", "--", &relative]).is_err() {
         if wsl::path_location(root)?.is_some() {
             return git_checked(root, &["clean", "-fd", "--", &relative]);
@@ -2635,6 +2635,19 @@ fn gh_run(root: &Path, args: &[&str], allow_empty: bool) -> Result<String, Strin
     Err(detail)
 }
 
+pub(crate) fn host_path(root: &Path, relative: &str) -> PathBuf {
+    if let Ok(Some(location)) = wsl::path_location(root) {
+        // Build the full identity before Windows parses it; a Linux leaf such
+        // as C:notes must never replace the repository with a Windows drive.
+        return PathBuf::from(format!(
+            "{}/{}",
+            location.identity().trim_end_matches('/'),
+            relative
+        ));
+    }
+    root.join(relative)
+}
+
 pub(crate) fn resolve_repo_path(root: &Path, relative: &str) -> Result<String, String> {
     let relative = normalize_diff_path(relative);
     if relative.is_empty()
@@ -2645,7 +2658,7 @@ pub(crate) fn resolve_repo_path(root: &Path, relative: &str) -> Result<String, S
     {
         return Err("Invalid path".into());
     }
-    let abs = root.join(&relative);
+    let abs = host_path(root, &relative);
     if !abs.starts_with(root) {
         return Err("Invalid path".into());
     }

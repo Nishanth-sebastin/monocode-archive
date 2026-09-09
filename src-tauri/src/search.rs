@@ -115,7 +115,7 @@ fn git_grep(root: &Path, options: &SearchOptions, query: &str) -> Option<SearchR
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(1);
         let preview = String::from_utf8_lossy(preview_bytes).to_string();
-        let path = crate::fs::path_to_js(&root.join(&relative));
+        let path = crate::fs::path_to_js(&crate::fs::host_path(&root, &relative));
         let column = match_column(
             &preview,
             query,

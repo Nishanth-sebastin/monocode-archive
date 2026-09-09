@@ -174,6 +174,33 @@ def handle(request):
         if code and not out.strip():
             raise ValueError(err.decode("utf-8", errors="replace").strip())
         return out.decode("utf-8", errors="replace")
+    if op == "home":
+        return str(Path.home())
+    if op == "skill_entries":
+        result = []
+        if not path.is_dir():
+            return result
+        with os.scandir(path) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 2000 or len(result) >= 300:
+                    break
+                if entry.name.startswith('.') or entry.name == 'skills-cursor' or not entry.is_dir():
+                    continue
+                for name in ['SKILL.md', 'skill.md']:
+                    target = Path(entry.path) / name
+                    if not target.is_file():
+                        continue
+                    try:
+                        descriptor = os.open(target, os.O_RDONLY | os.O_NONBLOCK)
+                        with os.fdopen(descriptor, 'rb') as stream:
+                            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                                break
+                            text = stream.read(16 * 1024).decode('utf-8')
+                        result.append({'path': str(target), 'folder': entry.name, 'text': text})
+                    except (OSError, UnicodeError):
+                        pass
+                    break
+        return result
     if op == "connect":
         path = path.resolve(strict=True)
         if not path.is_dir():
@@ -223,10 +250,10 @@ def handle(request):
         try:
             meta = path.stat()
         except FileNotFoundError:
-            return {"exists": False, "data": "", "tooLarge": False}
+            return {"exists": False, "isFile": False, "data": "", "tooLarge": False}
         large = meta.st_size > MAX_TEXT
         data = file_bytes(path, MAX_TEXT) if stat.S_ISREG(meta.st_mode) and not large else b""
-        return {"exists": True, "data": base64.b64encode(data).decode(), "tooLarge": large}
+        return {"exists": True, "isFile": stat.S_ISREG(meta.st_mode), "data": base64.b64encode(data).decode(), "tooLarge": large}
     if op == "list":
         entries = []
         with os.scandir(path) as reader:
@@ -297,10 +324,12 @@ def handle(request):
         start = max(1, request.get("start", 1)) - 1
         count = max(1, min(12, request.get("count", 12)))
         return [line if len(line) <= 200 else line[:199] + "…" for line in text.splitlines()[start:start + count]]
-    if op == "write_text":
-        content = request["content"].encode("utf-8")
+    if op in ("write_text", "restore_bytes"):
+        content = request["content"].encode("utf-8") if op == "write_text" else base64.b64decode(request["data"], validate=True)
         if len(content) > MAX_TEXT:
             raise ValueError("File exceeds 8 MiB")
+        if op == "restore_bytes":
+            path.parent.mkdir(parents=True, exist_ok=True)
         destination = path.resolve(strict=path.exists())
         mode = stat.S_IMODE(destination.stat().st_mode) if destination.exists() else None
         descriptor, temporary = tempfile.mkstemp(prefix=".monocode-", dir=destination.parent)
@@ -316,6 +345,28 @@ def handle(request):
             if os.path.exists(temporary):
                 os.unlink(temporary)
         return None
+    if op == "diff_numstat":
+        with tempfile.TemporaryDirectory(prefix="monocode-diff-") as directory:
+            paths = [Path(directory) / name for name in ["before", "after"]]
+            for target, key in zip(paths, ["before", "after"]):
+                data = base64.b64decode(request[key], validate=True)
+                if len(data) > MAX_TEXT:
+                    raise ValueError("Checkpoint file exceeds 8 MiB")
+                target.write_bytes(data)
+            code, out, err = run(["git", "diff", "--no-index", "--no-ext-diff", "--numstat", "--", *map(str, paths)], str(path))
+            if code not in (0, 1):
+                raise ValueError(err.decode("utf-8", errors="replace"))
+            return out.decode("utf-8", errors="replace")
+    if op == "remove_checkpoint_file":
+        if path.is_dir() and not path.is_symlink():
+            raise ValueError("A directory replaced this file; inspect it before undoing")
+        path.unlink(missing_ok=True)
+        return None
+    if op == "canonical_directory":
+        result = path.resolve(strict=True)
+        if not result.is_dir():
+            raise ValueError("Choose a Linux directory")
+        return str(result)
     if op == "canonical":
         return str(path.resolve(strict=True))
     if op == "new_path":

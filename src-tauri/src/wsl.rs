@@ -761,6 +761,13 @@ mod tests {
             assert!(Location::new("Ubuntu", invalid).is_err());
         }
         assert!(location("C:\\native\\project").unwrap().is_none());
+        assert_eq!(
+            crate::fs::path_to_js(&crate::fs::host_path(
+                std::path::Path::new(&value.identity()),
+                "C:notes"
+            )),
+            format!("{}/C:notes", value.identity())
+        );
         let bytes: Vec<_> = "\u{feff}Ubuntu\r\nDebian Work\r\n"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -1044,6 +1051,18 @@ def run(argv, cwd, input_bytes=None, timeout=25):
             root.identity()
         ))
         .is_err());
+        crate::checkpoint::tests::verify_wsl_round_trip(&cloned);
+        let skill = directory.join(".agents/skills/test-wsl/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(
+            &skill,
+            "---\nname: test-wsl\ndescription: Linux skill ż\n---\nInstructions",
+        )
+        .unwrap();
+        let skills = crate::skills::list_skills_from(std::path::Path::new(&root.identity()), None);
+        assert!(skills.iter().any(|skill| skill.name == "test-wsl"
+            && skill.description == "Linux skill ż"
+            && skill.path.starts_with("//wsl.localhost/")));
         let target = root
             .with_path(&directory.join("child space ż").to_string_lossy())
             .unwrap();

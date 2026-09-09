@@ -1,3 +1,6 @@
+use crate::wsl;
+use base64::Engine;
+use serde_json::json;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -11,8 +14,8 @@ use tauri::{AppHandle, Manager, State};
 #[cfg(test)]
 use crate::fs::GitDiffStats;
 use crate::fs::{
-    expand_home, git_checked, git_diff_files_for, path_to_js, resolve_repo_path, GitChangedFile,
-    GitDiffIndex, MAX_TEXT_FILE_BYTES,
+    expand_home, git_checked, git_diff_files_for, host_path, path_to_js, resolve_repo_path,
+    GitChangedFile, GitDiffIndex, MAX_TEXT_FILE_BYTES,
 };
 
 const MAX_SNAPSHOT_FILES: usize = 500;
@@ -163,7 +166,7 @@ impl CheckpointStore {
                 manifest.tracked.insert(relative.clone());
             }
             if !manifest.files.contains_key(&relative)
-                && !root.join(&relative).exists()
+                && matches!(read_worktree(&root, &relative), FileState::Missing)
                 && !tracked_in_head
             {
                 // A completion without a matching prepare event is retained
@@ -231,8 +234,8 @@ impl CheckpointStore {
             .get(&relative)
             .copied()
             .ok_or_else(|| "Session result is unavailable".to_string())?;
-        let original = read_snapshot(&dir, &relative, before);
-        let current = read_after_snapshot(&dir, &relative, after);
+        let original = read_snapshot(&dir, &relative, before, &manifest.cwd);
+        let current = read_after_snapshot(&dir, &relative, after, &manifest.cwd);
         let too_large =
             matches!(original, FileState::Skipped) || matches!(current, FileState::Skipped);
         let binary = state_is_binary(&original) || state_is_binary(&current);
@@ -247,7 +250,7 @@ impl CheckpointStore {
             .map(|stats| stats.status.clone())
             .unwrap_or_else(|| "modified".into());
         Ok(CheckpointFileDiff {
-            path: path_to_js(&root.join(&relative)),
+            path: path_to_js(&host_path(&root, &relative)),
             relative,
             status,
             original,
@@ -667,7 +670,10 @@ fn diff_from_manifest_with(
 fn session_snapshot_differs(dir: &Path, manifest: &Manifest, relative: &str) -> Option<bool> {
     let before = manifest.files.get(relative).copied()?;
     let after = manifest.after.get(relative).copied()?;
-    Some(read_snapshot(dir, relative, before) != read_after_snapshot(dir, relative, after))
+    Some(
+        read_snapshot(dir, relative, before, &manifest.cwd)
+            != read_after_snapshot(dir, relative, after, &manifest.cwd),
+    )
 }
 
 #[cfg(test)]
@@ -701,10 +707,13 @@ fn file_differs(
     }
     match manifest.files.get(relative) {
         Some(SnapshotKind::Skipped) => false,
-        Some(kind) => read_worktree(root, relative) != read_snapshot(dir, relative, *kind),
+        Some(kind) => {
+            read_worktree(root, relative) != read_snapshot(dir, relative, *kind, &manifest.cwd)
+        }
         None => {
             git_dirty.contains(relative)
-                || (root.join(relative).is_file() && !in_head(root, relative))
+                || (matches!(read_worktree(root, relative), FileState::Contents(_))
+                    && !in_head(root, relative))
         }
     }
 }
@@ -719,7 +728,7 @@ fn describe_change(
 ) -> CheckpointFile {
     if let Some((status, additions, deletions)) = session_change {
         return CheckpointFile {
-            path: path_to_js(&root.join(relative)),
+            path: path_to_js(&host_path(root, relative)),
             relative: relative.to_string(),
             status,
             additions,
@@ -739,8 +748,12 @@ fn describe_change(
             undoable,
         };
     }
-    let abs = root.join(relative);
-    let status = if !abs.exists() { "deleted" } else { "modified" };
+    let abs = host_path(root, relative);
+    let status = if matches!(read_worktree(root, relative), FileState::Missing) {
+        "deleted"
+    } else {
+        "modified"
+    };
     CheckpointFile {
         path: path_to_js(&abs),
         relative: relative.to_string(),
@@ -758,9 +771,19 @@ fn calculate_session_stats(dir: &Path, manifest: &Manifest, relative: &str) -> O
     if before == SnapshotKind::Skipped || after == SnapshotKind::Skipped {
         return None;
     }
-    let before_path = state_blob_path(&dir.join("files"), relative).ok()?;
-    let after_path = state_blob_path(&dir.join("after"), relative).ok()?;
-    let (additions, deletions) = diff_numstat(&before_path, &after_path)?;
+    let before_path = state_blob_path(
+        &dir.join("files"),
+        relative,
+        wsl::location(&manifest.cwd).ok().flatten().is_some(),
+    )
+    .ok()?;
+    let after_path = state_blob_path(
+        &dir.join("after"),
+        relative,
+        wsl::location(&manifest.cwd).ok().flatten().is_some(),
+    )
+    .ok()?;
+    let (additions, deletions) = diff_numstat(&before_path, &after_path, &manifest.cwd)?;
     let status = match (before, after) {
         (SnapshotKind::Missing, SnapshotKind::Missing) => "modified",
         (SnapshotKind::Missing, _) => "added",
@@ -774,7 +797,22 @@ fn calculate_session_stats(dir: &Path, manifest: &Manifest, relative: &str) -> O
     })
 }
 
-fn diff_numstat(before: &Path, after: &Path) -> Option<(i64, i64)> {
+fn diff_numstat(before: &Path, after: &Path, cwd: &str) -> Option<(i64, i64)> {
+    if let Some(location) = wsl::location(cwd).ok().flatten() {
+        let encode = |path: &Path| {
+            std::fs::read(path)
+                .ok()
+                .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+        };
+        let text: String = wsl::request(
+            &location,
+            "diff_numstat",
+            json!({"before":encode(before)?, "after":encode(after)?}),
+        )
+        .ok()?;
+        let mut fields = text.lines().next()?.split('\t');
+        return Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?));
+    }
     let mut cmd = Command::new("git");
     crate::hide_window_console(&mut cmd);
     let output = cmd
@@ -797,7 +835,7 @@ fn after_matches_worktree(dir: &Path, root: &Path, manifest: &Manifest, relative
     let Some(kind) = manifest.after.get(relative).copied() else {
         return false;
     };
-    read_worktree(root, relative) == read_after_snapshot(dir, relative, kind)
+    read_worktree(root, relative) == read_after_snapshot(dir, relative, kind, &manifest.cwd)
 }
 
 fn release_path(manifest: &mut Manifest, relative: &str) {
@@ -832,11 +870,11 @@ fn restore_snapshot(
             remove_worktree(root, relative)
         }
         SnapshotKind::Contents => {
-            let bytes = match read_snapshot(dir, relative, kind) {
+            let bytes = match read_snapshot(dir, relative, kind, &root.to_string_lossy()) {
                 FileState::Contents(bytes) => bytes,
                 _ => return Ok(()),
             };
-            write_worktree(&root.join(relative), &bytes)?;
+            write_worktree(&host_path(root, relative), &bytes)?;
             let _ = git_checked(root, &["reset", "-q", "HEAD", "--", relative]);
             Ok(())
         }
@@ -875,9 +913,22 @@ fn snapshot_after_file(dir: &Path, root: &Path, relative: &str) -> Result<Snapsh
 }
 
 fn snapshot_file_at(blob_root: &Path, root: &Path, relative: &str) -> Result<SnapshotKind, String> {
-    let abs = root.join(relative);
+    let abs = host_path(root, relative);
+    if let Some(location) = wsl::path_location(&abs)? {
+        let (kind, bytes) = match read_wsl_state(&location)? {
+            FileState::Missing => (SnapshotKind::Missing, Vec::new()),
+            FileState::Contents(bytes) => (SnapshotKind::Contents, bytes),
+            FileState::Skipped => return Ok(SnapshotKind::Skipped),
+        };
+        let blob = state_blob_path(blob_root, relative, true)?;
+        if let Some(parent) = blob.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(blob, bytes).map_err(|e| e.to_string())?;
+        return Ok(kind);
+    }
     if !abs.exists() {
-        let blob = state_blob_path(blob_root, relative)?;
+        let blob = state_blob_path(blob_root, relative, false)?;
         if let Some(parent) = blob.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -892,7 +943,7 @@ fn snapshot_file_at(blob_root: &Path, root: &Path, relative: &str) -> Result<Sna
         return Ok(SnapshotKind::Skipped);
     }
     let bytes = std::fs::read(&abs).map_err(|e| e.to_string())?;
-    let blob = state_blob_path(blob_root, relative)?;
+    let blob = state_blob_path(blob_root, relative, false)?;
     if let Some(parent) = blob.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -900,21 +951,25 @@ fn snapshot_file_at(blob_root: &Path, root: &Path, relative: &str) -> Result<Sna
     Ok(SnapshotKind::Contents)
 }
 
-fn read_snapshot(dir: &Path, relative: &str, kind: SnapshotKind) -> FileState {
-    read_snapshot_at(&dir.join("files"), relative, kind)
+fn read_snapshot(dir: &Path, relative: &str, kind: SnapshotKind, cwd: &str) -> FileState {
+    read_snapshot_at(&dir.join("files"), relative, kind, cwd)
 }
 
-fn read_after_snapshot(dir: &Path, relative: &str, kind: SnapshotKind) -> FileState {
-    read_snapshot_at(&dir.join("after"), relative, kind)
+fn read_after_snapshot(dir: &Path, relative: &str, kind: SnapshotKind, cwd: &str) -> FileState {
+    read_snapshot_at(&dir.join("after"), relative, kind, cwd)
 }
 
-fn read_snapshot_at(blob_root: &Path, relative: &str, kind: SnapshotKind) -> FileState {
+fn read_snapshot_at(blob_root: &Path, relative: &str, kind: SnapshotKind, cwd: &str) -> FileState {
     match kind {
         SnapshotKind::Missing => FileState::Missing,
         SnapshotKind::Skipped => FileState::Skipped,
-        SnapshotKind::Contents => match state_blob_path(blob_root, relative)
-            .ok()
-            .and_then(|path| std::fs::read(path).ok())
+        SnapshotKind::Contents => match state_blob_path(
+            blob_root,
+            relative,
+            wsl::location(cwd).ok().flatten().is_some(),
+        )
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
         {
             Some(bytes) => FileState::Contents(bytes),
             None => FileState::Missing,
@@ -922,8 +977,31 @@ fn read_snapshot_at(blob_root: &Path, relative: &str, kind: SnapshotKind) -> Fil
     }
 }
 
+fn read_wsl_state(location: &wsl::Location) -> Result<FileState, String> {
+    let value: serde_json::Value = wsl::request(location, "diff_file", json!({}))?;
+    if value["exists"] == false {
+        return Ok(FileState::Missing);
+    }
+    if value["isFile"] != true || value["tooLarge"] == true {
+        return Ok(FileState::Skipped);
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(
+            value["data"]
+                .as_str()
+                .ok_or("Missing checkpoint contents")?,
+        )
+        .map(FileState::Contents)
+        .map_err(|e| e.to_string())
+}
+
 fn read_worktree(root: &Path, relative: &str) -> FileState {
-    let abs = root.join(relative);
+    let abs = host_path(root, relative);
+    match wsl::path_location(&abs) {
+        Ok(Some(location)) => return read_wsl_state(&location).unwrap_or(FileState::Skipped),
+        Err(_) => return FileState::Skipped,
+        Ok(None) => {}
+    }
     if !abs.exists() {
         return FileState::Missing;
     }
@@ -953,6 +1031,13 @@ fn state_text(state: FileState) -> String {
 }
 
 fn write_worktree(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(location) = wsl::path_location(path)? {
+        return wsl::request(
+            &location,
+            "restore_bytes",
+            json!({"data":base64::engine::general_purpose::STANDARD.encode(bytes)}),
+        );
+    }
     if path.is_dir() {
         return Err(format!("{} is a directory", path.display()));
     }
@@ -963,7 +1048,10 @@ fn write_worktree(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn remove_worktree(root: &Path, relative: &str) -> Result<(), String> {
-    let abs = root.join(relative);
+    let abs = host_path(root, relative);
+    if let Some(location) = wsl::path_location(&abs)? {
+        return wsl::request(&location, "remove_checkpoint_file", json!({}));
+    }
     if abs.is_file() || abs.is_symlink() {
         std::fs::remove_file(&abs).map_err(|e| e.to_string())?;
         return Ok(());
@@ -977,7 +1065,7 @@ fn remove_worktree(root: &Path, relative: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn state_blob_path(blob_root: &Path, relative: &str) -> Result<PathBuf, String> {
+fn state_blob_path(blob_root: &Path, relative: &str, linux: bool) -> Result<PathBuf, String> {
     if relative.is_empty()
         || relative.starts_with('/')
         || relative
@@ -985,6 +1073,16 @@ fn state_blob_path(blob_root: &Path, relative: &str) -> Result<PathBuf, String> 
             .any(|part| part.is_empty() || part == "..")
     {
         return Err("Invalid path".into());
+    }
+    if linux {
+        // Linux names may differ only in case or name Windows devices/streams.
+        // Encode bytes with lowercase hex; bounded components work on both hosts.
+        let encoded: String = relative.bytes().map(|byte| format!("{byte:02x}")).collect();
+        let mut path = blob_root.join(".wsl");
+        for chunk in encoded.as_bytes().chunks(100) {
+            path.push(std::str::from_utf8(chunk).map_err(|e| e.to_string())?);
+        }
+        return Ok(path.join("blob"));
     }
     Ok(blob_root.join(relative))
 }
@@ -1012,6 +1110,9 @@ fn project_root(cwd: &str) -> Result<PathBuf, String> {
     if trimmed.is_empty() || trimmed == "~" {
         return Err("cwd is required".into());
     }
+    if let Some(location) = wsl::location(trimmed)? {
+        return wsl::path_request(&location, "canonical_directory", json!({})).map(PathBuf::from);
+    }
     let root = expand_home(trimmed);
     if !root.is_dir() {
         return Err(format!("{}: Not a directory", root.display()));
@@ -1020,6 +1121,14 @@ fn project_root(cwd: &str) -> Result<PathBuf, String> {
 }
 
 fn same_cwd(saved: &str, cwd: &str) -> bool {
+    match (wsl::location(saved), wsl::location(cwd)) {
+        (Ok(Some(left)), Ok(Some(right))) => {
+            return left.distribution.eq_ignore_ascii_case(&right.distribution)
+                && left.path == right.path
+        }
+        (Ok(None), Ok(None)) => {}
+        _ => return false,
+    }
     let Ok(left) = project_root(saved) else {
         return false;
     };
@@ -1034,7 +1143,20 @@ fn relative_to_root(root: &Path, path: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Err("Invalid path".into());
     }
-    let expanded = expand_home(trimmed);
+    let expanded = if let Some(host) = wsl::path_location(root)? {
+        if let Some(target) = wsl::location(trimmed)? {
+            if !host.distribution.eq_ignore_ascii_case(&target.distribution) {
+                return Err("Path belongs to another WSL distribution".into());
+            }
+            PathBuf::from(host.with_path(&target.path)?.identity())
+        } else if trimmed.starts_with('/') {
+            PathBuf::from(host.with_path(trimmed)?.identity())
+        } else {
+            expand_home(trimmed)
+        }
+    } else {
+        expand_home(trimmed)
+    };
     if expanded.is_absolute() {
         let relative = expanded
             .strip_prefix(root)
@@ -1057,7 +1179,7 @@ fn validate_id(value: &str, label: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::ErrorKind;
     use std::process::Command;
@@ -1155,6 +1277,64 @@ mod tests {
                 .insert(relative_to_root(&root, path).unwrap());
         }
         write_manifest(&dir, &manifest).unwrap();
+    }
+
+    #[test]
+    fn linux_checkpoint_names_do_not_collide_on_windows() {
+        let root = Path::new("store");
+        let upper = state_blob_path(root, "Case.txt", true).unwrap();
+        let lower = state_blob_path(root, "case.txt", true).unwrap();
+        assert_ne!(
+            upper.to_string_lossy().to_lowercase(),
+            lower.to_string_lossy().to_lowercase()
+        );
+        assert!(!state_blob_path(root, "CON:stream", true)
+            .unwrap()
+            .to_string_lossy()
+            .contains(':'));
+        assert_eq!(
+            state_blob_path(root, "legacy.txt", false).unwrap(),
+            root.join("legacy.txt")
+        );
+    }
+
+    pub(crate) fn verify_wsl_round_trip(cwd: &str) {
+        let (_dir, store) = store();
+        let root = project_root(cwd).unwrap();
+        let file = "Renamed ü.txt";
+        write_worktree(&host_path(&root, file), b"user-dirty\n").unwrap();
+        store.ensure("wsl", cwd).unwrap();
+        let location = wsl::location(cwd).unwrap().unwrap();
+        let agent_path = format!("{}/{}", location.path, file);
+        store
+            .prepare("wsl", cwd, std::slice::from_ref(&agent_path))
+            .unwrap();
+        write_worktree(&host_path(&root, file), b"agent-change\n").unwrap();
+        store
+            .capture("wsl", cwd, std::slice::from_ref(&agent_path))
+            .unwrap();
+        let diff = store.file_diff("wsl", cwd, file).unwrap();
+        assert_eq!(diff.original, "user-dirty\n");
+        assert_eq!(diff.current, "agent-change\n");
+        assert!(store
+            .status("wsl", cwd)
+            .unwrap()
+            .files
+            .iter()
+            .any(|row| row.relative == file && row.undoable));
+        store.undo("wsl", cwd, Some(file)).unwrap();
+        assert_eq!(
+            read_worktree(&root, file),
+            FileState::Contents(b"user-dirty\n".to_vec())
+        );
+        let added = "checkpoint new ż.txt";
+        store.prepare("wsl", cwd, &[added.into()]).unwrap();
+        write_worktree(&host_path(&root, added), b"new\n").unwrap();
+        store.capture("wsl", cwd, &[added.into()]).unwrap();
+        store.undo("wsl", cwd, Some(added)).unwrap();
+        assert_eq!(read_worktree(&root, added), FileState::Missing);
+        assert!(same_cwd(cwd, &cwd.replace("wsl.localhost", "wsl$")));
+        assert!(!same_cwd(cwd, &cwd.to_uppercase()));
     }
 
     #[test]

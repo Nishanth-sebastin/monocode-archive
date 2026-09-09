@@ -39,11 +39,14 @@ fn default_cwd() -> String {
         .unwrap_or_else(|| "~".into())
 }
 
-#[tauri::command]
-fn home_dir() -> String {
-    dirs_home()
+#[tauri::command(async)]
+fn home_dir(cwd: Option<String>) -> Result<String, String> {
+    if let Some(location) = cwd.as_deref().map(wsl::location).transpose()?.flatten() {
+        return wsl::path_request(&location, "home", serde_json::json!({}));
+    }
+    Ok(dirs_home()
         .map(|home| fs::path_to_js(std::path::Path::new(&home)))
-        .unwrap_or_else(|| "~".into())
+        .unwrap_or_else(|| "~".into()))
 }
 
 pub(crate) struct PasswdIdentity {
