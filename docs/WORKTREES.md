@@ -108,7 +108,31 @@ Native disposable-repository checks exercised hide/restore, dirty removal refusa
 
 Additional acceptance: the native macOS release app refused normal removal of a dirty disposable checkout, rejected a force confirmation after the file changed, then removed only the freshly reviewed checkout while preserving its branch and dirty sibling. Automated tests cover staged/untracked/ignored data, stale HEAD/path/file state, locked/main protection, duplicate calls, size limits and symlinks. Workspace serialization/hydration tests preserve main plus two child conversation/provider identities, and legacy recent rows stay recoverable. This is not live concurrent-agent or Windows acceptance.
 
-Removal confirmation styling uses a red primary action with a trash icon, a subtle danger icon in the heading, an outlined Cancel action and existing spacing/theme tokens. Light/dark production-component fixtures at 800×600 (OS calls substituted):
+Removal confirmation styling uses a red label and trash icon on a neutral action, a subtle danger icon in the heading, an outlined Cancel action and existing spacing/theme tokens. Light/dark production-component fixtures at 800×600 (OS calls substituted):
 
 ![Removal confirmation, dark theme](images/worktree-removal-dark.png)
 ![Removal confirmation, light theme](images/worktree-removal-light.png)
+
+
+## Performance follow-up
+
+Activity lookup now uses a covering index on the effective checkout, user-message
+flag and update time. The index is created idempotently after repairing legacy
+columns; conversations and migration version numbers are unchanged, and older
+builds can still open the database. Its first creation costs a one-time index
+build proportional to the saved archive. Regression checks reopen a database
+without the index and require indexed lookup with no full scan or temporary sort.
+
+Repository discovery reuses unchanged verified families, refreshes the active
+checkout, publishes each newly discovered family immediately, and releases cache
+entries no longer reachable from recent projects. Git-change refreshes remain
+scoped to the active family. Cancelled work cannot publish late results; failed
+active discovery removes stale ownership evidence. Tests cover cache reuse,
+incremental publication, invalidation and cancellation. Native macOS smoke loaded
+the existing isolated profile and worktree activity after migration.
+
+Release measurement on the same M5 Pro / 24 GiB / macOS 26.6.2: production activity
+lookup for 20 checkout paths in a disposable archive of 50,000 sessions with 4 KiB
+payloads improved from 410.18 ms median to 0.193 ms (7 warm samples; new maximum
+0.240 ms). Ten paths had qualifying history and ten were empty. This isolates the
+database operation; it is not a WebView or whole-app responsiveness measurement.
