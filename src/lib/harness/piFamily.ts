@@ -125,7 +125,7 @@ type FlavorState = {
   liveByThread: Map<string, Live>;
   resumeByThread: Map<string, Resume>;
   cancelledThreads: Set<string>;
-  resolveBinary: () => Promise<{ path: string }>;
+  resolveBinary: (cwd?: string) => Promise<{ path: string }>;
   commandListeners: Map<string, Set<(commands: NativeCommand[]) => void>>;
 };
 
@@ -437,7 +437,7 @@ async function startLive(
 ): Promise<Live> {
   const state = stateFor(flavor);
   const { liveByThread } = state;
-  const { path } = await state.resolveBinary();
+  const { path } = await state.resolveBinary(input.cwd);
   const native = nativeModelId(input.model);
   const modelRef = parsePiModelRef(native);
   const liveRef: { current: Live | null } = { current: null };

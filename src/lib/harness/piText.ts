@@ -175,7 +175,7 @@ async function ensureLive(flavor: PiFlavor, cwd: string): Promise<LiveText> {
 async function startLive(flavor: PiFlavor, cwd: string): Promise<LiveText> {
   const state = stateFor(flavor);
   const childId = flavor.textChildId;
-  const { path } = await flavor.resolveBinary();
+  const { path } = await flavor.resolveBinary(cwd);
   const liveRef: { current: LiveText | null } = { current: null };
   const rpc = new PiRpc(
     childId,

@@ -5,6 +5,7 @@ run beside the Linux checkout instead of making a Windows round trip per row.
 """
 import base64
 import json
+import hashlib
 import os
 import selectors
 import shutil
@@ -21,6 +22,10 @@ MAX_GIT_OUTPUT = 8 * 1024 * 1024
 MAX_TEXT = 8 * 1024 * 1024
 MAX_FILES = 20_000
 SKIP = {".git", "node_modules", "target", "dist", "build", ".next", ".venv", "vendor"}
+AGENT_BINARIES = {}
+ATTACHMENTS = None
+ATTACHMENT_BYTES = 0
+ATTACHMENT_COUNT = 0
 
 
 def absolute(value):
@@ -130,6 +135,45 @@ def bounded_tree(path):
 def handle(request):
     op = request["op"]
     path = absolute(request["path"])
+    if op == "resolve_agent":
+        provider = request["provider"]
+        if provider == "opencode":
+            raise ValueError("OpenCode's HTTP transport is not supported in WSL yet. Choose a stdio agent such as Claude or Codex.")
+        names = {"claude": ["claude"], "codex": ["codex"], "cursor": ["cursor-agent", "agent"],
+                 "opencode": ["opencode"], "pi": ["pi", "pi-coding-agent"], "omp": ["omp"],
+                 "fx": ["fx"], "grok": ["grok"]}.get(provider)
+        if names is None:
+            raise ValueError("Unknown agent provider")
+        home = Path.home()
+        folders = [home / suffix for suffix in [".local/bin", ".npm-global/bin", ".cargo/bin", ".bun/bin", "n/bin", ".grok/bin", ".fx/bin"]]
+        folders += [Path(folder) for folder in os.environ.get("PATH", "").split(":") if folder.startswith("/") and not folder.startswith("/mnt/")]
+        for name in names:
+            for folder in dict.fromkeys(folders):
+                candidate = folder / name
+                if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                    continue
+                resolved = str(candidate.resolve())
+                if provider == "cursor" and name == "agent" and "cursor" not in resolved.lower():
+                    continue
+                if provider in {"pi", "omp", "fx"}:
+                    try:
+                        code, out, err = run([str(candidate), "--help"], str(home), timeout=2)
+                        help_text = (out + err).decode("utf-8", errors="replace").lower()
+                        if code or "rpc" not in help_text or "--mode" not in help_text:
+                            continue
+                    except (OSError, ValueError, TimeoutError):
+                        continue
+                AGENT_BINARIES[provider] = str(candidate)
+                return {"path": str(candidate)}
+        raise ValueError("%s is not installed in this WSL distribution; install its Linux CLI and retry" % provider)
+    if op == "agent_exec":
+        command = request["command"]
+        if command not in AGENT_BINARIES.values():
+            raise ValueError("Resolve the agent in this WSL distribution before probing it")
+        code, out, err = run([command, *request["args"]], str(path), timeout=15)
+        if code and not out.strip():
+            raise ValueError(err.decode("utf-8", errors="replace").strip())
+        return out.decode("utf-8", errors="replace")
     if op == "connect":
         path = path.resolve(strict=True)
         if not path.is_dir():
@@ -138,15 +182,51 @@ def handle(request):
         if code:
             raise ValueError("Git is unavailable in this distribution; install Git and reconnect")
         return {"path": str(path), "home": str(Path.home()), "platform": sys.platform}
+    if op == "gh":
+        args = request["args"]
+        if not isinstance(args, list) or len(args) > 512 or any(not isinstance(arg, str) or "\0" in arg for arg in args):
+            raise ValueError("Invalid GitHub CLI arguments")
+        body = request.get("body")
+        code, out, err = run(["gh", *args], str(path), body.encode() if body is not None else None)
+        if code:
+            raise ValueError(err.decode("utf-8", errors="replace").strip() or "Linux GitHub CLI failed")
+        return out.decode("utf-8", errors="replace").strip()
     if op == "git":
         args = request["args"]
         if not isinstance(args, list) or len(args) > 512 or any(not isinstance(arg, str) or "\0" in arg for arg in args):
             raise ValueError("Invalid Git arguments")
         source = request.get("input")
-        code, out, err = run(["git", "--no-pager", "-C", str(path), *args], str(path),
+        code, out, err = run(["git", "--no-pager", "-c", "core.quotepath=false", "-C", str(path), *args], str(path),
                              base64.b64decode(source, validate=True) if source else None)
         return {"code": code, "stdout": base64.b64encode(out).decode(),
                 "stderr": base64.b64encode(err).decode()}
+    if op == "attachment":
+        global ATTACHMENTS, ATTACHMENT_BYTES, ATTACHMENT_COUNT
+        encoded = request["data"]
+        if len(encoded) > 28 * 1024 * 1024:
+            raise ValueError("Attachment exceeds 20 MiB")
+        data = base64.b64decode(encoded, validate=True)
+        if len(data) > 20 * 1024 * 1024:
+            raise ValueError("Attachment exceeds 20 MiB")
+        if ATTACHMENTS is None:
+            ATTACHMENTS = tempfile.TemporaryDirectory(prefix="monocode-attachments-")
+        destination = under(Path(ATTACHMENTS.name), hashlib.sha256(data).hexdigest() + "-" + request["name"])
+        if not destination.exists():
+            if ATTACHMENT_COUNT >= 64 or ATTACHMENT_BYTES + len(data) > 128 * 1024 * 1024:
+                raise ValueError("WSL attachment storage is full (64 files or 128 MiB); use a file in the Linux repository")
+            with destination.open("xb") as stream:
+                stream.write(data)
+            ATTACHMENT_COUNT += 1
+            ATTACHMENT_BYTES += len(data)
+        return str(destination)
+    if op == "diff_file":
+        try:
+            meta = path.stat()
+        except FileNotFoundError:
+            return {"exists": False, "data": "", "tooLarge": False}
+        large = meta.st_size > MAX_TEXT
+        data = file_bytes(path, MAX_TEXT) if stat.S_ISREG(meta.st_mode) and not large else b""
+        return {"exists": True, "data": base64.b64encode(data).decode(), "tooLarge": large}
     if op == "list":
         entries = []
         with os.scandir(path) as reader:
@@ -176,7 +256,7 @@ def handle(request):
                 if count >= 3999 or len(names) >= MAX_FILES:
                     break
         return [{"name": Path(name).name, "path": str(path / name), "relative": name} for name in names]
-    if op in ("stat", "inspect", "read_many"):
+    if op in ("stat", "inspect", "read_many", "search_read", "line_counts"):
         paths = request["paths"]
         if len(paths) > 64:
             raise ValueError("At most 64 files per batch")
@@ -186,8 +266,13 @@ def handle(request):
             item = absolute(name)
             try:
                 meta = item.stat()
-                if op == "read_many":
-                    data = file_bytes(item, min(MAX_TEXT, MAX_TEXT - retained))
+                if op == "line_counts":
+                    data = file_bytes(item, 1024 * 1024)
+                    count = 0 if b"\0" in data else data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
+                    result.append({"path": str(item), "lines": count})
+                elif op in ("read_many", "search_read"):
+                    limit = 512 * 1024 if op == "search_read" else MAX_TEXT
+                    data = file_bytes(item, min(limit, MAX_TEXT - retained))
                     retained += len(data)
                     result.append({"path": str(item), "data": base64.b64encode(data).decode()})
                 elif op == "inspect":
@@ -233,6 +318,13 @@ def handle(request):
         return None
     if op == "canonical":
         return str(path.resolve(strict=True))
+    if op == "new_path":
+        if os.path.lexists(path) or path == Path("/"):
+            raise ValueError("Choose a new worktree path; existing paths are preserved")
+        parent = path.parent.resolve(strict=True)
+        if not parent.is_dir():
+            raise ValueError("Worktree parent must be a directory")
+        return str(parent / path.name)
     if op == "create":
         destination = under(path, request["name"])
         destination.parent.mkdir(parents=True, exist_ok=True)

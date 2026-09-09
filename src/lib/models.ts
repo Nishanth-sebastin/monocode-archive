@@ -1,3 +1,4 @@
+import { wslLocation } from "./paths";
 import type { HarnessId } from "./session";
 import { HARNESSES } from "./session";
 
@@ -278,12 +279,12 @@ function baseModelsFor(harness: HarnessId): AgentModel[] {
   return baseByHarness[harness] ?? EMPTY_MODELS;
 }
 
-export function modelsFor(harness: HarnessId): AgentModel[] {
-  return overlays[harness] ?? baseModelsFor(harness);
+export function modelsFor(harness: HarnessId, cwd?: string): AgentModel[] {
+  return cwd && wslLocation(cwd) ? baseModelsFor(harness) : overlays[harness] ?? baseModelsFor(harness);
 }
 
 export function allModels(): AgentModel[] {
-  return (allCache ??= HARNESS_ORDER.flatMap(modelsFor));
+  return (allCache ??= HARNESS_ORDER.flatMap((harness) => modelsFor(harness)));
 }
 
 export function findModel(id: string): AgentModel | undefined {
@@ -578,7 +579,8 @@ export function saveDefaultModel(harness: HarnessId, model: string) {
 }
 
 /** User-picked model for a provider, else the catalog default. */
-export function preferredModelId(harness: HarnessId): string {
+export function preferredModelId(harness: HarnessId, cwd?: string): string {
+  if (cwd && wslLocation(cwd)) return DEFAULT_MODEL_ID[harness];
   const saved = loadDefaultModels()[harness];
   if (saved) return saved;
   const last = loadLastModelChoice();

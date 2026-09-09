@@ -199,6 +199,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             wsl::wsl_distributions,
             wsl::wsl_connect,
+            wsl::wsl_resolve_harness,
             wsl::wsl_connected,
             default_cwd,
             home_dir,

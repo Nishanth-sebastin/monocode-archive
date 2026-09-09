@@ -125,7 +125,7 @@ async function ensureLive(cwd: string): Promise<LiveText> {
 }
 
 async function startLive(cwd: string): Promise<LiveText> {
-  const { path } = await resolveClaudeBinary();
+  const { path } = await resolveClaudeBinary(cwd);
   const session: LiveText = {
     cwd,
     collecting: false,

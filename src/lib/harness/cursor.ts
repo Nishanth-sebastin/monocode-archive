@@ -246,7 +246,7 @@ async function ensureLive(input: SendTurnInput): Promise<Live> {
     resumeByThread.delete(input.sessionId);
   }
 
-  const { path } = await resolveCursorBinary();
+  const { path } = await resolveCursorBinary(input.cwd);
   const handlers: AcpHandlers = {};
   const acp = new AcpClient(input.sessionId, handlers);
   const liveRef: { current: Live | null } = { current: null };

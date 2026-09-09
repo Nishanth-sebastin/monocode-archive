@@ -531,6 +531,7 @@ function AgentTranscriptComponent({
               {foldLineAt >= items.length ? foldLineRow : null}
               {durationMs != null && settled ? (
                 <TurnDuration
+                  cwd={cwd}
                   elapsedMs={durationMs}
                   labelHidden={showFoldLine}
                   modelName={modelName}
@@ -619,6 +620,7 @@ function LiveFoldTitle({
  * to the last, so it is not repeated here.
  */
 function TurnDuration({
+  cwd,
   elapsedMs,
   labelHidden = false,
   modelName,
@@ -630,6 +632,7 @@ function TurnDuration({
   onSecondOpinion,
   onHandoff,
 }: {
+  cwd?: string;
   elapsedMs: number | null;
   /** True when the fold line above already keeps the time for this turn. */
   labelHidden?: boolean;
@@ -666,10 +669,10 @@ function TurnDuration({
           <Check className="size-3.5" strokeWidth={1.75} />
         )}
         {fromHarness && onHandoff ? (
-          <HandoffButton from={fromHarness} onPick={onHandoff} />
+          <HandoffButton cwd={cwd} from={fromHarness} onPick={onHandoff} />
         ) : null}
         {fromHarness && onSecondOpinion ? (
-          <SecondOpinionButton from={fromHarness} onPick={onSecondOpinion} />
+          <SecondOpinionButton cwd={cwd} from={fromHarness} onPick={onSecondOpinion} />
         ) : null}
       </span>
 
@@ -865,6 +868,7 @@ const TranscriptBlock = memo(function TranscriptBlock({
     return (
       <div className="px-4 py-1">
         <PlanPreview
+          cwd={cwd}
           text={block.text}
           streaming={block.streaming}
           busy={planBusy}

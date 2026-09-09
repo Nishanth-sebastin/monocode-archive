@@ -101,7 +101,7 @@ const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
 const cancelledThreads = new Set<string>();
 
-let resolveOpenCodeBinaryImpl: () => Promise<{ path: string }> =
+let resolveOpenCodeBinaryImpl: (cwd?: string) => Promise<{ path: string }> =
   resolveOpenCodeBinary;
 
 /** Test seam. */
@@ -298,7 +298,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     resumeByThread.delete(input.sessionId);
   }
 
-  const { path } = await resolveOpenCodeBinaryImpl();
+  const { path } = await resolveOpenCodeBinaryImpl(input.cwd);
   await assertOpenCodeVersion(path, input.cwd);
 
   const liveRef: { current: Live | null } = { current: null };

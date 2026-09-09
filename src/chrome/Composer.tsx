@@ -1,3 +1,4 @@
+import { WslBadge } from "./WslBadge";
 import {
   ArrowUp,
   AiIdea,
@@ -1174,6 +1175,7 @@ export function Composer({
                   onClose={() => ref.current?.focus()}
                 />
               )}
+              <WslBadge cwd={cwd} />
               {hideBranchPicker ? null : (
                 <BranchPicker
                   cwd={cwd}
@@ -1373,6 +1375,7 @@ export function Composer({
             >
               <div className="flex shrink-0 items-center gap-1">
                 <ModelPicker
+                  cwd={cwd}
                   harness={harness}
                   model={model}
                   hotkeys={hotkeys && enabled}

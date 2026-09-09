@@ -32,6 +32,7 @@ import {
   subscribeModels,
   subscribePickerVisibility,
 } from "../lib/models";
+import { wslLocation } from "../lib/paths";
 import { LAYER } from "../lib/layers";
 import { secondOpinionTargets } from "../lib/secondOpinion";
 import { HARNESS_TITLE, type HarnessId } from "../lib/session";
@@ -39,6 +40,7 @@ import { HarnessIcon } from "./HarnessIcon";
 import { Popover } from "./Popover";
 
 type Props = {
+  cwd?: string;
   from: HarnessId;
   fromModel?: string;
   onPick: (harness: HarnessId, model: string) => void;
@@ -61,11 +63,13 @@ const SUBMENU_OVERLAP = -4;
 const SELF = "[data-provider-target]";
 
 export function HandoffButton({
+  cwd,
   from,
   onPick,
-}: Pick<Props, "from" | "onPick">) {
+}: Pick<Props, "from" | "onPick" | "cwd">) {
   return (
     <SecondOpinionButton
+      cwd={cwd}
       from={from}
       onPick={onPick}
       icon={Replace}
@@ -78,18 +82,21 @@ export function HandoffButton({
 }
 
 export function BuildTargetButton({
+  cwd,
   from,
   model,
   disabled,
   onPick,
 }: {
   from: HarnessId;
+  cwd?: string;
   model?: string;
   disabled?: boolean;
   onPick: (harness: HarnessId, model: string) => void;
 }) {
   return (
     <SecondOpinionButton
+      cwd={cwd}
       from={from}
       fromModel={model}
       onPick={onPick}
@@ -106,6 +113,7 @@ export function BuildTargetButton({
 }
 
 export function SecondOpinionButton({
+  cwd,
   from,
   fromModel,
   onPick,
@@ -141,39 +149,39 @@ export function SecondOpinionButton({
   const [activeRow, setActiveRow] = useState<HTMLButtonElement | null>(null);
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
 
-  const probed = hasProbedHarnessAvailability();
+  const probed = hasProbedHarnessAvailability(cwd);
   const targets = useMemo(() => {
     void availabilityVersion;
     void visibilityVersion;
     return secondOpinionTargets(from, {
-      installed: isHarnessAvailable,
+      installed: (id) => isHarnessAvailable(id, cwd),
       visible: isPickerProviderVisible,
       probed,
       includeCurrent,
     });
-  }, [from, includeCurrent, probed, availabilityVersion, visibilityVersion]);
+  }, [cwd, from, includeCurrent, probed, availabilityVersion, visibilityVersion]);
 
   const activeHarness = targets[active];
   const models = useMemo(() => {
     void catalogVersion;
-    return activeHarness ? modelsFor(activeHarness) : [];
-  }, [activeHarness, catalogVersion]);
+    return activeHarness ? modelsFor(activeHarness, cwd) : [];
+  }, [activeHarness, catalogVersion, cwd]);
   const preferred =
     activeHarness != null
       ? activeHarness === from && fromModel
         ? fromModel
-        : preferredModelId(activeHarness)
+        : preferredModelId(activeHarness, cwd)
       : undefined;
 
   useEffect(() => {
     if (!open) return;
-    void probeHarnessAvailability();
-  }, [open]);
+    void probeHarnessAvailability({ cwd });
+  }, [open, cwd]);
 
   useEffect(() => {
-    if (!open || !activeHarness) return;
+    if (!open || !activeHarness || (cwd && wslLocation(cwd))) return;
     void refreshHarnessCatalogs([activeHarness]);
-  }, [open, activeHarness]);
+  }, [open, activeHarness, cwd]);
 
   useEffect(() => {
     setActive(0);
@@ -213,7 +221,7 @@ export function SecondOpinionButton({
   const pickPreferred = (harness: HarnessId) => {
     pick(
       harness,
-      harness === from && fromModel ? fromModel : preferredModelId(harness),
+      harness === from && fromModel ? fromModel : preferredModelId(harness, cwd),
     );
   };
 
@@ -326,7 +334,7 @@ export function SecondOpinionButton({
             ) : (
               targets.map((harness, index) => {
                 const highlighted = index === active;
-                const available = isHarnessAvailable(harness);
+                const available = isHarnessAvailable(harness, cwd);
                 return (
                   <button
                     key={harness}
@@ -335,7 +343,7 @@ export function SecondOpinionButton({
                     type="button"
                     role="menuitem"
                     aria-haspopup={
-                      modelsFor(harness).length > 0 ? "menu" : undefined
+                      modelsFor(harness, cwd).length > 0 ? "menu" : undefined
                     }
                     aria-expanded={highlighted && showSubmenu}
                     disabled={!available && probed}
@@ -360,7 +368,7 @@ export function SecondOpinionButton({
                     <span className="min-w-0 flex-1 truncate">
                       {HARNESS_TITLE[harness]}
                     </span>
-                    {modelsFor(harness).length > 0 ? (
+                    {modelsFor(harness, cwd).length > 0 ? (
                       <ChevronRight
                         className="size-3.5 shrink-0 text-content/40"
                         strokeWidth={1.75}

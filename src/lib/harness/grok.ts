@@ -237,7 +237,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     resumeByThread.delete(input.sessionId);
   }
 
-  const { path } = await resolveGrokBinary();
+  const { path } = await resolveGrokBinary(input.cwd);
   const handlers: AcpHandlers = {};
   const acp = new AcpClient(input.sessionId, handlers);
   const liveRef: { current: Live | null } = { current: null };

@@ -111,7 +111,7 @@ async function ensureLive(cwd: string): Promise<LiveText> {
 
 async function startLive(cwd: string): Promise<LiveText> {
   await dropLive();
-  const { path } = await resolveCursorBinary();
+  const { path } = await resolveCursorBinary(cwd);
   const acpRef: { session: LiveText | null } = { session: null };
   const acp = new AcpClient(TEXT_CHILD_ID, {
     onNotification: (method, params) => {

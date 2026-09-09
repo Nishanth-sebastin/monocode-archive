@@ -26,6 +26,7 @@ import {
   type SidebarTabId,
 } from "./lib/appearance";
 import { HAS_NATIVE_GLASS, IS_MAC, IS_WIN } from "./lib/platform";
+import { WslProjectDialog } from "./chrome/WslProjectDialog";
 import { connectWslProject } from "./lib/wsl";
 import {
   applyUiScale,
@@ -3183,20 +3184,14 @@ export default function App({
     });
   }, [selectProject]);
 
+  const [wslPickerOpen, setWslPickerOpen] = useState(false);
   const pickProject = useCallback(async () => {
+    if (IS_WIN) { setWslPickerOpen(true); return; }
     const path = await pickFolder();
     if (path) onSelectProject(path);
   }, [onSelectProject]);
 
-  const pickWslProject = useCallback(async () => {
-    const path = await pickFolder("Open WSL project", "\\\\wsl.localhost\\");
-    if (!path) return;
-    if (!wslLocation(path)) {
-      setWslOpening({ path, busy: false, error: "Choose a folder under Linux in the Windows folder picker." });
-      return;
-    }
-    onSelectProject(path);
-  }, [onSelectProject]);
+  const pickWslProject = useCallback(() => setWslPickerOpen(true), []);
 
   const onRemoveProject = useCallback(
     (path: string, options: { purgeData: boolean }) => {
@@ -3644,7 +3639,7 @@ export default function App({
         );
         void (async () => {
           try {
-            const prepared = await prepareAttachments(attachments);
+            const prepared = await prepareAttachments(attachments, workCwd);
             const prompt = await preparePrompt(harnessText, {
               harness: current.harness,
               sessionId,
@@ -3884,7 +3879,7 @@ export default function App({
         if (turnGen.current.get(sessionId) !== gen) return;
         let buildSucceeded = false;
         try {
-          const prepared = await prepareAttachments(attachments);
+          const prepared = await prepareAttachments(attachments, workCwd);
           const prompt =
             intent === "build" && approvedPlan
               ? buildPlanPrompt(approvedPlan.text)
@@ -5232,7 +5227,6 @@ export default function App({
         onSelectAgent={onSelectLiveAgent}
         onSelectProject={onSelectProject}
         onOpenProject={pickProject}
-        onOpenWslProject={IS_WIN ? pickWslProject : undefined}
         onRemoveProject={onRemoveProject}
         onNew={onNew}
         openSessions={openProjectSessions}
@@ -5258,6 +5252,7 @@ export default function App({
         onDismissUpdate={() => setUpdateNotice(null)}
       />
 
+      {wslPickerOpen && <WslProjectDialog cwd={projectCwd} onOpen={selectProject} onClose={() => setWslPickerOpen(false)} />}
       <div className="body-glass flex min-h-0 min-w-0 flex-1 flex-col">
         {wslOpening && (
           <div role={wslOpening.error ? "alert" : "status"} className="flex shrink-0 items-center gap-3 border-b border-content/10 px-4 py-2 text-[12px]">

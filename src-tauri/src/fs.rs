@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -172,9 +172,16 @@ pub(crate) fn git_info_for(root: &Path) -> GitInfo {
 }
 
 fn git_info_uncached(root: &Path) -> GitInfo {
+    let location = wsl::path_location(root).ok().flatten();
     let Some(top) = git_stdout(root, &["rev-parse", "--show-toplevel"])
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())
+        .and_then(|path| match &location {
+            Some(host) => host
+                .with_path(&path)
+                .ok()
+                .map(|path| PathBuf::from(path.identity())),
+            None => Some(PathBuf::from(path)),
+        })
+        .filter(|path| location.is_some() || path.is_dir())
     else {
         return GitInfo {
             branch: None,
@@ -879,7 +886,7 @@ fn git_diff_index_with(root: &Path, include_sync: bool) -> GitDiffIndex {
             "untracked"
         } else if let Some(status) = statuses.get(&relative) {
             *status
-        } else if !abs.exists() {
+        } else if wsl::path_location(root).ok().flatten().is_none() && !abs.exists() {
             "deleted"
         } else {
             "modified"
@@ -972,6 +979,24 @@ fn add_untracked_map(root: &Path, files: &mut HashMap<String, FileAcc>) {
     ) else {
         return;
     };
+    let remote_counts: Option<HashMap<String, i64>> =
+        wsl::path_location(root).ok().flatten().map(|_| {
+            let paths: Vec<_> = stdout
+                .split('\0')
+                .filter(|rel| !rel.is_empty())
+                .map(|rel| path_to_js(&root.join(rel)))
+                .collect();
+            wsl::file_batches::<serde_json::Value>(&paths, "line_counts")
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|value| {
+                    Some((
+                        value["path"].as_str()?.to_string(),
+                        value["lines"].as_i64().unwrap_or(0),
+                    ))
+                })
+                .collect()
+        });
     for rel in stdout.split('\0') {
         if rel.is_empty() {
             continue;
@@ -980,7 +1005,10 @@ fn add_untracked_map(root: &Path, files: &mut HashMap<String, FileAcc>) {
         let entry = files.entry(relative.clone()).or_default();
         entry.untracked = true;
         if entry.additions == 0 {
-            entry.additions = text_line_count(&root.join(rel));
+            entry.additions = match &remote_counts {
+                Some(counts) => *counts.get(&path_to_js(&root.join(rel))).unwrap_or(&0),
+                None => text_line_count(&root.join(rel)),
+            };
         }
     }
 }
@@ -1055,21 +1083,37 @@ fn git_file_diff_for(root: &Path, relative: &str) -> Result<GitFileDiff, String>
     let original = git_blob(root, &index_spec);
     let in_index = original.is_some();
     let orig = original.unwrap_or_default();
-    let current = if abs.is_file() {
-        std::fs::read(&abs).unwrap_or_default()
+    let (current, exists, file, large) = if let Some(location) = wsl::path_location(&abs)? {
+        use base64::Engine;
+        let value: serde_json::Value = wsl::request(&location, "diff_file", serde_json::json!({}))?;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(value["data"].as_str().ok_or("Missing WSL diff contents")?)
+            .map_err(|e| e.to_string())?;
+        let exists = value["exists"].as_bool().ok_or("Missing WSL file state")?;
+        (data, exists, exists, value["tooLarge"] == true)
     } else {
-        Vec::new()
+        (
+            if abs.is_file() {
+                std::fs::read(&abs).unwrap_or_default()
+            } else {
+                Vec::new()
+            },
+            abs.exists(),
+            abs.is_file(),
+            false,
+        )
     };
     let binary = orig.contains(&0) || current.contains(&0);
-    let too_large =
-        orig.len() as u64 > MAX_TEXT_FILE_BYTES || current.len() as u64 > MAX_TEXT_FILE_BYTES;
+    let too_large = large
+        || orig.len() as u64 > MAX_TEXT_FILE_BYTES
+        || current.len() as u64 > MAX_TEXT_FILE_BYTES;
     let status = if !in_index {
-        if abs.is_file() {
+        if file {
             "untracked"
         } else {
             "deleted"
         }
-    } else if !abs.exists() {
+    } else if !exists {
         "deleted"
     } else {
         "modified"
@@ -1465,6 +1509,9 @@ fn git_discard_file_for(root: &Path, relative: &str) -> Result<(), String> {
     let relative = resolve_repo_path(root, relative)?;
     let abs = root.join(&relative);
     if git_checked(root, &["ls-files", "--error-unmatch", "--", &relative]).is_err() {
+        if wsl::path_location(root)?.is_some() {
+            return git_checked(root, &["clean", "-fd", "--", &relative]);
+        }
         if abs.is_file() {
             std::fs::remove_file(&abs).map_err(|e| e.to_string())?;
         } else if abs.exists() {
@@ -2513,6 +2560,43 @@ fn gh_checked(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn gh_run(root: &Path, args: &[&str], allow_empty: bool) -> Result<String, String> {
+    if let Some(location) = wsl::path_location(root)? {
+        let mut linux_args: Vec<String> = args.iter().map(|arg| (*arg).into()).collect();
+        // Existing comment/PR flows prepare a body file in the UI host's temp
+        // directory. Send that explicit body on stdin, never its Windows path.
+        let source = if let Some(index) = args.iter().position(|arg| *arg == "--body-file") {
+            Some((
+                index + 1,
+                *args.get(index + 1).ok_or("Missing GitHub body file")?,
+                "-",
+            ))
+        } else {
+            args.iter().enumerate().find_map(|(index, arg)| {
+                arg.strip_prefix("body=@")
+                    .map(|path| (index, path, "body=@-"))
+            })
+        };
+        let body = if let Some((index, path, replacement)) = source {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut body = String::new();
+            file.take(MAX_TEXT_FILE_BYTES + 1)
+                .read_to_string(&mut body)
+                .map_err(|e| e.to_string())?;
+            if body.len() as u64 > MAX_TEXT_FILE_BYTES {
+                return Err("GitHub body exceeds 8 MiB".into());
+            }
+            linux_args[index] = replacement.into();
+            Some(body)
+        } else {
+            None
+        };
+        let output: String =
+            wsl::request(&location, "gh", json!({"args":linux_args, "body":body}))?;
+        if output.is_empty() && !allow_empty {
+            return Err("gh returned no output".into());
+        }
+        return Ok(output);
+    }
     let program = crate::harness::resolve_gui_binary("gh")
         .ok_or_else(|| "GitHub CLI (`gh`) is not installed.".to_string())?;
     let mut cmd = Command::new(&program);
@@ -2570,6 +2654,7 @@ pub(crate) fn resolve_repo_path(root: &Path, relative: &str) -> Result<String, S
 
 fn git_cmd() -> Command {
     let mut cmd = Command::new("git");
+    cmd.args(["-c", "core.quotepath=false"]);
     crate::hide_window_console(&mut cmd);
     cmd
 }
@@ -3304,6 +3389,17 @@ fn clone_repo_sync(url: &str, parent: &str) -> Result<String, String> {
         return Err("Enter an https, ssh, or git URL".into());
     }
     let name = repo_name(url)?;
+    if let Some(location) = wsl::location(parent)? {
+        let destination =
+            location.with_path(&format!("{}/{}", location.path.trim_end_matches('/'), name))?;
+        let target = wsl::path_request(&destination, "new_path", json!({}))?;
+        let target_location = wsl::location(&target)?.ok_or("Missing WSL clone destination")?;
+        git_checked(
+            Path::new(parent),
+            &["clone", "--", url, &target_location.path],
+        )?;
+        return wsl::path_request(&target_location, "canonical", json!({}));
+    }
     let dest = expand_home(parent).join(&name);
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
@@ -3569,10 +3665,23 @@ fn read_binary_file_sync(path: &str) -> Result<Vec<u8>, String> {
 
 /// Persist a pasted blob so non-image attachments have a real path.
 #[tauri::command]
-pub async fn write_attachment(name: String, data: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || write_attachment_sync(&name, &data))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn write_attachment(
+    name: String,
+    data: String,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(location) = cwd.as_deref().map(wsl::location).transpose()?.flatten() {
+            return wsl::path_request(
+                &location,
+                "attachment",
+                json!({"name":safe_attachment_name(&name), "data":data}),
+            );
+        }
+        write_attachment_sync(&name, &data)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn write_attachment_sync(name: &str, data: &str) -> Result<String, String> {
@@ -3952,7 +4061,12 @@ pub async fn move_path(from: String, dest_parent: String) -> Result<String, Stri
 #[tauri::command]
 pub fn reveal_path(path: String) -> Result<(), String> {
     let path = expand_home(&path);
-    if !path.exists() {
+    if let Some(location) = wsl::path_location(&path)? {
+        if !cfg!(windows) {
+            return Err("Reveal WSL files from the native Windows app".into());
+        }
+        let _: String = wsl::request(&location, "canonical", json!({}))?;
+    } else if !path.exists() {
         return Err(format!("{}: No such file or directory", path.display()));
     }
     #[cfg(target_os = "macos")]
@@ -4388,6 +4502,27 @@ mod tests {
                 deletions: 0
             }
         );
+    }
+
+    #[test]
+    fn unicode_diff_rows_open_and_stage_the_original_file() {
+        let dir = tmp("unicode-diff");
+        let name = "hello ż.txt";
+        if !init_git_commit(&dir.0, &[(name, "before\n")]) {
+            return;
+        }
+        std::fs::write(dir.0.join(name), "after\n").unwrap();
+        let index = git_diff_index_for(&dir.0);
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].relative, name);
+        assert_eq!(
+            git_file_diff_for(&dir.0, &index.files[0].relative)
+                .unwrap()
+                .current,
+            "after\n"
+        );
+        git_checked(&dir.0, &["add", "--", &index.files[0].relative]).unwrap();
+        assert!(git_diff_index_for(&dir.0).files[0].staged);
     }
 
     #[test]

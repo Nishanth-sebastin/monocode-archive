@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 const SCRIPT: &str = include_str!("wsl_bridge.py");
+const PROCESS_SCRIPT: &str = include_str!("wsl_process.py");
 const MAX_MESSAGE: usize = 40 * 1024 * 1024;
 const MAX_QUEUED_BYTES: usize = 64 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -113,6 +114,196 @@ fn wsl_command() -> Result<Command, String> {
     command.env("WSLENV", "");
     crate::hide_window_console(&mut command);
     Ok(command)
+}
+
+#[cfg(any(windows, test))]
+fn terminal_args(location: &Location) -> Vec<String> {
+    wsl_args(
+        &location.distribution,
+        &location.path,
+        "/usr/bin/env",
+        &[
+            "TERM=xterm-256color".into(),
+            "COLORTERM=truecolor".into(),
+            "TERM_PROGRAM=MonoCode".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            "exec \"${SHELL:-/bin/sh}\" -l".into(),
+        ],
+    )
+}
+
+#[cfg(windows)]
+pub fn terminal_command(location: &Location) -> Result<Command, String> {
+    let _: String = request(location, "canonical", json!({}))?;
+    let mut command = wsl_command()?;
+    command.args(terminal_args(location));
+    Ok(command)
+}
+
+pub struct LinuxProcess {
+    location: Location,
+    pid: u32,
+    started: u64,
+    boot: String,
+}
+
+#[tauri::command(async)]
+pub fn wsl_resolve_harness(cwd: String, provider: String) -> Result<Value, String> {
+    let location = location(&cwd)?.ok_or("Choose a WSL project")?;
+    request(&location, "resolve_agent", json!({"provider":provider}))
+}
+
+impl LinuxProcess {
+    pub fn protocol_line(&self, line: String) -> Result<String, String> {
+        translate_agent_cwd(&self.location, line)
+    }
+    pub fn stop(&self) -> Result<(), String> {
+        let mut command = wsl_command()?;
+        command.args(wsl_args(
+            &self.location.distribution,
+            "/",
+            "/usr/bin/python3",
+            &[
+                "-c".into(),
+                PROCESS_SCRIPT.into(),
+                "stop".into(),
+                self.pid.to_string(),
+                self.started.to_string(),
+                self.boot.clone(),
+            ],
+        ));
+        let output = crate::bounded_process::output(&mut command, Duration::from_secs(10), 8192)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Could not stop the Linux agent: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+}
+
+fn translate_agent_cwd(host: &Location, line: String) -> Result<String, String> {
+    if line.len() > 16 * 1024 * 1024 {
+        return Err("Agent message exceeds 16 MiB".into());
+    }
+    let Ok(mut message) = serde_json::from_str::<Value>(&line) else {
+        return Ok(line);
+    };
+    // ACP and Codex carry execution cwd in this protocol field. Never rewrite
+    // prompts, tool results, resume identifiers or arbitrary nested strings.
+    if message.get("method").and_then(Value::as_str).is_none() {
+        return Ok(line);
+    }
+    if let Some(cwd) = message.pointer("/params/cwd").and_then(Value::as_str) {
+        if let Some(target) = location(cwd)? {
+            if !target.distribution.eq_ignore_ascii_case(&host.distribution) {
+                return Err("Agent cwd belongs to a different WSL distribution".into());
+            }
+            message["params"]["cwd"] = target.path.into();
+            return Ok(message.to_string());
+        }
+        if !cwd.starts_with('/') || cwd.starts_with("//") || cwd.contains('\\') {
+            return Err("Agent cwd must be a path in its Linux distribution".into());
+        }
+    }
+    Ok(line)
+}
+
+pub fn agent_command(
+    location: &Location,
+    command: &str,
+    args: &[String],
+) -> Result<(Command, String), String> {
+    // Check the app-open connection before starting a separate streaming process.
+    let _: String = request(location, "canonical", json!({}))?;
+    if command.is_empty() || command.contains(['\\', ':', '\0']) || args.len() > 512 {
+        return Err("Choose an agent installed inside the selected WSL distribution".into());
+    }
+    static NEXT_PROCESS: AtomicUsize = AtomicUsize::new(0);
+    let nonce = format!(
+        "{}-{}-{}",
+        std::process::id(),
+        NEXT_PROCESS.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    );
+    let config =
+        json!({"command":command,"args":args,"cwd":location.path,"nonce":nonce}).to_string();
+    if config.len() > 16 * 1024 {
+        return Err("Linux agent arguments exceed 16 KiB".into());
+    }
+    let mut cmd = wsl_command()?;
+    cmd.args(wsl_args(
+        &location.distribution,
+        &location.path,
+        "/usr/bin/python3",
+        &[
+            "-u".into(),
+            "-c".into(),
+            PROCESS_SCRIPT.into(),
+            "start".into(),
+            config,
+        ],
+    ));
+    Ok((cmd, nonce))
+}
+
+pub fn agent_handshake(
+    stdout: ChildStdout,
+    location: Location,
+    nonce: &str,
+) -> Result<(BufReader<ChildStdout>, LinuxProcess), String> {
+    let (send, receive) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
+        let result = (&mut reader)
+            .take(4097)
+            .read_until(b'\n', &mut line)
+            .map_err(|e| e.to_string())
+            .and_then(|_| {
+                if line.len() > 4096 || !line.ends_with(b"\n") {
+                    return Err("Invalid Linux agent startup response".into());
+                }
+                serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())
+            });
+        let _ = send.send(result.map(|value| (reader, value)));
+    });
+    let (reader, value) = receive
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "Linux agent startup timed out; no start acknowledgement was sent")??;
+    let pid = value["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 1);
+    let started = value["started"].as_u64().filter(|value| *value > 0);
+    let boot = value["boot"].as_str().filter(|value| {
+        value.len() == 36
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    });
+    if value["nonce"].as_str() != Some(nonce)
+        || pid.is_none()
+        || started.is_none()
+        || boot.is_none()
+    {
+        return Err("Linux agent startup identity did not match".into());
+    }
+    Ok((
+        reader,
+        LinuxProcess {
+            location,
+            pid: pid.unwrap(),
+            started: started.unwrap(),
+            boot: boot.unwrap().to_owned(),
+        },
+    ))
 }
 
 fn decode_distributions(bytes: &[u8]) -> Result<Vec<String>, String> {
@@ -529,6 +720,19 @@ mod tests {
     #[test]
     fn distribution_identity_and_arguments_preserve_linux_paths() {
         let value = Location::new("Ubuntu Work", "/home/me/Zażółć repo/Case").unwrap();
+        let terminal = terminal_args(&value);
+        assert_eq!(
+            &terminal[..6],
+            [
+                "--distribution",
+                "Ubuntu Work",
+                "--cd",
+                "/home/me/Zażółć repo/Case",
+                "--exec",
+                "/usr/bin/env"
+            ]
+        );
+        assert_eq!(terminal.last().unwrap(), "exec \"${SHELL:-/bin/sh}\" -l");
         assert_eq!(location(&value.identity()).unwrap(), Some(value.clone()));
         assert_eq!(
             location("\\\\wsl$\\Ubuntu Work\\home\\me\\Zażółć repo\\Case").unwrap(),
@@ -572,6 +776,25 @@ mod tests {
             transfer_path(&value.identity(), "//wsl.localhost/Debian/home/me", "copy").is_err()
         );
     }
+    #[test]
+    fn agent_protocol_translates_only_execution_cwd_and_rejects_other_hosts() {
+        let host = Location::new("Ubuntu", "/repo space ż").unwrap();
+        let prompt = format!("Read {} literally", host.identity());
+        let line =
+            json!({"method":"thread/start", "params":{"cwd":host.identity(), "prompt":prompt}})
+                .to_string();
+        let translated: Value =
+            serde_json::from_str(&translate_agent_cwd(&host, line).unwrap()).unwrap();
+        assert_eq!(translated["params"]["cwd"], host.path);
+        assert_eq!(translated["params"]["prompt"], prompt);
+        for cwd in ["C:\\repo", "//wsl.localhost/Debian/repo"] {
+            assert!(translate_agent_cwd(
+                &host,
+                json!({"method":"session/new","params":{"cwd":cwd}}).to_string()
+            )
+            .is_err());
+        }
+    }
     #[cfg(unix)]
     #[test]
     fn filesystem_commands_use_linux_boundary_and_preserve_identity() {
@@ -603,15 +826,25 @@ mod tests {
             "__name__ = 'fixture'\nexec({})\n{}\nserve()",
             serde_json::to_string(SCRIPT).unwrap(),
             r#"
-if sys.platform == 'darwin':
-    real_run = run
-    def run(argv, cwd, input_bytes=None, timeout=25):
-        if argv[0] != 'mv':
-            return real_run(argv, cwd, input_bytes, timeout)
+real_run = run
+def run(argv, cwd, input_bytes=None, timeout=25):
+    if argv[0] == 'git' and 'clone' in argv:
+        assert argv[-4:-1] == ['clone', '--', 'https://example.invalid/clonefixture.git']
+        argv = [*argv[:-2], cwd, argv[-1]]
+    if argv[0] == 'gh':
+        assert cwd.startswith('/') and not cwd.startswith('//')
+        assert input_bytes == 'Literal ż body'.encode()
+        if argv[1] == 'api':
+            assert argv[-1] == 'body=@-'
+            return 0, b'{"data":{"addPullRequestReviewThreadReply":{"comment":{"url":"https://example.invalid/reply"}}}}', b''
+        assert argv == ['gh', 'issue', 'comment', '22', '--body-file', '-']
+        return 0, b'https://example.invalid/comment', b''
+    if sys.platform == 'darwin' and argv[0] == 'mv':
         assert argv[:4] == ['mv', '--no-clobber', '--no-target-directory', '--']
         if not os.path.lexists(argv[5]):
             os.rename(argv[4], argv[5])
         return 0, b'', b''
+    return real_run(argv, cwd, input_bytes, timeout)
 "#
         );
         let bridge =
@@ -674,6 +907,169 @@ if sys.platform == 'darwin':
         block_on(fs::delete_path(link)).unwrap();
         assert!(native.exists());
         assert!(fs::create_path(root.identity(), "../outside".into(), false).is_err());
+        // Exercise search and worktree production routing through the same real bridge.
+        let search = |query: &str, include: Option<String>| {
+            block_on(crate::search::search_project(
+                crate::search::SearchOptions {
+                    cwd: root.identity(),
+                    query: query.into(),
+                    case_sensitive: false,
+                    whole_word: false,
+                    regex: false,
+                    include,
+                    exclude: None,
+                },
+            ))
+            .unwrap()
+        };
+        let found = search("through symlink", None);
+        assert_eq!(found.matches.len(), 1);
+        assert_eq!(found.matches[0].path, renamed);
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            assert!(git(&root, &args, None).unwrap().status.success());
+        }
+        assert_eq!(search("through symlink", None).matches.len(), 1);
+        assert_eq!(
+            fs::git_info_for(std::path::Path::new(&root.identity()))
+                .branch
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            block_on(fs::git_github_work_item_comment(
+                root.identity(),
+                "issue".into(),
+                22,
+                "Literal ż body".into(),
+                "".into()
+            ))
+            .unwrap(),
+            "https://example.invalid/comment"
+        );
+        assert_eq!(
+            block_on(fs::git_github_work_item_comment(
+                root.identity(),
+                "pr".into(),
+                22,
+                "Literal ż body".into(),
+                "PRRT_fixture".into()
+            ))
+            .unwrap(),
+            "https://example.invalid/reply"
+        );
+        assert!(search("through symlink", Some("--no-index".into()))
+            .matches
+            .is_empty());
+        block_on(fs::write_text_file(renamed.clone(), "changed\n".into())).unwrap();
+        let diff = block_on(fs::git_file_diff(root.identity(), "Renamed ü.txt".into())).unwrap();
+        assert_eq!(diff.original, "through symlink");
+        assert_eq!(diff.current, "changed\n");
+        let index = block_on(fs::git_diff_files(root.identity())).unwrap();
+        assert!(index
+            .files
+            .iter()
+            .any(|file| file.relative == "Renamed ü.txt"));
+        block_on(fs::git_discard_file(
+            root.identity(),
+            "Renamed ü.txt".into(),
+        ))
+        .unwrap();
+        assert_eq!(
+            block_on(fs::read_text_file(renamed.clone())).unwrap(),
+            "through symlink"
+        );
+        let untracked = fs::create_path(root.identity(), "discard ü.txt".into(), false).unwrap();
+        block_on(fs::write_text_file(untracked.clone(), "one\ntwo\n".into())).unwrap();
+        let index =
+            serde_json::to_value(block_on(fs::git_diff_files(root.identity())).unwrap()).unwrap();
+        assert!(index["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["relative"] == "discard ü.txt" && file["additions"] == 2));
+        block_on(fs::git_discard_file(
+            root.identity(),
+            "discard ü.txt".into(),
+        ))
+        .unwrap();
+        assert!(!directory.join("discard ü.txt").exists());
+        let attachment = block_on(fs::write_attachment(
+            "test.txt".into(),
+            "aGVsbG8=".into(),
+            Some(root.identity()),
+        ))
+        .unwrap();
+        assert!(attachment.starts_with(&format!("//wsl.localhost/{unique}/")));
+        assert_eq!(
+            block_on(fs::read_text_file(attachment.clone())).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            block_on(fs::write_attachment(
+                "test.txt".into(),
+                "aGVsbG8=".into(),
+                Some(root.identity())
+            ))
+            .unwrap(),
+            attachment
+        );
+        let head =
+            String::from_utf8(git(&root, &["rev-parse", "HEAD"], None).unwrap().stdout).unwrap();
+        let cloned = block_on(fs::clone_repo(
+            "https://example.invalid/clonefixture.git".into(),
+            root.identity(),
+        ))
+        .unwrap();
+        assert!(cloned.starts_with(&format!("//wsl.localhost/{unique}/")));
+        assert_eq!(
+            fs::git_info_for(std::path::Path::new(&cloned))
+                .branch
+                .as_deref(),
+            Some("main")
+        );
+        assert!(block_on(fs::clone_repo(
+            "https://example.invalid/clonefixture.git".into(),
+            root.identity()
+        ))
+        .is_err());
+        let target = root
+            .with_path(&directory.join("child space ż").to_string_lossy())
+            .unwrap();
+        let child = fs::worktrees::git_worktree_create(
+            root.identity(),
+            "refs/heads/main".into(),
+            head.trim().into(),
+            "child-branch".into(),
+            target.identity(),
+        )
+        .unwrap();
+        let parent_family =
+            serde_json::to_value(fs::worktrees::git_repository_family(root.identity()).unwrap())
+                .unwrap();
+        let child_family =
+            serde_json::to_value(fs::worktrees::git_repository_family(child.clone()).unwrap())
+                .unwrap();
+        assert_eq!(parent_family["commonDir"], child_family["commonDir"]);
+        assert_eq!(child_family["checkout"], child);
+        let copies = child_family["worktrees"].as_array().unwrap();
+        assert_eq!(copies.len(), 2);
+        assert!(copies.iter().all(|copy| copy["missing"] == false
+            && copy["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("//wsl.localhost/")));
         if std::env::var_os("MONOCODE_WSL_MEASURE").is_some() {
             let files: Vec<_> = (0..64)
                 .map(|index| {
@@ -703,6 +1099,128 @@ if sys.platform == 'darwin':
             eprintln!("64-file metadata / 21 samples: native median {:?}, max {:?}; Python bridge median {:?}, max {:?}. This measures the local process boundary, not Windows-to-WSL transport or WebView cost.", native[10], native[20], bridged[10], bridged[20]);
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn linux_agent_barrier_streams_and_cancellation_use_real_processes() {
+        // macOS lacks /proc. Fake only these OS identity reads; execute the
+        // production supervisor, pipes, child and process-group signals.
+        let script = PROCESS_SCRIPT.replace(
+            "\nif __name__ ==",
+            r#"
+if sys.platform == 'darwin':
+    identity = lambda pid: 12345
+    boot_id = lambda: '01234567-0123-0123-0123-0123456789ab'
+    os.pidfd_open = lambda pid: os.open('/dev/null', os.O_RDONLY)
+    signal.pidfd_send_signal = lambda fd, number: os.kill(int(sys.argv[2]), number)
+    class MacPoll:
+        def register(self, fd, events): pass
+        def poll(self, timeout):
+            time.sleep(0.3)
+            return [(0, 1)]
+    select.poll = MacPoll
+
+if __name__ =="#,
+        );
+        let location = Location::new("fixture", &std::env::temp_dir().to_string_lossy()).unwrap();
+        let config = json!({"nonce":"fixture-nonce","cwd":location.path,"command":"/usr/bin/python3",
+            "args":["-u","-c","import sys, json, time; print(json.dumps(sys.argv[1:]), flush=True); print(sys.stdin.readline().strip(), flush=True); time.sleep(30)","space żółć", "$(literal)"]});
+        let mut child = Command::new("python3")
+            .args(["-u", "-c", &script, "start", &config.to_string()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (mut stdout, process) =
+            agent_handshake(child.stdout.take().unwrap(), location, "fixture-nonce").unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(b"fixture-nonce\nprovider-message\n")
+            .unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&line).unwrap(),
+            ["space żółć", "$(literal)"]
+        );
+        line.clear();
+        stdout.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "provider-message");
+        let output = crate::bounded_process::output(
+            Command::new("python3").args([
+                "-c",
+                &script,
+                "stop",
+                &process.pid.to_string(),
+                &process.started.to_string(),
+                &process.boot,
+            ]),
+            Duration::from_secs(5),
+            8192,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!child.wait().unwrap().success());
+
+        let mut abandoned = Command::new("python3")
+            .args(["-u", "-c", &script, "start", &config.to_string()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(abandoned.stdout.take().unwrap());
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        drop(abandoned.stdin.take());
+        assert_eq!(abandoned.wait().unwrap().code(), Some(125));
+        line.clear();
+        output.read_to_string(&mut line).unwrap();
+        assert!(
+            line.is_empty(),
+            "the agent must not launch before acknowledgement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_process_identity_rejects_reboot_and_pid_reuse() {
+        let script = format!(
+            "__name__ = 'fixture'\nexec({})\n{}",
+            serde_json::to_string(PROCESS_SCRIPT).unwrap(),
+            r#"
+assert start_time('123 (agent (worker)) ' + ' '.join(['S'] + ['0'] * 18 + ['456'])) == 456
+calls = []
+boot_id = lambda: 'new-boot'
+identity = lambda pid: 456
+os.pidfd_open = lambda pid: 99
+os.close = lambda fd: calls.append(('close', fd))
+os.getpgid = lambda pid: pid
+signal.pidfd_send_signal = lambda fd, number: calls.append(('signal', fd))
+for boot, started in [('old-boot', 456), ('new-boot', 123)]:
+    try:
+        stop(4321, started, boot)
+        raise AssertionError('stale identity accepted')
+    except ValueError:
+        pass
+assert not any(call[0] == 'signal' for call in calls)
+"#
+        );
+        let output = Command::new("python3")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn real_bridge_reads_git_and_survives_request_errors() {

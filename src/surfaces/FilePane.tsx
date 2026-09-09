@@ -303,6 +303,7 @@ function PlanSurface({
             </button>
             {session ? (
               <BuildTargetButton
+                cwd={file.cwd}
                 from={session.harness}
                 model={session.model}
                 disabled={buildDisabled}

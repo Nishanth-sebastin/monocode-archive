@@ -147,7 +147,7 @@ const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
 const cancelledThreads = new Set<string>();
 
-let resolveClaudeBinaryImpl: () => Promise<{ path: string }> =
+let resolveClaudeBinaryImpl: (cwd?: string) => Promise<{ path: string }> =
   resolveClaudeBinary;
 
 /** Test seam. */
@@ -347,7 +347,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     resumeByThread.delete(input.sessionId);
   }
 
-  const { path } = await resolveClaudeBinaryImpl();
+  const { path } = await resolveClaudeBinaryImpl(input.cwd);
   const liveRef: { current: Live | null } = { current: null };
   const claudeSessionId =
     canResume && resume ? resume.sessionId : crypto.randomUUID();
