@@ -989,24 +989,24 @@ function ProjectFamilyCard(
         }
       />
       {visible && children.length > 0 && (
-        <div className="my-0.5 ml-3 border-l border-content/10 pl-2">
+        <div className="my-0.5 ml-3">
           {children.map((child) => {
             const name = family
               ? workingCopyName(child, family)
               : basename(child.path);
-            const branch =
-              child.branch?.replace("refs/heads/", "") ??
-              child.head.slice(0, 8);
             const active = sameProjectPath(child.path, cwd);
             const working = isBusyPath(child.path, busyPaths);
             return (
-              <div key={child.path} className="flex min-w-0 items-center">
+              <div
+                key={child.path}
+                className="group/working-copy relative flex min-w-0 items-center"
+              >
                 <button
                   type="button"
                   disabled={child.missing || !!child.prunable}
                   title={`${child.path}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode\nLocal${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
                   aria-current={active ? "true" : undefined}
-                  className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+                  className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 pr-6 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
                   onClick={() => onSelect(child.path)}
                 >
                   <GitBranch
@@ -1014,20 +1014,6 @@ function ProjectFamilyCard(
                     strokeWidth={1.5}
                   />
                   <span className="min-w-0 flex-1 truncate">{name}</span>
-                  {!active &&
-                    !working &&
-                    lastWorkingCopyUse(child, recents) !== null && (
-                      <span className="shrink-0 text-[9px] text-content/50">
-                        {workingCopyAge(
-                          lastWorkingCopyUse(child, recents),
-                        ).replace("Used ", "")}
-                      </span>
-                    )}
-                  {branch !== name && (
-                    <span className="max-w-[35%] truncate text-[10px] text-content/40">
-                      {branch}
-                    </span>
-                  )}
                   {child.missing || child.prunable ? (
                     <span className="text-[10px]">Missing</span>
                   ) : working ? (
@@ -1045,7 +1031,7 @@ function ProjectFamilyCard(
                   type="button"
                   title="Worktree details and cleanup"
                   aria-label={`Manage worktree ${name}`}
-                  className="shrink-0 rounded p-1 text-content/40 hover:bg-content/10 hover:text-content focus-visible:ring-1 focus-visible:ring-content/30"
+                  className="absolute right-0 rounded p-1 text-content/40 opacity-0 hover:bg-content/10 hover:text-content group-hover/working-copy:opacity-100 group-focus-within/working-copy:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-content/30"
                   onClick={() => setMenu({ create: false, path: child.path })}
                 >
                   <MoreHorizontal className="size-3" />

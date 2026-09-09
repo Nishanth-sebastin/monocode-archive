@@ -292,27 +292,176 @@ pub fn git_worktree_create(
     create(&expand_home(&cwd), &base, &commit, &branch, &path)
 }
 
-fn remove(root: &Path, path: &str, head: &str) -> Result<(), String> {
-    let entries = inventory(root)?;
-    let entry = entries
-        .iter()
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalPreview {
+    token: String,
+    file_count: usize,
+    files: Vec<String>,
+}
+
+fn removal_entry(root: &Path, path: &str) -> Result<(String, Worktree), String> {
+    let family = git_repository_family(path_to_js(root))?;
+    let entry = family
+        .worktrees
+        .into_iter()
         .find(|e| e.path == path)
         .ok_or("Worktree is no longer registered; refresh")?;
-    if entry.branch.is_none()
-        || entry.main
+    if entry.main
+        || entry.branch.is_none()
+        || entry.missing
         || entry.locked.is_some()
         || entry.prunable.is_some()
-        || entry.missing
+        || canonical(path)? != path
     {
-        return Err("Main, detached, locked, missing or prunable worktrees cannot be removed here. Repair explicitly with Git.".into());
+        return Err("This worktree cannot be force removed. Refresh or repair with Git.".into());
     }
+    let target_common = git(
+        Path::new(path),
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let target_root = git(Path::new(path), &["rev-parse", "--show-toplevel"])?;
+    if canonical(target_common.trim_end_matches(['\r', '\n']))? != family.common_dir
+        || canonical(target_root.trim_end_matches(['\r', '\n']))? != path
+    {
+        return Err("Worktree identity changed; refresh and review again".into());
+    }
+    Ok((family.common_dir, entry))
+}
+
+// Force review is deliberately bounded and on demand. Large trees must be cleaned
+// explicitly with Git; never trade incomplete evidence for a destructive action.
+fn removal_preview(root: &Path, path: &str, include_files: bool) -> Result<RemovalPreview, String> {
+    use std::hash::{Hash, Hasher};
+    let (common_dir, entry) = removal_entry(root, path)?;
+    let mut digest = std::collections::hash_map::DefaultHasher::new();
+    common_dir.hash(&mut digest);
+    entry.path.hash(&mut digest);
+    entry.head.hash(&mut digest);
+    entry.branch.hash(&mut digest);
+    // Includes index state, even if staged content changes without changing status.
+    git(
+        Path::new(path),
+        &["diff", "--cached", "--no-ext-diff", "--binary", "HEAD"],
+    )?
+    .hash(&mut digest);
+    let start = Instant::now();
+    let mut pending = vec![std::path::PathBuf::from(path)];
+    let mut count = 0;
+    let mut bytes = 0u64;
+    let mut files = Vec::new();
+    while let Some(current) = pending.pop() {
+        if start.elapsed() > Duration::from_secs(30) || count >= 10_000 {
+            return Err(
+                "Force review exceeds 10,000 entries or 30 seconds. Clean up with Git instead."
+                    .into(),
+            );
+        }
+        count += 1;
+        current
+            .strip_prefix(path)
+            .map_err(|e| e.to_string())?
+            .hash(&mut digest);
+        let meta = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
+        meta.permissions().readonly().hash(&mut digest);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.mode().hash(&mut digest);
+        }
+        meta.modified()
+            .map_err(|e| e.to_string())?
+            .hash(&mut digest);
+        if meta.is_symlink() {
+            std::fs::read_link(&current)
+                .map_err(|e| e.to_string())?
+                .hash(&mut digest);
+        } else if meta.is_dir() {
+            let mut children = Vec::new();
+            for child in std::fs::read_dir(&current).map_err(|e| e.to_string())? {
+                let child = child.map_err(|e| e.to_string())?;
+                if current == Path::new(path) && child.file_name() == ".git" {
+                    continue;
+                }
+                if children.len() + pending.len() + count >= 10_000 {
+                    return Err(
+                        "Force review exceeds 10,000 entries. Clean up with Git instead.".into(),
+                    );
+                }
+                children.push(child.path());
+            }
+            children.sort();
+            pending.extend(children);
+        } else if meta.is_file() {
+            bytes = bytes
+                .checked_add(meta.len())
+                .ok_or("Force review is too large")?;
+            if bytes > 64 * 1024 * 1024 {
+                return Err("Force review exceeds 64 MiB. Clean up with Git instead.".into());
+            }
+            let mut data = Vec::new();
+            std::fs::File::open(&current)
+                .map_err(|e| e.to_string())?
+                .take(64 * 1024 * 1024 + 1)
+                .read_to_end(&mut data)
+                .map_err(|e| e.to_string())?;
+            if data.len() as u64 != meta.len() {
+                return Err("Files changed during review; refresh".into());
+            }
+            data.hash(&mut digest);
+        } else {
+            return Err(
+                "Special files cannot be reviewed safely. Clean up with Git instead.".into(),
+            );
+        }
+        if !meta.is_dir() && include_files && files.len() < 100 {
+            files.push(
+                current
+                    .strip_prefix(path)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    Ok(RemovalPreview {
+        token: format!("{:016x}", digest.finish()),
+        file_count: count - 1,
+        files,
+    })
+}
+
+#[tauri::command(async)]
+pub fn git_worktree_removal_preview(
+    cwd: String,
+    path: String,
+    include_files: bool,
+) -> Result<RemovalPreview, String> {
+    removal_preview(&expand_home(&cwd), &path, include_files)
+}
+
+fn remove(root: &Path, path: &str, head: &str) -> Result<(), String> {
+    remove_reviewed(root, path, head, None)
+}
+
+fn remove_reviewed(
+    root: &Path,
+    path: &str,
+    head: &str,
+    reviewed: Option<&str>,
+) -> Result<(), String> {
+    let (_, entry) = removal_entry(root, path)?;
     if entry.head != head {
         return Err("Worktree HEAD changed; refresh and review again".into());
     }
     if canonical(path)? != path {
         return Err("Worktree path changed or is a symlink; refresh".into());
     }
-    if !git(
+    if let Some(reviewed) = reviewed {
+        if removal_preview(root, path, false)?.token != reviewed {
+            return Err("Worktree files or identity changed; refresh and review again".into());
+        }
+    } else if !git(
         Path::new(path),
         &[
             "status",
@@ -328,7 +477,11 @@ fn remove(root: &Path, path: &str, head: &str) -> Result<(), String> {
             "Worktree has modified, untracked or ignored files; all files are preserved.".into(),
         );
     }
-    let result = git(root, &["worktree", "remove", "--", path]);
+    let result = if reviewed.is_some() {
+        git(root, &["worktree", "remove", "--force", "--", path])
+    } else {
+        git(root, &["worktree", "remove", "--", path])
+    };
     if !inventory(root)?.iter().any(|e| e.path == path) {
         return Ok(());
     }
@@ -342,6 +495,7 @@ pub fn git_worktree_remove(
     cwd: String,
     path: String,
     head: String,
+    reviewed: Option<String>,
 ) -> Result<(), String> {
     let _guard = LIFECYCLE
         .try_write()
@@ -354,7 +508,10 @@ pub fn git_worktree_remove(
     {
         return Err("Close running agents and terminals before removing a worktree. No processes were stopped.".into());
     }
-    remove(&expand_home(&cwd), &path, &head)
+    match reviewed {
+        Some(token) => remove_reviewed(&expand_home(&cwd), &path, &head, Some(&token)),
+        None => remove(&expand_home(&cwd), &path, &head),
+    }
 }
 
 #[derive(Serialize)]
@@ -556,6 +713,98 @@ mod tests {
         )
         .is_err());
         assert!(create(&repo.0, "--bad", &base, "another", &repo.target("unused")).is_err());
+    }
+
+    #[test]
+    fn force_requires_current_review_and_preserves_branches_and_siblings() {
+        let repo = Repo::new();
+        let head = repo.head();
+        let path = repo.target("dirty space ż");
+        let sibling = repo.target("sibling");
+        create(&repo.0, "refs/heads/main", &head, "dirty", &path).unwrap();
+        create(&repo.0, "refs/heads/main", &head, "sibling", &sibling).unwrap();
+        let target = Path::new(&path);
+        std::fs::write(target.join("tracked"), "base").unwrap();
+        git(target, &["add", "tracked"]).unwrap();
+        git(
+            target,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "tracked",
+            ],
+        )
+        .unwrap();
+        let head = git(target, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        std::fs::write(target.join("tracked"), "staged").unwrap();
+        git(target, &["add", "tracked"]).unwrap();
+        std::fs::write(target.join("tracked"), "unstaged").unwrap();
+        std::fs::write(repo.0.join(".git/info/exclude"), "ignored\n").unwrap();
+        std::fs::write(target.join("ignored"), "keep ignored").unwrap();
+        std::fs::write(target.join("untracked"), "keep untracked").unwrap();
+        assert!(remove(&repo.0, &path, &head).is_err());
+        let first = removal_preview(&repo.0, &path, false).unwrap();
+        assert!(first.files.is_empty());
+        let details = removal_preview(&repo.0, &path, true).unwrap();
+        assert_eq!(first.token, details.token);
+        assert!(details.files.contains(&"ignored".to_owned()));
+        std::fs::write(target.join("untracked"), "new content").unwrap();
+        assert!(remove_reviewed(&repo.0, &path, &head, Some(&first.token))
+            .unwrap_err()
+            .contains("changed"));
+        assert!(target.exists());
+        let reviewed = removal_preview(&repo.0, &path, false).unwrap();
+        assert!(remove_reviewed(&repo.0, &path, "stale head", Some(&reviewed.token)).is_err());
+        assert!(remove_reviewed(&repo.0, &sibling, &repo.head(), Some(&reviewed.token)).is_err());
+        assert!(removal_preview(&repo.0, &path_to_js(&repo.0), false).is_err());
+        git(&repo.0, &["worktree", "lock", &path]).unwrap();
+        assert!(remove_reviewed(&repo.0, &path, &head, Some(&reviewed.token)).is_err());
+        git(&repo.0, &["worktree", "unlock", &path]).unwrap();
+        remove_reviewed(&repo.0, &path, &head, Some(&reviewed.token)).unwrap();
+        assert!(!target.exists());
+        assert!(Path::new(&sibling).exists());
+        assert_eq!(
+            git(&repo.0, &["rev-parse", "refs/heads/dirty"])
+                .unwrap()
+                .trim(),
+            head
+        );
+        assert!(remove_reviewed(&repo.0, &path, &head, Some(&reviewed.token)).is_err());
+    }
+
+    #[test]
+    fn force_review_bounds_large_files_and_never_follows_symlinks() {
+        let repo = Repo::new();
+        let path = repo.target("bounded");
+        create(&repo.0, "refs/heads/main", &repo.head(), "bounded", &path).unwrap();
+        let file = Path::new(&path).join("large");
+        std::fs::File::create(&file)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(removal_preview(&repo.0, &path, false)
+            .err()
+            .unwrap()
+            .contains("64 MiB"));
+        std::fs::remove_file(file).unwrap();
+        #[cfg(unix)]
+        {
+            let outside = repo.0.join("outside");
+            std::fs::write(&outside, "keep").unwrap();
+            std::os::unix::fs::symlink(&outside, Path::new(&path).join("link")).unwrap();
+            let reviewed = removal_preview(&repo.0, &path, false).unwrap();
+            remove_reviewed(&repo.0, &path, &repo.head(), Some(&reviewed.token)).unwrap();
+            assert_eq!(std::fs::read_to_string(outside).unwrap(), "keep");
+        }
     }
 
     #[test]

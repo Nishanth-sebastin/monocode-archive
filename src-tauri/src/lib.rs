@@ -246,6 +246,7 @@ pub fn run() {
             fs::worktrees::git_worktree_create,
             fs::worktrees::git_worktree_remove,
             fs::worktrees::git_worktree_safety,
+            fs::worktrees::git_worktree_removal_preview,
             fs::git_checkout,
             fs::git_create_branch,
             fs::git_stash,

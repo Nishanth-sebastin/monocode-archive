@@ -45,10 +45,16 @@ it("shortens generated checkout names without changing unrelated names or paths"
   };
   expect(workingCopyName(main, family)).toBe("main");
   expect(
-    workingCopyName({ ...main, main: false, path: "/repo-fix ż" }, family),
+    workingCopyName(
+      { ...main, main: false, branch: null, path: "/repo-fix ż" },
+      family,
+    ),
   ).toBe("fix ż");
   expect(
-    workingCopyName({ ...main, main: false, path: "/external space" }, family),
+    workingCopyName(
+      { ...main, main: false, branch: null, path: "/external space" },
+      family,
+    ),
   ).toBe("external space");
 });
 
@@ -96,4 +102,47 @@ it("loads only bounded presentation paths and tolerates damaged old preferences"
   expect(
     hiddenWorkingCopies(JSON.stringify(Array(2100).fill("/repo"))),
   ).toHaveLength(2000);
+});
+
+it("uses the branch as the single label even when the checkout folder differs", () => {
+  const copy = {
+    path: "/repo-generated-name",
+    main: false,
+    branch: "refs/heads/fix/actual-branch",
+    head: "abc",
+    missing: false,
+    locked: null,
+    prunable: null,
+  };
+  expect(
+    workingCopyName(copy, {
+      commonDir: "/repo/.git",
+      checkout: "/repo",
+      worktrees: [copy],
+    }),
+  ).toBe("fix/actual-branch");
+});
+
+it("reconciles serialized legacy rows without erasing their original presentation data", () => {
+  const old = {
+    pinned: [{ path: "/child", openedAt: 2 }],
+    projects: [
+      { path: "/main", openedAt: 1 },
+      { path: "/clone", openedAt: 3 },
+    ],
+  };
+  const reloaded = JSON.parse(JSON.stringify(old));
+  const family = { commonDir: "/main/.git", checkout: "/main", worktrees: [] };
+  const verified = new Map([
+    ["/main", family],
+    ["/child", family],
+    ["/clone", { ...family, commonDir: "/clone/.git" }],
+  ]);
+  expect(groupRepositoryFamilies(reloaded, verified)).toEqual({
+    pinned: [old.pinned[0]],
+    projects: [old.projects[1]],
+  });
+  expect(reloaded).toEqual(old);
+  // Losing verification must make original entries recoverable, not delete them.
+  expect(groupRepositoryFamilies(reloaded, new Map())).toEqual(old);
 });

@@ -116,6 +116,13 @@ export function WorktreePanel({
     entry: Worktree;
     action: "open" | "remove";
   } | null>(null);
+  const [removalBlocked, setRemovalBlocked] = useState(false);
+  const [forceReview, setForceReview] = useState<{
+    token: string;
+    fileCount: number;
+    files: string[];
+  } | null>(null);
+  const [forceFiles, setForceFiles] = useState<string[] | null>(null);
   const pending = useRef(false);
   const selected = refs.find((ref) => ref.name === base);
   const refresh = async () => {
@@ -265,9 +272,12 @@ export function WorktreePanel({
         <div className="space-y-2 px-3 py-2.5">
           <p className="font-medium">
             {confirmation.action === "remove"
-              ? "Remove worktree?"
+              ? forceReview
+                ? "Permanently remove worktree?"
+                : "Remove worktree?"
               : "Share this worktree?"}
           </p>
+          <p className="truncate text-content/70">Repository: {cwd}</p>
           <p className="truncate font-mono">
             {confirmation.entry.branch?.replace("refs/heads/", "")} ·{" "}
             {confirmation.entry.head.slice(0, 10)}
@@ -277,9 +287,74 @@ export function WorktreePanel({
           </p>
           <p className="text-[11px] leading-4 text-content/60">
             {confirmation.action === "remove"
-              ? "The branch and conversations stay. Unsaved files and running work block removal."
+              ? forceReview
+                ? `All files in this working copy, including uncommitted, untracked and ignored files, will be permanently deleted. Reviewed ${forceReview.fileCount} entries. The branch and conversations stay.`
+                : "The branch and conversations stay. Unsaved files and running work block removal."
               : "Other conversations use this folder. Their agents can change the same files."}
           </p>
+          {forceReview && (
+            <details
+              onToggle={(event) => {
+                if (!event.currentTarget.open || forceFiles || busy) return;
+                void run(async () => {
+                  const latest = await invoke<typeof forceReview>(
+                    "git_worktree_removal_preview",
+                    { cwd, path: confirmation.entry.path, includeFiles: true },
+                  );
+                  if (latest.token !== forceReview.token) {
+                    setForceReview(null);
+                    throw new Error(
+                      "Files changed; review again before force removal.",
+                    );
+                  }
+                  setForceFiles(latest.files);
+                });
+              }}
+              className="max-h-32 overflow-auto text-[11px] text-content/70"
+            >
+              <summary>Review files (first 100)</summary>
+              {forceFiles?.map((file) => (
+                <p key={file} className="break-all">
+                  {file}
+                </p>
+              ))}
+            </details>
+          )}
+          {removalBlocked && !forceReview && (
+            <div className="space-y-1">
+              <button
+                type="button"
+                disabled={busy}
+                className={rowClass}
+                onClick={() => {
+                  onOpen(confirmation.entry.path);
+                  onClose();
+                }}
+              >
+                Review changes in worktree
+              </button>
+              <button
+                type="button"
+                disabled={busy || safety?.running || !safety?.dirty}
+                className={rowClass}
+                onClick={() =>
+                  void run(async () => {
+                    const review = await invoke<
+                      NonNullable<typeof forceReview>
+                    >("git_worktree_removal_preview", {
+                      cwd,
+                      path: confirmation.entry.path,
+                      includeFiles: false,
+                    });
+                    setForceReview(review);
+                    setForceFiles(null);
+                  })
+                }
+              >
+                Force remove…
+              </button>
+            </div>
+          )}
           {confirmation.entry.users.length > 0 && (
             <details className="max-h-24 overflow-auto text-[11px] text-content/50">
               <summary>Existing conversations</summary>
@@ -309,11 +384,18 @@ export function WorktreePanel({
                   return;
                 }
                 void run(async () => {
-                  await invoke("git_worktree_remove", {
-                    cwd,
-                    path: entry.path,
-                    head: entry.head,
-                  });
+                  try {
+                    await invoke("git_worktree_remove", {
+                      cwd,
+                      path: entry.path,
+                      head: entry.head,
+                      reviewed: forceReview?.token ?? null,
+                    });
+                  } catch (error) {
+                    setRemovalBlocked(true);
+                    setForceReview(null);
+                    throw error;
+                  }
                   notifyGitChanged();
                   setConfirmation(null);
                   setDetail(null);
@@ -321,7 +403,9 @@ export function WorktreePanel({
               }}
             >
               {confirmation.action === "remove"
-                ? "Remove"
+                ? forceReview
+                  ? "Permanently remove"
+                  : "Remove"
                 : "Open conversation"}
             </button>
           </div>
@@ -441,11 +525,15 @@ export function WorktreePanel({
               !!detail.locked ||
               !!detail.prunable ||
               !safety ||
-              safety.dirty ||
               safety.running
             }
             className={rowClass}
-            onClick={() => setConfirmation({ entry: detail, action: "remove" })}
+            onClick={() => {
+              setRemovalBlocked(false);
+              setForceReview(null);
+              setForceFiles(null);
+              setConfirmation({ entry: detail, action: "remove" });
+            }}
           >
             <Trash2 className="size-3.5" />
             Remove Git worktree…

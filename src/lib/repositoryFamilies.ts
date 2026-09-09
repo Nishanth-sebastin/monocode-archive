@@ -38,6 +38,7 @@ export function workingCopyName(
   child: WorkingCopy,
   family: RepositoryFamily,
 ): string {
+  if (child.branch) return child.branch.replace("refs/heads/", "");
   if (child.main) return "main";
   const name = child.path.split("/").pop() ?? child.path;
   const main = family.worktrees

@@ -28,7 +28,7 @@ missing directories remain explicit Git operations, with no automatic retry.
 Cleanup conservatively requires all this app's agent processes and terminals to
 be closed, even those in another repository. Process startup is serialized against
 removal. External editors/agents are outside the app's ownership; stop them before
-cleanup. Git still enforces its non-force removal safeguards. Operations have a
+cleanup. Normal removal uses Git safeguards; deliberate force removal uses the reviewed-state checks below. Operations have a
 30-second Git timeout and retain at most 1 MiB from each pipe. A timeout is an
 uncertain result: refresh and inspect the exact path/branch before retrying.
 
@@ -93,11 +93,11 @@ has no timer-based polling. These numbers exclude WebView and agent costs.
 
 ## Activity and cleanup
 
-Use the child's **…** button, or Branches → Worktrees. **Oldest first** orders known MonoCode activity; unobserved external worktrees remain **Activity unknown**. The timestamp is the latest saved conversation update or recent project open, not a claim about external editors, commit age or deletion safety. Main and active working copies remain protected.
+Child rows show one branch label; activity stays in tooltips/details. Use the child's hover/focus **…** button, or Branches → Worktrees. **Oldest first** orders known MonoCode activity; unobserved external worktrees remain **Activity unknown**. The timestamp is the latest saved conversation update or recent project open, not a claim about external editors, commit age or deletion safety. Main and active working copies remain protected.
 
 The compact details show activity and on-demand file/process blockers. **Hide from project** changes only a bounded presentation preference; **Show in project** restores it from the same list, including after restart. Sessions, original recents/labels and Git metadata remain intact. Hidden children remain discoverable in the worktree list. The existing parent menu handles archiving the main/final project association.
 
-**Remove Git worktree…** requires an explicit path/branch/HEAD confirmation and the existing fresh backend checks. Dirty, untracked/ignored files, locked/missing entries and running app processes block removal. No branch deletion, force removal or automatic aging cleanup is added. Missing children expose **Location and recovery** and **Retry**: restore the original folder or explicitly repair Git registration from a surviving checkout. Repair does not guess a new session path or rewrite history.
+**Remove Git worktree…** requires an explicit path/branch/HEAD confirmation and the existing fresh backend checks. Dirty, untracked/ignored files, locked/missing entries and running app processes block removal. No branch deletion or automatic aging cleanup is added. After normal removal refuses dirty files, **Force remove…** opens a separate destructive confirmation. It binds the exact registered path/family/HEAD/index and filesystem snapshot to the final request, rechecks running work, and uses only Git worktree removal. Changed evidence requires a fresh review. Full-tree review is bounded at 10,000 entries, 64 MiB and 30 seconds (plus bounded Git requests); larger trees require explicit Git cleanup. The file list loads only on expansion, retaining its first 100 entries. No process is killed implicitly; all app processes still block cleanup because exact checkout ownership is not yet tracked. External writers cannot be transactionally locked by Git; stop them before confirming. Missing children expose **Location and recovery** and **Retry**: restore the original folder or explicitly repair Git registration from a surviving checkout. Repair does not guess a new session path or rewrite history.
 
 The rail and branch worktree panel share published Git inventory. Session activity is loaded only when the worktree panel opens, retaining at most 100 users per checkout. Sidebar discovery does not query conversation history; it can show known recent-open times. File/process status is fetched only for the selected detail, not polled per row. The effective session checkout is `worktree_cwd` when present, otherwise `cwd`; it is not attributed to both.
 
@@ -105,3 +105,5 @@ Native disposable-repository checks exercised hide/restore, dirty removal refusa
 
 ![Compact cleanup, production component with OS fixture](images/worktree-cleanup-dark.png)
 ![Light theme and keyboard focus, production component with OS fixture](images/worktree-cleanup-light.png)
+
+Additional acceptance: the native macOS release app refused normal removal of a dirty disposable checkout, rejected a force confirmation after the file changed, then removed only the freshly reviewed checkout while preserving its branch and dirty sibling. Automated tests cover staged/untracked/ignored data, stale HEAD/path/file state, locked/main protection, duplicate calls, size limits and symlinks. Workspace serialization/hydration tests preserve main plus two child conversation/provider identities, and legacy recent rows stay recoverable. This is not live concurrent-agent or Windows acceptance.

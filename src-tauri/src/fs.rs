@@ -5283,6 +5283,11 @@ mod tests {
         if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
             return;
         }
+        assert!(!git_branches_for(&dir.0)
+            .branches
+            .iter()
+            .any(|branch| branch.name == "feature"));
+        // An external worktree can appear after the picker cached its branch list.
         let sibling = dir.0.canonicalize().unwrap().join("sibling worktree ż");
         let sibling_text = path_to_js(&sibling);
         if !git(&dir.0, &["branch", "feature"])

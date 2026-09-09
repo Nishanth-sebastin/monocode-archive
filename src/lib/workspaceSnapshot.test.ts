@@ -344,3 +344,44 @@ describe("hydrateWorkspaceSnapshot", () => {
     ).toBeUndefined();
   });
 });
+
+it("restores main and two worktree conversations without rebinding their owners", () => {
+  const paths = ["/repo", "/repo-child ż", "/repo-other"];
+  const sessions = paths.map((cwd, index) => ({
+    ...chat(`copy-${index}`, index === 0 ? cwd : "/repo"),
+    worktreeCwd: index === 0 ? undefined : cwd,
+    providerSessionId: `provider-${index}`,
+  }));
+  const tabs = sessions.map((session, index) => ({
+    ...newTab(session.id),
+    id: `tab-${index}`,
+  }));
+  const before = JSON.stringify(sessions);
+  for (let selected = 0; selected < paths.length; selected++) {
+    const snapshot = collectWorkspaceSnapshot(
+      tabs,
+      sessions,
+      tabs[selected].id,
+      paths[selected],
+    );
+    const parsed = parseWorkspaceSnapshot(JSON.parse(JSON.stringify(snapshot)));
+    expect(parsed).not.toBeNull();
+    const restored = hydrateWorkspaceSnapshot(
+      parsed!,
+      new Map(sessions.map((s) => [s.id, s])),
+    );
+    expect(restored?.projectCwd).toBe(paths[selected]);
+    expect(restored?.activeTabId).toBe(tabs[selected].id);
+    expect(
+      restored?.sessions.map((s) => [
+        s.id,
+        s.worktreeCwd ?? s.cwd,
+        s.providerSessionId,
+      ]),
+    ).toEqual(
+      paths.map((path, index) => [`copy-${index}`, path, `provider-${index}`]),
+    );
+    expect(restored?.tabs).toHaveLength(3);
+  }
+  expect(JSON.stringify(sessions)).toBe(before);
+});
