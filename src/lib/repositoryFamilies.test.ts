@@ -51,3 +51,49 @@ it("shortens generated checkout names without changing unrelated names or paths"
     workingCopyName({ ...main, main: false, path: "/external space" }, family),
   ).toBe("external space");
 });
+
+import {
+  lastWorkingCopyUse,
+  workingCopyAge,
+  oldestWorkingCopies,
+  hiddenWorkingCopies,
+} from "./repositoryFamilies";
+
+it("uses recorded app activity, sorts known oldest first and never treats unknown as stale", () => {
+  const child = (path: string, lastUsed?: number) => ({
+    path,
+    lastUsed,
+    head: "abc",
+    branch: null,
+    main: false,
+    missing: false,
+    locked: null,
+    prunable: null,
+  });
+  const entries = [child("/new", 300), child("/unknown"), child("/old", 100)];
+  expect(oldestWorkingCopies(entries, []).map((entry) => entry.path)).toEqual([
+    "/old",
+    "/new",
+    "/unknown",
+  ]);
+  expect(entries[0].path).toBe("/new");
+  expect(
+    lastWorkingCopyUse(entries[2], [{ path: "/old", openedAt: 400 }]),
+  ).toBe(400);
+  expect(lastWorkingCopyUse(entries[1], [])).toBeNull();
+  expect(workingCopyAge(null)).toBe("Activity unknown");
+  expect(workingCopyAge(100, 100 + 30 * 86_400_000)).toBe("Used 30d ago");
+  expect(workingCopyAge(200, 100)).toBe("Used today");
+});
+
+it("loads only bounded presentation paths and tolerates damaged old preferences", () => {
+  expect(hiddenWorkingCopies("broken")).toEqual([]);
+  expect(hiddenWorkingCopies('{"path":"/repo"}')).toEqual([]);
+  expect(hiddenWorkingCopies('["/repo",null,5,"/other"]')).toEqual([
+    "/repo",
+    "/other",
+  ]);
+  expect(
+    hiddenWorkingCopies(JSON.stringify(Array(2100).fill("/repo"))),
+  ).toHaveLength(2000);
+});

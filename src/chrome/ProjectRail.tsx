@@ -17,11 +17,23 @@ import {
   Settings,
   Trash2,
 } from "./icons";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent,
+} from "react";
 import { useRepositoryFamilies } from "../hooks/useRepositoryFamilies";
 import {
   groupRepositoryFamilies,
   workingCopyName,
+  workingCopyAge,
+  lastWorkingCopyUse,
+  hiddenWorkingCopies,
+  hiddenWorkingCopiesSnapshot,
+  subscribeWorkingCopyPreferences,
   type RepositoryFamily,
 } from "../lib/repositoryFamilies";
 import { useDragResize } from "../hooks/useDragResize";
@@ -42,6 +54,7 @@ import { pathKey, projectKey, projectName } from "../lib/paths";
 import {
   collectRailProjects,
   loadPinnedProjects,
+  loadRecents,
   loadProjectRailOrder,
   projectRailSections,
   sameProjectPath,
@@ -901,7 +914,15 @@ function ProjectFamilyCard(
 ) {
   const { family, cwd, busyPaths, onSelect } = props;
   const anchor = useRef<HTMLDivElement>(null);
-  const [menu, setMenu] = useState(false);
+  const [menu, setMenu] = useState<{ create: boolean; path?: string } | null>(
+    null,
+  );
+  const hiddenRaw = useSyncExternalStore(
+    subscribeWorkingCopyPreferences,
+    hiddenWorkingCopiesSnapshot,
+  );
+  const hidden = hiddenWorkingCopies(hiddenRaw);
+  const recents = loadRecents();
   const [working, setWorking] = useState(false);
   const expandedKey = `monocode.worktreeExpanded:${family?.commonDir ?? props.item.path}`;
   const [expanded, setExpanded] = useState<boolean | null>(null);
@@ -913,7 +934,12 @@ function ProjectFamilyCard(
       setExpanded(null);
     }
   }, [expandedKey]);
-  const children = family?.worktrees ?? [];
+  const allChildren = family?.worktrees ?? [];
+  const children = allChildren.filter(
+    (child) =>
+      sameProjectPath(child.path, cwd) ||
+      !hidden.some((path) => sameProjectPath(path, child.path)),
+  );
   const visible = expanded ?? children.length > 1;
   const selected = children.some((child) => sameProjectPath(child.path, cwd));
   const lastKey = `monocode.worktreeLast:${family?.commonDir ?? props.item.path}`;
@@ -957,7 +983,7 @@ function ProjectFamilyCard(
                     /* quota */
                   }
                 },
-                create: () => setMenu(true),
+                create: () => setMenu({ create: true }),
               }
             : undefined
         }
@@ -974,41 +1000,69 @@ function ProjectFamilyCard(
             const active = sameProjectPath(child.path, cwd);
             const working = isBusyPath(child.path, busyPaths);
             return (
-              <button
-                type="button"
-                key={child.path}
-                disabled={child.missing || !!child.prunable}
-                title={`${child.path}\n${child.head}\nLocal${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
-                aria-current={active ? "true" : undefined}
-                className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
-                onClick={() => onSelect(child.path)}
-              >
-                <GitBranch
-                  className="size-3 shrink-0 text-content/40"
-                  strokeWidth={1.5}
-                />
-                <span className="min-w-0 flex-1 truncate">{name}</span>
-                {branch !== name && (
-                  <span className="max-w-[35%] truncate text-[10px] text-content/40">
-                    {branch}
-                  </span>
-                )}
-                {child.missing || child.prunable ? (
-                  <span className="text-[10px]">Missing</span>
-                ) : working ? (
-                  <span title="Working" aria-label="Working">
-                    <TerminalSpinner className="size-3" />
-                  </span>
-                ) : active ? (
-                  <Check
-                    className="size-3 shrink-0 text-content/45"
+              <div key={child.path} className="flex min-w-0 items-center">
+                <button
+                  type="button"
+                  disabled={child.missing || !!child.prunable}
+                  title={`${child.path}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode\nLocal${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
+                  aria-current={active ? "true" : undefined}
+                  className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+                  onClick={() => onSelect(child.path)}
+                >
+                  <GitBranch
+                    className="size-3 shrink-0 text-content/40"
                     strokeWidth={1.5}
                   />
-                ) : null}
-              </button>
+                  <span className="min-w-0 flex-1 truncate">{name}</span>
+                  {!active &&
+                    !working &&
+                    lastWorkingCopyUse(child, recents) !== null && (
+                      <span className="shrink-0 text-[9px] text-content/50">
+                        {workingCopyAge(
+                          lastWorkingCopyUse(child, recents),
+                        ).replace("Used ", "")}
+                      </span>
+                    )}
+                  {branch !== name && (
+                    <span className="max-w-[35%] truncate text-[10px] text-content/40">
+                      {branch}
+                    </span>
+                  )}
+                  {child.missing || child.prunable ? (
+                    <span className="text-[10px]">Missing</span>
+                  ) : working ? (
+                    <span title="Working" aria-label="Working">
+                      <TerminalSpinner className="size-3" />
+                    </span>
+                  ) : active ? (
+                    <Check
+                      className="size-3 shrink-0 text-content/45"
+                      strokeWidth={1.5}
+                    />
+                  ) : null}
+                </button>
+                <button
+                  type="button"
+                  title="Worktree details and cleanup"
+                  aria-label={`Manage worktree ${name}`}
+                  className="shrink-0 rounded p-1 text-content/40 hover:bg-content/10 hover:text-content focus-visible:ring-1 focus-visible:ring-content/30"
+                  onClick={() => setMenu({ create: false, path: child.path })}
+                >
+                  <MoreHorizontal className="size-3" />
+                </button>
+              </div>
             );
           })}
         </div>
+      )}
+      {allChildren.length > children.length && (
+        <button
+          type="button"
+          className="w-full rounded px-2 py-1 text-left text-[10px] text-content/50 hover:bg-content/5"
+          onClick={() => setMenu({ create: false })}
+        >
+          {allChildren.length - children.length} hidden · Manage worktrees
+        </button>
       )}
       {menu && (
         <Popover
@@ -1017,16 +1071,23 @@ function ProjectFamilyCard(
           width={320}
           maxHeight={380}
           onDismiss={() => {
-            if (!working) setMenu(false);
+            if (!working) setMenu(null);
           }}
           role="dialog"
           aria-label="Worktrees"
           className="flex flex-col overflow-hidden"
         >
           <WorktreePanel
-            initialCreate
-            cwd={props.item.path}
-            onClose={() => setMenu(false)}
+            key={`${menu.create}:${menu.path ?? ""}`}
+            initialCreate={menu.create}
+            initialPath={menu.path}
+            activeCwd={cwd}
+            cwd={
+              family?.worktrees.find(
+                (entry) => !entry.missing && !entry.prunable,
+              )?.path ?? props.item.path
+            }
+            onClose={() => setMenu(null)}
             onOpen={onSelect}
             onBusyChange={setWorking}
           />

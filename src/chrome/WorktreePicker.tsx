@@ -1,5 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { loadRecents } from "../lib/recents";
+import { pathKey } from "../lib/paths";
+import {
+  getVerifiedFamilies,
+  publishRepositoryFamilies,
+  hiddenWorkingCopies,
+  hiddenWorkingCopiesSnapshot,
+  subscribeWorkingCopyPreferences,
+  setWorkingCopyHidden,
+  lastWorkingCopyUse,
+  workingCopyAge,
+  oldestWorkingCopies,
+} from "../lib/repositoryFamilies";
 import { notifyGitChanged } from "../lib/fs";
 import {
   ArrowLeft,
@@ -22,6 +35,7 @@ type Worktree = {
   prunable: string | null;
   missing: boolean;
   users: string[];
+  lastUsed?: number | null;
 };
 type Ref = { name: string; commit: string };
 
@@ -32,6 +46,8 @@ export function WorktreePanel({
   onBusyChange,
   initialBase = "",
   initialCreate = false,
+  initialPath,
+  activeCwd = cwd,
 }: {
   cwd: string;
   onClose: () => void;
@@ -39,8 +55,48 @@ export function WorktreePanel({
   onBusyChange: (busy: boolean) => void;
   initialBase?: string;
   initialCreate?: boolean;
+  initialPath?: string;
+  activeCwd?: string;
 }) {
-  const [entries, setEntries] = useState<Worktree[]>([]);
+  const [entries, setEntries] = useState<Worktree[]>(() =>
+    (getVerifiedFamilies().get(pathKey(cwd))?.worktrees ?? []).map((entry) => ({
+      ...entry,
+      users: entry.users ?? [],
+    })),
+  );
+  const hiddenRaw = useSyncExternalStore(
+    subscribeWorkingCopyPreferences,
+    hiddenWorkingCopiesSnapshot,
+  );
+  const hidden = hiddenWorkingCopies(hiddenRaw);
+  const recents = loadRecents();
+  const [oldestFirst, setOldestFirst] = useState(false);
+  const [detail, setDetail] = useState<Worktree | null>(null);
+  const [safety, setSafety] = useState<{
+    dirty: boolean;
+    running: boolean;
+  } | null>(null);
+  const [safetyError, setSafetyError] = useState("");
+  const openedInitial = useRef(false);
+  useEffect(() => {
+    if (!detail) return;
+    let cancelled = false;
+    setSafety(null);
+    setSafetyError("");
+    void invoke<{ dirty: boolean; running: boolean }>("git_worktree_safety", {
+      cwd,
+      path: detail.path,
+    })
+      .then((value) => {
+        if (!cancelled) setSafety(value);
+      })
+      .catch((error) => {
+        if (!cancelled) setSafetyError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, detail]);
   const [refs, setRefs] = useState<Ref[]>([]);
   const [base, setBase] = useState(initialBase);
   const [creating, setCreating] = useState(
@@ -68,6 +124,35 @@ export function WorktreePanel({
       invoke<Ref[]>("git_worktree_refs", { cwd }),
     ]);
     setEntries(trees);
+    setDetail((current) =>
+      current
+        ? (trees.find(
+            (entry) => pathKey(entry.path) === pathKey(current.path),
+          ) ?? null)
+        : null,
+    );
+    const previous = getVerifiedFamilies();
+    const family = previous.get(pathKey(cwd));
+    if (family) {
+      const next = new Map(previous);
+      for (const [key, value] of next) {
+        if (pathKey(value.commonDir) === pathKey(family.commonDir))
+          next.delete(key);
+      }
+      const updated = { ...family, worktrees: trees };
+      next.set(pathKey(cwd), updated);
+      for (const tree of trees)
+        if (!tree.missing && !tree.prunable)
+          next.set(pathKey(tree.path), updated);
+      publishRepositoryFamilies(next);
+    }
+    if (initialPath && !openedInitial.current) {
+      openedInitial.current = true;
+      setDetail(
+        trees.find((entry) => pathKey(entry.path) === pathKey(initialPath)) ??
+          null,
+      );
+    }
     setRefs(branches);
     if (initialCreate && !pendingDefaults.current) {
       pendingDefaults.current = true;
@@ -115,11 +200,13 @@ export function WorktreePanel({
     void run(async () => {});
   }, []);
   useEffect(() => {
-    if (!busy && !creating && !choosingBase && !confirmation)
+    if (!busy && !creating && !choosingBase && !confirmation && !detail)
       search.current?.focus();
-  }, [busy, creating, choosingBase, confirmation]);
+  }, [busy, creating, choosingBase, confirmation, detail]);
   const name = query.trim();
-  const visibleEntries = entries.filter((entry) =>
+  const visibleEntries = (
+    oldestFirst ? oldestWorkingCopies(entries, recents) : entries
+  ).filter((entry) =>
     `${entry.branch ?? ""} ${entry.path}`
       .toLowerCase()
       .includes(name.toLowerCase()),
@@ -229,6 +316,7 @@ export function WorktreePanel({
                   });
                   notifyGitChanged();
                   setConfirmation(null);
+                  setDetail(null);
                 });
               }}
             >
@@ -237,6 +325,142 @@ export function WorktreePanel({
                 : "Open conversation"}
             </button>
           </div>
+        </div>
+      ) : detail ? (
+        <div className="space-y-2 px-3 py-2.5">
+          <button
+            type="button"
+            className={rowClass}
+            disabled={busy}
+            onClick={() => setDetail(null)}
+          >
+            <ArrowLeft className="size-3.5" />
+            Worktrees
+          </button>
+          <p className="truncate font-medium">
+            {detail.branch?.replace("refs/heads/", "") ?? "Detached worktree"}
+          </p>
+          <p
+            className="truncate text-[11px] text-content/70"
+            title={detail.path}
+          >
+            {detail.path}
+          </p>
+          <p
+            title="Latest recorded conversation update or project open in MonoCode. External activity is not tracked."
+            className="text-content/70"
+          >
+            {workingCopyAge(lastWorkingCopyUse(detail, recents))} in MonoCode
+          </p>
+          <p className="text-content/70">
+            {safety
+              ? safety.dirty
+                ? "Uncommitted or ignored files — removal blocked"
+                : "Clean working copy"
+              : detail.missing || detail.prunable
+                ? "Unavailable checkout"
+                : safetyError || "Checking files and running work…"}
+          </p>
+          {safety?.running && (
+            <p className="text-content/70">
+              Close running agents or terminals before removal.
+            </p>
+          )}
+          <details className="text-[11px] text-content/70">
+            <summary className="cursor-pointer">
+              Location and{" "}
+              {detail.missing || detail.prunable || detail.locked
+                ? "recovery"
+                : "details"}
+            </summary>
+            <p className="break-all py-1">{detail.path}</p>
+            <p className="font-mono">{detail.head}</p>
+            {(detail.missing || detail.prunable) && (
+              <p className="pt-1">
+                Restore the original folder, or run Git worktree repair from a
+                surviving checkout, then Retry. No metadata is pruned.
+              </p>
+            )}
+            {detail.locked && (
+              <p className="pt-1">
+                {detail.locked}. Unlock with Git before removal.
+              </p>
+            )}
+            <p className="pt-1">
+              Activity covers MonoCode only. Hide keeps files and conversations;
+              restore it from this list.
+            </p>
+          </details>
+          {!detail.main && (
+            <button
+              type="button"
+              disabled={busy}
+              className={rowClass}
+              onClick={() => {
+                try {
+                  setWorkingCopyHidden(
+                    detail.path,
+                    !hidden.some(
+                      (path) => pathKey(path) === pathKey(detail.path),
+                    ),
+                  );
+                } catch (err) {
+                  setError(String(err));
+                }
+              }}
+            >
+              {hidden.some((path) => pathKey(path) === pathKey(detail.path))
+                ? "Show in project"
+                : "Hide from project"}
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={busy}
+            className={rowClass}
+            onClick={() =>
+              void run(async () => {
+                setDetail({ ...detail });
+                notifyGitChanged();
+              })
+            }
+          >
+            <RefreshCw className="size-3.5" />
+            {safetyError || detail.missing || detail.prunable
+              ? "Retry"
+              : "Refresh status"}
+          </button>
+          <button
+            type="button"
+            disabled={
+              busy ||
+              detail.main ||
+              !detail.branch ||
+              pathKey(detail.path) === pathKey(activeCwd) ||
+              detail.missing ||
+              !!detail.locked ||
+              !!detail.prunable ||
+              !safety ||
+              safety.dirty ||
+              safety.running
+            }
+            className={rowClass}
+            onClick={() => setConfirmation({ entry: detail, action: "remove" })}
+          >
+            <Trash2 className="size-3.5" />
+            Remove Git worktree…
+          </button>
+          {pathKey(detail.path) === pathKey(activeCwd) && !detail.main && (
+            <p className="text-[11px] text-content/70">
+              Switch to another working copy before removing this checkout.
+            </p>
+          )}
+          {detail.main && (
+            <p className="text-[11px] text-content/70">
+              The main checkout is protected. Use the project menu to archive
+              its app association.
+            </p>
+          )}
         </div>
       ) : choosingBase ? (
         <>
@@ -418,6 +642,21 @@ export function WorktreePanel({
               }}
             />
           </label>
+          <div className="flex items-center justify-between px-2.5 pt-2 text-[10px] text-content/60">
+            <span>Last used in MonoCode</span>
+            <button
+              type="button"
+              disabled={busy}
+              aria-pressed={oldestFirst}
+              className="rounded px-1.5 py-1 hover:bg-content/10"
+              onClick={() => {
+                setOldestFirst(!oldestFirst);
+                setActiveIndex(0);
+              }}
+            >
+              {oldestFirst ? "Oldest first ✓" : "Oldest first"}
+            </button>
+          </div>
           <div className="px-1.5 py-1.5">
             {visibleEntries.map((entry, index) => (
               <div key={entry.path} className="flex items-center gap-1">
@@ -440,6 +679,14 @@ export function WorktreePanel({
                   <span className="min-w-0 flex-1 truncate font-mono">
                     {entry.branch?.replace("refs/heads/", "") ??
                       `Detached ${entry.head.slice(0, 8)}`}
+                    <span className="block truncate font-sans text-[10px] text-content/70">
+                      {workingCopyAge(lastWorkingCopyUse(entry, recents))}
+                      {hidden.some(
+                        (path) => pathKey(path) === pathKey(entry.path),
+                      )
+                        ? " · Hidden"
+                        : ""}
+                    </span>
                   </span>
                   <span className="shrink-0 text-[10px] text-content/40">
                     {entry.missing
@@ -453,24 +700,16 @@ export function WorktreePanel({
                             : ""}
                   </span>
                 </button>
-                {!entry.main && entry.branch && (
-                  <button
-                    type="button"
-                    disabled={
-                      busy ||
-                      entry.path === cwd ||
-                      entry.missing ||
-                      !!entry.locked ||
-                      !!entry.prunable
-                    }
-                    title="Remove worktree"
-                    aria-label={`Remove worktree ${entry.branch.replace("refs/heads/", "")}`}
-                    className="shrink-0 rounded p-1 text-content/40 hover:bg-content/10 hover:text-red-400 disabled:opacity-20"
-                    onClick={() => setConfirmation({ entry, action: "remove" })}
-                  >
-                    <Trash2 className="size-3.5" strokeWidth={1.5} />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label={`Manage worktree ${entry.branch?.replace("refs/heads/", "") ?? entry.path}`}
+                  title="Worktree details and cleanup"
+                  className="shrink-0 rounded p-1 text-content/50 hover:bg-content/10"
+                  onClick={() => setDetail(entry)}
+                >
+                  <ChevronRight className="size-3.5" />
+                </button>
               </div>
             ))}
             <div className="mt-1 border-t border-content/10 pt-1">

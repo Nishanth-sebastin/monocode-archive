@@ -9,6 +9,8 @@ export type WorkingCopy = {
   missing: boolean;
   locked: string | null;
   prunable: string | null;
+  users?: string[];
+  lastUsed?: number | null;
 };
 export type RepositoryFamily = {
   commonDir: string;
@@ -65,4 +67,82 @@ export function groupRepositoryFamilies(
     });
   // Preserve a pinned representative first, then the user's existing order.
   return { pinned: group(sections.pinned), projects: group(sections.projects) };
+}
+
+const HIDDEN_KEY = "monocode.hiddenWorkingCopies";
+const preferenceListeners = new Set<() => void>();
+export function hiddenWorkingCopiesSnapshot(): string {
+  try {
+    return localStorage.getItem(HIDDEN_KEY) ?? "[]";
+  } catch {
+    return "[]";
+  }
+}
+export function hiddenWorkingCopies(
+  raw = hiddenWorkingCopiesSnapshot(),
+): string[] {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value)
+      ? value
+          .filter((path): path is string => typeof path === "string")
+          .slice(0, 2000)
+      : [];
+  } catch {
+    return [];
+  }
+}
+export function subscribeWorkingCopyPreferences(listener: () => void) {
+  preferenceListeners.add(listener);
+  return () => {
+    preferenceListeners.delete(listener);
+  };
+}
+export function setWorkingCopyHidden(path: string, hidden: boolean) {
+  const next = hiddenWorkingCopies().filter(
+    (entry) => pathKey(entry) !== pathKey(path),
+  );
+  if (hidden) next.unshift(path);
+  // Presentation only: Git inventory, session paths and original recents stay intact.
+  localStorage.setItem(HIDDEN_KEY, JSON.stringify(next.slice(0, 2000)));
+  for (const listener of preferenceListeners) listener();
+}
+export function lastWorkingCopyUse(
+  child: WorkingCopy,
+  recents: RecentProject[],
+): number | null {
+  const values = [
+    child.lastUsed,
+    ...recents
+      .filter((item) => pathKey(item.path) === pathKey(child.path))
+      .map((item) => item.openedAt),
+  ];
+  const valid = values.filter(
+    (value): value is number =>
+      typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
+  return valid.length ? Math.max(...valid) : null;
+}
+export function workingCopyAge(
+  lastUsed: number | null,
+  now = Date.now(),
+): string {
+  if (lastUsed === null) return "Activity unknown";
+  const days = Math.floor(Math.max(0, now - lastUsed) / 86_400_000);
+  return days === 0
+    ? "Used today"
+    : days === 1
+      ? "Used yesterday"
+      : `Used ${days}d ago`;
+}
+export function oldestWorkingCopies<T extends WorkingCopy>(
+  entries: T[],
+  recents: RecentProject[],
+): T[] {
+  return [...entries].sort(
+    (a, b) =>
+      (lastWorkingCopyUse(a, recents) ?? Infinity) -
+        (lastWorkingCopyUse(b, recents) ?? Infinity) ||
+      a.path.localeCompare(b.path),
+  );
 }

@@ -5,6 +5,8 @@ import { pathKey } from "../lib/paths";
 import { subscribeGitChanged } from "../lib/fs";
 import {
   publishRepositoryFamilies,
+  subscribeRepositoryFamilies,
+  getVerifiedFamilies,
   type RepositoryFamily,
 } from "../lib/repositoryFamilies";
 
@@ -12,9 +14,13 @@ export function useRepositoryFamilies(recents: RecentProject[], cwd: string) {
   const [families, setFamilies] = useState<Map<string, RepositoryFamily>>(
     new Map(),
   );
-  useEffect(() => {
-    publishRepositoryFamilies(families);
-  }, [families]);
+  useEffect(
+    () =>
+      subscribeRepositoryFamilies(() =>
+        setFamilies(new Map(getVerifiedFamilies())),
+      ),
+    [],
+  );
   const familyPaths = JSON.stringify(
     [...collectRailProjects(recents, cwd).values()]
       .map((item) => item.path)
@@ -44,7 +50,7 @@ export function useRepositoryFamilies(recents: RecentProject[], cwd: string) {
           /* Non-Git or unavailable paths remain independent visible rows. */
         }
       }
-      if (!cancelled) setFamilies(verified);
+      if (!cancelled) publishRepositoryFamilies(verified);
     })();
     return () => {
       cancelled = true;
@@ -60,8 +66,8 @@ export function useRepositoryFamilies(recents: RecentProject[], cwd: string) {
         void invoke<RepositoryFamily>("git_repository_family", { cwd })
           .then((family) => {
             if (cancelled) return;
-            setFamilies((previous) => {
-              const next = new Map(previous);
+            {
+              const next = new Map(getVerifiedFamilies());
               for (const [key, value] of next) {
                 if (pathKey(value.commonDir) === pathKey(family.commonDir))
                   next.delete(key);
@@ -71,8 +77,8 @@ export function useRepositoryFamilies(recents: RecentProject[], cwd: string) {
                 if (!child.missing && !child.prunable)
                   next.set(pathKey(child.path), family);
               }
-              return next;
-            });
+              publishRepositoryFamilies(next);
+            }
           })
           .catch(() => {})
           .finally(() => {

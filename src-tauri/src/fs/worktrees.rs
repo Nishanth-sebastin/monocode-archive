@@ -33,6 +33,7 @@ pub struct Worktree {
     main: bool,
     missing: bool,
     users: Vec<String>,
+    last_used: Option<i64>,
 }
 
 // Drain both pipes while retaining at most 1 MiB; hooks are disabled for these
@@ -157,23 +158,32 @@ pub fn git_worktrees(
     store: State<crate::session_store::SessionStore>,
 ) -> Result<Vec<Worktree>, String> {
     let mut entries = inventory(&expand_home(&cwd))?;
+    add_session_activity(&mut entries, &store)?;
+    Ok(entries)
+}
+
+fn add_session_activity(
+    entries: &mut [Worktree],
+    store: &crate::session_store::SessionStore,
+) -> Result<(), String> {
     let conn = store.lock_conn()?;
-    for entry in &mut entries {
-        let mut stmt = conn.prepare("SELECT id, title FROM sessions WHERE (cwd = ?1 OR worktree_cwd = ?1) AND has_user_message = 1 ORDER BY updated_at DESC LIMIT 100").map_err(|e| e.to_string())?;
+    for entry in entries {
+        let mut stmt = conn.prepare("SELECT id, title, updated_at FROM sessions WHERE COALESCE(NULLIF(worktree_cwd, ''), cwd) = ?1 AND has_user_message = 1 ORDER BY updated_at DESC LIMIT 100").map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([&entry.path], |r| {
-                Ok(format!(
-                    "{} ({})",
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(0)?
+                Ok((
+                    format!("{} ({})", r.get::<_, String>(1)?, r.get::<_, String>(0)?),
+                    r.get::<_, i64>(2)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
-        entry.users = rows
+        let rows = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
+        entry.last_used = rows.first().map(|(_, at)| *at);
+        entry.users = rows.into_iter().map(|(user, _)| user).collect();
     }
-    Ok(entries)
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -339,12 +349,91 @@ pub fn git_worktree_remove(
     remove(&expand_home(&cwd), &path, &head)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeSafety {
+    dirty: bool,
+    running: bool,
+}
+
+/// On-demand detail only; deletion always performs its own fresh safety checks.
+#[tauri::command(async)]
+pub fn git_worktree_safety(
+    app: tauri::AppHandle,
+    cwd: String,
+    path: String,
+) -> Result<WorktreeSafety, String> {
+    let entries = inventory(&expand_home(&cwd))?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .ok_or("Worktree is no longer registered. Refresh.")?;
+    if entry.missing || entry.prunable.is_some() {
+        return Err("This working copy is unavailable. Restore its original location or repair its Git registration, then retry.".into());
+    }
+    let dirty = !git(
+        &expand_home(&path),
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ],
+    )?
+    .trim()
+    .is_empty();
+    Ok(WorktreeSafety {
+        dirty,
+        running: app
+            .state::<crate::harness::HarnessHost>()
+            .has_live_processes()
+            || app.state::<crate::pty::PtyHost>().has_live_processes(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn activity_uses_effective_checkout_and_bounds_retained_users() {
+        let store = crate::session_store::SessionStore::open_in_memory().unwrap();
+        {
+            let conn = store.lock_conn().unwrap();
+            for index in 1..=110 {
+                conn.execute("INSERT INTO sessions (id,cwd,worktree_cwd,harness,model,runtime_mode,title,created_at,updated_at,has_user_message) VALUES (?1,'/main','/child','codex','test','supervised','fixture',1,?2,1)", rusqlite::params![format!("s{index}"), index]).unwrap();
+            }
+        }
+        let mut entries = vec![
+            Worktree {
+                path: "/main".into(),
+                ..Default::default()
+            },
+            Worktree {
+                path: "/child".into(),
+                ..Default::default()
+            },
+        ];
+        add_session_activity(&mut entries, &store).unwrap();
+        assert_eq!(entries[0].last_used, None);
+        assert_eq!(entries[1].last_used, Some(110));
+
+        assert_eq!(entries[1].users.len(), 100);
+        assert!(entries[1].users[0].ends_with("(s110)"));
+        assert_eq!(
+            store
+                .lock_conn()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            110
+        );
+    }
+
     struct Repo(PathBuf);
     impl Repo {
         fn new() -> Self {
