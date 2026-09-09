@@ -116,7 +116,6 @@ export function WorktreePanel({
     entry: Worktree;
     action: "open" | "remove";
   } | null>(null);
-  const [removalBlocked, setRemovalBlocked] = useState(false);
   const [forceReview, setForceReview] = useState<{
     token: string;
     fileCount: number;
@@ -289,7 +288,7 @@ export function WorktreePanel({
             {confirmation.action === "remove"
               ? forceReview
                 ? `All files in this working copy, including uncommitted, untracked and ignored files, will be permanently deleted. Reviewed ${forceReview.fileCount} entries. The branch and conversations stay.`
-                : "The branch and conversations stay. Unsaved files and running work block removal."
+                : "The branch and conversations stay. Files and running work are checked again before removal."
               : "Other conversations use this folder. Their agents can change the same files."}
           </p>
           {confirmation.action === "remove" && forceReview && (
@@ -303,6 +302,7 @@ export function WorktreePanel({
                   );
                   if (latest.token !== forceReview.token) {
                     setForceReview(null);
+                    setConfirmation(null);
                     throw new Error(
                       "Files changed; review again before force removal.",
                     );
@@ -320,43 +320,6 @@ export function WorktreePanel({
               ))}
             </details>
           )}
-          {confirmation.action === "remove" &&
-            removalBlocked &&
-            !forceReview && (
-              <div className="space-y-1">
-                <button
-                  type="button"
-                  disabled={busy}
-                  className={rowClass}
-                  onClick={() => {
-                    onOpen(confirmation.entry.path);
-                    onClose();
-                  }}
-                >
-                  Review changes in worktree
-                </button>
-                <button
-                  type="button"
-                  disabled={busy || safety?.running || !safety?.dirty}
-                  className={rowClass}
-                  onClick={() =>
-                    void run(async () => {
-                      const review = await invoke<
-                        NonNullable<typeof forceReview>
-                      >("git_worktree_removal_preview", {
-                        cwd,
-                        path: confirmation.entry.path,
-                        includeFiles: false,
-                      });
-                      setForceReview(review);
-                      setForceFiles(null);
-                    })
-                  }
-                >
-                  Force remove…
-                </button>
-              </div>
-            )}
           {confirmation.entry.users.length > 0 && (
             <details className="max-h-24 overflow-auto text-[11px] text-content/50">
               <summary>Existing conversations</summary>
@@ -394,7 +357,7 @@ export function WorktreePanel({
                       reviewed: forceReview?.token ?? null,
                     });
                   } catch (error) {
-                    setRemovalBlocked(true);
+                    setConfirmation(null);
                     setForceReview(null);
                     throw error;
                   }
@@ -438,15 +401,13 @@ export function WorktreePanel({
           >
             {workingCopyAge(lastWorkingCopyUse(detail, recents))} in MonoCode
           </p>
-          <p className="text-content/70">
-            {safety
-              ? safety.dirty
-                ? "Uncommitted or ignored files — removal blocked"
-                : "Clean working copy"
-              : detail.missing || detail.prunable
+          {!safety && (
+            <p className="text-content/70">
+              {detail.missing || detail.prunable
                 ? "Unavailable checkout"
-                : safetyError || "Checking files and running work…"}
-          </p>
+                : safetyError || "Checking worktree…"}
+            </p>
+          )}
           {safety?.running && (
             <p className="text-content/70">
               Close running agents or terminals before removal.
@@ -530,12 +491,28 @@ export function WorktreePanel({
               safety.running
             }
             className={rowClass}
-            onClick={() => {
-              setRemovalBlocked(false);
-              setForceReview(null);
-              setForceFiles(null);
-              setConfirmation({ entry: detail, action: "remove" });
-            }}
+            onClick={() =>
+              void run(async () => {
+                setForceReview(null);
+                setForceFiles(null);
+                const current = await invoke<{
+                  dirty: boolean;
+                  running: boolean;
+                }>("git_worktree_safety", { cwd, path: detail.path });
+                if (current.running)
+                  throw new Error(
+                    "Close running agents or terminals before removal. No processes were stopped.",
+                  );
+                if (current.dirty) {
+                  const review = await invoke<NonNullable<typeof forceReview>>(
+                    "git_worktree_removal_preview",
+                    { cwd, path: detail.path, includeFiles: false },
+                  );
+                  setForceReview(review);
+                }
+                setConfirmation({ entry: detail, action: "remove" });
+              })
+            }
           >
             <Trash2 className="size-3.5" />
             Remove Git worktree…
