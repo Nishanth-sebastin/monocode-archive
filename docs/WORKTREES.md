@@ -107,3 +107,8 @@ Native disposable-repository checks exercised hide/restore, dirty removal refusa
 ![Light theme and keyboard focus, production component with OS fixture](images/worktree-cleanup-light.png)
 
 Additional acceptance: the native macOS release app refused normal removal of a dirty disposable checkout, rejected a force confirmation after the file changed, then removed only the freshly reviewed checkout while preserving its branch and dirty sibling. Automated tests cover staged/untracked/ignored data, stale HEAD/path/file state, locked/main protection, duplicate calls, size limits and symlinks. Workspace serialization/hydration tests preserve main plus two child conversation/provider identities, and legacy recent rows stay recoverable. This is not live concurrent-agent or Windows acceptance.
+
+Removal confirmation styling uses a red primary action with a trash icon, a subtle danger icon in the heading, an outlined Cancel action and existing spacing/theme tokens. Light/dark production-component fixtures at 800×600 (OS calls substituted):
+
+![Removal confirmation, dark theme](images/worktree-removal-dark.png)
+![Removal confirmation, light theme](images/worktree-removal-light.png)

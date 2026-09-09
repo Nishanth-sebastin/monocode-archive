@@ -269,7 +269,12 @@ export function WorktreePanel({
     >
       {confirmation ? (
         <div className="space-y-2 px-3 py-2.5">
-          <p className="font-medium">
+          <p className="flex items-center gap-2 font-medium">
+            {confirmation.action === "remove" && (
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-red-500/10 text-red-600">
+                <Trash2 className="size-3.5" aria-hidden="true" />
+              </span>
+            )}
             {confirmation.action === "remove"
               ? forceReview
                 ? "Permanently remove worktree?"
@@ -328,11 +333,11 @@ export function WorktreePanel({
               ))}
             </details>
           )}
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2 border-t border-content/10 pt-2.5">
             <button
               type="button"
               disabled={busy}
-              className="rounded-md px-2 py-1.5 text-content/50 hover:bg-content/5"
+              className="rounded-md border border-content/10 px-2.5 py-1.5 text-content/70 outline-none hover:bg-content/5 focus-visible:ring-2 focus-visible:ring-content/30 disabled:opacity-40"
               onClick={() => setConfirmation(null)}
             >
               Cancel
@@ -340,7 +345,7 @@ export function WorktreePanel({
             <button
               type="button"
               disabled={busy}
-              className="rounded-md bg-content/10 px-2 py-1.5 hover:bg-content/15"
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background-base disabled:opacity-40 ${confirmation.action === "remove" ? "bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500" : "bg-content/10 hover:bg-content/15 focus-visible:ring-content/30"}`}
               onClick={() => {
                 const { entry, action } = confirmation;
                 if (action === "open") {
@@ -367,6 +372,9 @@ export function WorktreePanel({
                 });
               }}
             >
+              {confirmation.action === "remove" && (
+                <Trash2 className="size-3.5" aria-hidden="true" />
+              )}
               {confirmation.action === "remove"
                 ? forceReview
                   ? "Permanently remove"
