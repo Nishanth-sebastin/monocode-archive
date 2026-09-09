@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -38,3 +41,18 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo check
       - run: cargo test
+
+      - name: Build Windows test installer
+        if: runner.os == 'Windows' && github.repository == 'kaceper11/monocode'
+        timeout-minutes: 45
+        run: npm run build:windows
+
+      - name: Upload Windows test installer
+        if: runner.os == 'Windows' && github.repository == 'kaceper11/monocode'
+        uses: actions/upload-artifact@v4
+        with:
+          name: monocode-windows-x64-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
