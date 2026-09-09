@@ -498,7 +498,7 @@ export function WorktreePanel({
               !safety ||
               safety.running
             }
-            className={rowClass}
+            className={`${rowClass} bg-red-600 text-white! hover:bg-red-700! focus-visible:ring-2 focus-visible:ring-red-500`}
             onClick={() =>
               void run(async () => {
                 setForceReview(null);
