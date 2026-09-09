@@ -134,6 +134,8 @@ type InboxListCache = InboxListResult & {
 let inboxListCache: InboxListCache | null = null;
 const inboxListInflight = new Map<string, Promise<InboxListResult>>();
 const repoByPath = new Map<string, string>();
+const workItemByKey = new Map<string, GithubWorkItem>();
+const workItemInflight = new Map<string, Promise<GithubWorkItem>>();
 const detailsByKey = new Map<string, GithubWorkItemDetails>();
 const threadByKey = new Map<string, GithubWorkItemThread>();
 const threadInflight = new Map<string, Promise<GithubWorkItemThread>>();
@@ -144,6 +146,8 @@ export function clearInboxCache() {
   inboxListCache = null;
   inboxListInflight.clear();
   repoByPath.clear();
+  workItemByKey.clear();
+  workItemInflight.clear();
   detailsByKey.clear();
   threadByKey.clear();
   threadInflight.clear();
@@ -212,6 +216,43 @@ export function listGithubWorkItems(
     search: query.search.trim(),
     limit: query.state === "all" ? INBOX_ALL_LIMIT : undefined,
   });
+}
+
+function workItemLookupKey(
+  repo: string,
+  kind: GithubTaskKind,
+  number: number,
+): string {
+  return `${repo.trim().toLowerCase()}:${kind}:${number}`;
+}
+
+/** Fetch one exact item after targeted Inbox navigation misses its list cache. */
+export function githubWorkItem(
+  cwd: string,
+  repo: string,
+  kind: GithubTaskKind,
+  number: number,
+): Promise<GithubWorkItem> {
+  const key = workItemLookupKey(repo, kind, number);
+  const cached = workItemByKey.get(key);
+  if (cached) return Promise.resolve(cached);
+  const pending = workItemInflight.get(key);
+  if (pending) return pending;
+  const promise = invoke<GithubWorkItem>("git_github_work_item", {
+    cwd,
+    repo,
+    kind,
+    number,
+  })
+    .then((item) => {
+      workItemByKey.set(key, item);
+      return item;
+    })
+    .finally(() => {
+      if (workItemInflight.get(key) === promise) workItemInflight.delete(key);
+    });
+  workItemInflight.set(key, promise);
+  return promise;
 }
 
 export function formatGithubQuery(query: GithubWorkItemQuery): string {

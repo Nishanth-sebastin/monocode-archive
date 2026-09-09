@@ -1013,6 +1013,10 @@ def run(argv, cwd, input_bytes=None, timeout=25):
         argv = [*argv[:-2], cwd, argv[-1]]
     if argv[0] == 'gh':
         assert cwd.startswith('/') and not cwd.startswith('//')
+        if len(argv) > 2 and argv[2] == 'view':
+            assert argv[:7] == ['gh', 'issue', 'view', '22', '--repo', 'fixture/repo', '--json']
+            assert input_bytes is None
+            return 0, b'{"number":22,"title":"Linux lookup","url":"https://github.com/fixture/repo/issues/22","state":"OPEN"}', b''
         assert input_bytes == 'Literal ż body'.encode()
         if argv[1] == 'api':
             assert argv[-1] == 'body=@-'
@@ -1149,13 +1153,52 @@ def run(argv, cwd, input_bytes=None, timeout=25):
             .unwrap(),
             "https://example.invalid/reply"
         );
+        let linked = block_on(fs::git_github_work_item(
+            root.identity(),
+            "fixture/repo".into(),
+            "issue".into(),
+            22,
+        ))
+        .unwrap();
+        assert_eq!(linked.title, "Linux lookup");
+        assert_eq!(linked.repo, "fixture/repo");
         assert!(search("through symlink", Some("--no-index".into()))
             .matches
             .is_empty());
         block_on(fs::write_text_file(renamed.clone(), "changed\n".into())).unwrap();
-        let diff = block_on(fs::git_file_diff(root.identity(), "Renamed ü.txt".into())).unwrap();
+        let diff = block_on(fs::git_file_diff(
+            root.identity(),
+            "Renamed ü.txt".into(),
+            false,
+        ))
+        .unwrap();
         assert_eq!(diff.original, "through symlink");
         assert_eq!(diff.current, "changed\n");
+        // Upstream's staged and unstaged views must read distinct Linux blobs.
+        block_on(fs::git_stage_file(root.identity(), "Renamed ü.txt".into())).unwrap();
+        block_on(fs::write_text_file(renamed.clone(), "unstaged\n".into())).unwrap();
+        let staged = block_on(fs::git_file_diff(
+            root.identity(),
+            "Renamed ü.txt".into(),
+            true,
+        ))
+        .unwrap();
+        assert_eq!(staged.original, "through symlink");
+        assert_eq!(staged.current, "changed\n");
+        let unstaged = block_on(fs::git_file_diff(
+            root.identity(),
+            "Renamed ü.txt".into(),
+            false,
+        ))
+        .unwrap();
+        assert_eq!(unstaged.original, "changed\n");
+        assert_eq!(unstaged.current, "unstaged\n");
+        block_on(fs::git_unstage_file(
+            root.identity(),
+            "Renamed ü.txt".into(),
+        ))
+        .unwrap();
+
         let index = block_on(fs::git_diff_files(root.identity())).unwrap();
         assert!(index
             .files
