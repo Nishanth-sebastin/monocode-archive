@@ -497,6 +497,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     ] {
         ensure_session_column(conn, column, decl)?;
     }
+    // Idempotent fork migration: older builds can keep using this database.
+    // LIMIT bounds retained activity, while this covering index bounds lookup IO.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS sessions_worktree_activity_idx
+         ON sessions (COALESCE(NULLIF(worktree_cwd, ''), cwd),
+                      has_user_message, updated_at DESC, id, title);",
+    )?;
     if current < 9 {
         // v8 stopped the blob scan but still cost a table seek per row, and
         // every summary column (`created_at`, `updated_at`, `branch`,

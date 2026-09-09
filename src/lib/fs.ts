@@ -247,6 +247,7 @@ export type GitBranchInfo = {
   name: string;
   current: boolean;
   remote: string | null;
+  worktree: string | null;
 };
 
 export type GitBranches = {
@@ -263,8 +264,8 @@ export function gitCheckout(
   cwd: string,
   name: string,
   remote?: string | null,
-): Promise<string> {
-  return invoke<string>("git_checkout", { cwd, name, remote: remote ?? null });
+): Promise<{ branch: string; worktree: string | null }> {
+  return invoke("git_checkout", { cwd, name, remote: remote ?? null });
 }
 
 export function gitCreateBranch(cwd: string, name: string): Promise<string> {
@@ -285,17 +286,11 @@ export function isCheckoutBlockedByChanges(message: string): boolean {
   );
 }
 
-/** Drop leftover session-worktree pins. The composer now switches this folder. */
+/** Preserve the exact checkout and provider session when restoring old records. */
 export function restoreSessionCheckout<
   T extends { cwd: string; branch?: string; worktreeCwd?: string; providerSessionId?: string },
 >(session: T): T {
-  if (!session.branch && !session.worktreeCwd) return session;
-  return {
-    ...session,
-    branch: undefined,
-    worktreeCwd: undefined,
-    ...(session.worktreeCwd ? { providerSessionId: undefined } : {}),
-  };
+  return session;
 }
 
 const GIT_CHANGED = "monocode-git-changed";

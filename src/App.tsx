@@ -214,6 +214,7 @@ import {
   projectRailItems,
   rememberProject,
   sameProjectPath,
+  subscribeRemovedWorktree,
 } from "./lib/recents";
 import {
   applyPlaceSessionOnPane,
@@ -570,6 +571,15 @@ export default function App({
     resumed?.projectCwd && looksLikeProject(resumed.projectCwd)
       ? rememberProject(resumed.projectCwd)
       : loadRecents(),
+  );
+  useEffect(
+    () => subscribeRemovedWorktree(({ path, replacement }) => {
+      setRecents(loadRecents());
+      setProjectCwd((current) =>
+        sameProjectPath(current, path) ? replacement : current,
+      );
+    }),
+    [],
   );
   const [seed] = useState(() => {
     const cwd = lastProjectPath() ?? "~";
@@ -3077,7 +3087,7 @@ export default function App({
   );
 
   const onCwdChange = useCallback(
-    (sessionId: string, cwd: string) => {
+    (sessionId: string, cwd: string, fresh = false) => {
       const normalized = normalizeProjectPath(cwd);
       const current = sessionsRef.current.find((s) => s.id === sessionId);
       const previous = current?.cwd;
@@ -3085,10 +3095,11 @@ export default function App({
       // new tab instead of retargeting the conversation.
       if (
         current &&
-        previous &&
-        looksLikeProject(previous) &&
-        !sameProjectPath(previous, normalized) &&
-        !isBlankSession(current)
+        (fresh ||
+          (previous &&
+            looksLikeProject(previous) &&
+            !sameProjectPath(previous, normalized) &&
+            !isBlankSession(current)))
       ) {
         setProjectCwd(normalized);
         setRecents(rememberProject(normalized));
@@ -3155,14 +3166,9 @@ export default function App({
       notifyGitChanged();
       const current = sessionsRef.current.find((s) => s.id === sessionId);
       if (!current || (!current.branch && !current.worktreeCwd)) return;
-      if (current.worktreeCwd && current.providerSessionId) {
-        void forgetHarnessSession(current.harness, sessionId);
-      }
       const next = {
         ...current,
         branch: undefined,
-        worktreeCwd: undefined,
-        ...(current.worktreeCwd ? { providerSessionId: undefined } : {}),
       };
       setSessions((prev) => prev.map((s) => (s.id === sessionId ? next : s)));
       persistSession(next);

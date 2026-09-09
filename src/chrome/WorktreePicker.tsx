@@ -1,0 +1,838 @@
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { forgetRemovedWorktree, loadRecents } from "../lib/recents";
+import { pathKey } from "../lib/paths";
+import {
+  getVerifiedFamilies,
+  publishRepositoryFamilies,
+  hiddenWorkingCopies,
+  hiddenWorkingCopiesSnapshot,
+  subscribeWorkingCopyPreferences,
+  setWorkingCopyHidden,
+  lastWorkingCopyUse,
+  workingCopyAge,
+  oldestWorkingCopies,
+} from "../lib/repositoryFamilies";
+import { notifyGitChanged } from "../lib/fs";
+import {
+  ArrowLeft,
+  Check,
+  ChevronRight,
+  Folder,
+  GitBranch,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+} from "./icons";
+
+type Worktree = {
+  path: string;
+  head: string;
+  branch: string | null;
+  main: boolean;
+  locked: string | null;
+  prunable: string | null;
+  missing: boolean;
+  users: string[];
+  lastUsed?: number | null;
+};
+type Ref = { name: string; commit: string };
+
+export function WorktreePanel({
+  cwd,
+  onClose,
+  onOpen,
+  onBusyChange,
+  initialBase = "",
+  initialCreate = false,
+  initialPath,
+  activeCwd = cwd,
+}: {
+  cwd: string;
+  onClose: () => void;
+  onOpen: (path: string) => void;
+  onBusyChange: (busy: boolean) => void;
+  initialBase?: string;
+  initialCreate?: boolean;
+  initialPath?: string;
+  activeCwd?: string;
+}) {
+  const [entries, setEntries] = useState<Worktree[]>(() =>
+    (getVerifiedFamilies().get(pathKey(cwd))?.worktrees ?? []).map((entry) => ({
+      ...entry,
+      users: entry.users ?? [],
+    })),
+  );
+  const hiddenRaw = useSyncExternalStore(
+    subscribeWorkingCopyPreferences,
+    hiddenWorkingCopiesSnapshot,
+  );
+  const hidden = hiddenWorkingCopies(hiddenRaw);
+  const recents = loadRecents();
+  const [oldestFirst, setOldestFirst] = useState(false);
+  const [detail, setDetail] = useState<Worktree | null>(null);
+  const [safety, setSafety] = useState<{
+    dirty: boolean;
+    running: boolean;
+  } | null>(null);
+  const [safetyError, setSafetyError] = useState("");
+  const openedInitial = useRef(false);
+  useEffect(() => {
+    if (!detail) return;
+    let cancelled = false;
+    setSafety(null);
+    setSafetyError("");
+    void invoke<{ dirty: boolean; running: boolean }>("git_worktree_safety", {
+      cwd,
+      path: detail.path,
+    })
+      .then((value) => {
+        if (!cancelled) setSafety(value);
+      })
+      .catch((error) => {
+        if (!cancelled) setSafetyError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, detail]);
+  const [refs, setRefs] = useState<Ref[]>([]);
+  const [base, setBase] = useState(initialBase);
+  const [creating, setCreating] = useState(
+    initialCreate || Boolean(initialBase),
+  );
+  const [choosingBase, setChoosingBase] = useState(false);
+  const [baseQuery, setBaseQuery] = useState("");
+  const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const search = useRef<HTMLInputElement>(null);
+  const [editPath, setEditPath] = useState(false);
+  const [branch, setBranch] = useState("");
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [confirmation, setConfirmation] = useState<{
+    entry: Worktree;
+    action: "open" | "remove";
+  } | null>(null);
+  const [forceReview, setForceReview] = useState<{
+    token: string;
+    fileCount: number;
+    files: string[];
+  } | null>(null);
+  const [forceFiles, setForceFiles] = useState<string[] | null>(null);
+  const pending = useRef(false);
+  const selected = refs.find((ref) => ref.name === base);
+  const refresh = async () => {
+    const [trees, branches] = await Promise.all([
+      invoke<Worktree[]>("git_worktrees", { cwd }),
+      invoke<Ref[]>("git_worktree_refs", { cwd }),
+    ]);
+    setEntries(trees);
+    setDetail((current) =>
+      current
+        ? (trees.find(
+            (entry) => pathKey(entry.path) === pathKey(current.path),
+          ) ?? null)
+        : null,
+    );
+    const previous = getVerifiedFamilies();
+    const family = previous.get(pathKey(cwd));
+    if (family) {
+      const next = new Map(previous);
+      for (const [key, value] of next) {
+        if (pathKey(value.commonDir) === pathKey(family.commonDir))
+          next.delete(key);
+      }
+      const updated = { ...family, worktrees: trees };
+      next.set(pathKey(cwd), updated);
+      for (const tree of trees)
+        if (!tree.missing && !tree.prunable)
+          next.set(pathKey(tree.path), updated);
+      publishRepositoryFamilies(next);
+    }
+    if (initialPath && !openedInitial.current) {
+      openedInitial.current = true;
+      setDetail(
+        trees.find((entry) => pathKey(entry.path) === pathKey(initialPath)) ??
+          null,
+      );
+    }
+    setRefs(branches);
+    if (initialCreate && !pendingDefaults.current) {
+      pendingDefaults.current = true;
+      const defaults = branches.filter((ref) =>
+        /^refs\/remotes\/[^/]+\/HEAD$/.test(ref.name),
+      );
+      const main = trees.find((entry) => entry.main)?.branch;
+      setBase(
+        initialBase || (defaults.length === 1 ? defaults[0].name : main) || "",
+      );
+      let suggestion = "work";
+      for (
+        let n = 2;
+        branches.some((ref) => ref.name === `refs/heads/${suggestion}`);
+        n++
+      )
+        suggestion = `work-${n}`;
+      setBranch(suggestion);
+      setPath(`${cwd}-${suggestion}`);
+    }
+  };
+  const pendingDefaults = useRef(false);
+  const run = async (work: () => Promise<unknown>) => {
+    if (pending.current) return;
+    pending.current = true;
+    setBusy(true);
+    onBusyChange(true);
+    setError("");
+    try {
+      await work();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      try {
+        await refresh();
+      } catch (err) {
+        setError((previous) => `${previous}\nRefresh failed: ${err}`.trim());
+      }
+      pending.current = false;
+      setBusy(false);
+      onBusyChange(false);
+    }
+  };
+  useEffect(() => {
+    void run(async () => {});
+  }, []);
+  useEffect(() => {
+    if (!busy && !creating && !choosingBase && !confirmation && !detail)
+      search.current?.focus();
+  }, [busy, creating, choosingBase, confirmation, detail]);
+  const name = query.trim();
+  const visibleEntries = (
+    oldestFirst ? oldestWorkingCopies(entries, recents) : entries
+  ).filter((entry) =>
+    `${entry.branch ?? ""} ${entry.path}`
+      .toLowerCase()
+      .includes(name.toLowerCase()),
+  );
+  const canCreate =
+    name.length > 0 && !refs.some((ref) => ref.name === `refs/heads/${name}`);
+  const prepareCreate = () => {
+    setBranch(name);
+    setPath(`${cwd}-${name.replace(/\//g, "-")}`);
+    const current = entries.find((entry) => entry.path === cwd)?.branch;
+    if (!base && current) setBase(current);
+    setCreating(true);
+    if (!base && !current) {
+      setBaseQuery("");
+      setChoosingBase(true);
+    }
+  };
+  const selectedName = base.replace(/^refs\/(heads|remotes)\//, "");
+  const rowClass =
+    "flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/5 disabled:opacity-40";
+  const inputClass =
+    "min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40 disabled:opacity-60";
+  const openEntry = (entry: Worktree) => {
+    if (entry.users.length) {
+      setConfirmation({ entry, action: "open" });
+      return;
+    }
+    onOpen(entry.path);
+    onClose();
+  };
+  const createAndOpen = () => {
+    if (!selected || !branch || !path) return;
+    let created: string | undefined;
+    void run(async () => {
+      created = await invoke<string>("git_worktree_create", {
+        cwd,
+        base,
+        commit: selected.commit,
+        branch,
+        path,
+      });
+      notifyGitChanged();
+    }).then(() => {
+      if (created) {
+        onOpen(created);
+        onClose();
+      }
+    });
+  };
+  return (
+    <div
+      className="min-h-0 flex-1 overflow-y-auto overscroll-none text-[12px]"
+      aria-busy={busy}
+    >
+      {confirmation ? (
+        <div className="space-y-2 px-3 py-2.5">
+          <p className="flex items-center gap-2 font-medium">
+            {confirmation.action === "remove" && (
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-red-500/10 text-red-600">
+                <Trash2 className="size-3.5" aria-hidden="true" />
+              </span>
+            )}
+            {confirmation.action === "remove"
+              ? forceReview
+                ? "Permanently remove worktree?"
+                : "Remove worktree?"
+              : "Share this worktree?"}
+          </p>
+          <p className="truncate text-content/70">Repository: {cwd}</p>
+          <p className="truncate font-mono">
+            {confirmation.entry.branch?.replace("refs/heads/", "")} ·{" "}
+            {confirmation.entry.head.slice(0, 10)}
+          </p>
+          <p className="break-all text-[11px] text-content/50">
+            {confirmation.entry.path}
+          </p>
+          <p className="text-[11px] leading-4 text-content/60">
+            {confirmation.action === "remove"
+              ? forceReview
+                ? `All files in this working copy, including uncommitted, untracked and ignored files, will be permanently deleted. Reviewed ${forceReview.fileCount} entries. The branch and conversations stay.`
+                : "The branch and conversations stay. Files and running work are checked again before removal."
+              : "Other conversations use this folder. Their agents can change the same files."}
+          </p>
+          {confirmation.action === "remove" && forceReview && (
+            <details
+              onToggle={(event) => {
+                if (!event.currentTarget.open || forceFiles || busy) return;
+                void run(async () => {
+                  const latest = await invoke<typeof forceReview>(
+                    "git_worktree_removal_preview",
+                    { cwd, path: confirmation.entry.path, includeFiles: true },
+                  );
+                  if (latest.token !== forceReview.token) {
+                    setForceReview(null);
+                    setConfirmation(null);
+                    throw new Error(
+                      "Files changed; review again before force removal.",
+                    );
+                  }
+                  setForceFiles(latest.files);
+                });
+              }}
+              className="max-h-32 overflow-auto text-[11px] text-content/70"
+            >
+              <summary>Review files (first 100)</summary>
+              {forceFiles?.map((file) => (
+                <p key={file} className="break-all">
+                  {file}
+                </p>
+              ))}
+            </details>
+          )}
+          {confirmation.entry.users.length > 0 && (
+            <details className="max-h-24 overflow-auto text-[11px] text-content/50">
+              <summary>Existing conversations</summary>
+              {confirmation.entry.users.map((user) => (
+                <p key={user}>{user}</p>
+              ))}
+            </details>
+          )}
+          <div className="flex justify-end gap-2 border-t border-content/10 pt-2.5">
+            <button
+              type="button"
+              disabled={busy}
+              className="rounded-md border border-content/10 px-2.5 py-1.5 text-content/70 outline-none hover:bg-content/5 focus-visible:ring-2 focus-visible:ring-content/30 disabled:opacity-40"
+              onClick={() => setConfirmation(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background-base disabled:opacity-40 ${confirmation.action === "remove" ? "bg-content/5 text-red-400 hover:bg-content/10 [.theme-light_&]:text-red-700 focus-visible:ring-red-500" : "bg-content/10 hover:bg-content/15 focus-visible:ring-content/30"}`}
+              onClick={() => {
+                const { entry, action } = confirmation;
+                if (action === "open") {
+                  onOpen(entry.path);
+                  onClose();
+                  return;
+                }
+                void run(async () => {
+                  try {
+                    await invoke("git_worktree_remove", {
+                      cwd,
+                      path: entry.path,
+                      head: entry.head,
+                      reviewed: forceReview?.token ?? null,
+                    });
+                  } catch (error) {
+                    setConfirmation(null);
+                    setForceReview(null);
+                    throw error;
+                  }
+                  forgetRemovedWorktree(
+                    entry.path,
+                    entries.find((tree) => tree.main)?.path ?? cwd,
+                  );
+                  setWorkingCopyHidden(entry.path, false);
+                  notifyGitChanged();
+                  setConfirmation(null);
+                  setDetail(null);
+                });
+              }}
+            >
+              {confirmation.action === "remove" && (
+                <Trash2 className="size-3.5" aria-hidden="true" />
+              )}
+              {confirmation.action === "remove"
+                ? forceReview
+                  ? "Permanently remove"
+                  : "Remove"
+                : "Open conversation"}
+            </button>
+          </div>
+        </div>
+      ) : detail ? (
+        <div className="space-y-2 px-3 py-2.5">
+          <button
+            type="button"
+            className={rowClass}
+            disabled={busy}
+            onClick={() => setDetail(null)}
+          >
+            <ArrowLeft className="size-3.5" />
+            Worktrees
+          </button>
+          <p className="truncate font-medium">
+            {detail.branch?.replace("refs/heads/", "") ?? "Detached worktree"}
+          </p>
+          <p
+            className="truncate text-[11px] text-content/70"
+            title={detail.path}
+          >
+            {detail.path}
+          </p>
+          <p
+            title="Latest recorded conversation update or project open in MonoCode. External activity is not tracked."
+            className="text-content/70"
+          >
+            {workingCopyAge(lastWorkingCopyUse(detail, recents))} in MonoCode
+          </p>
+          {!safety && (
+            <p className="text-content/70">
+              {detail.missing || detail.prunable
+                ? "Unavailable checkout"
+                : safetyError || "Checking worktree…"}
+            </p>
+          )}
+          {safety?.running && (
+            <p className="text-content/70">
+              Close running agents or terminals before removal.
+            </p>
+          )}
+          <details className="text-[11px] text-content/70">
+            <summary className="cursor-pointer">
+              Location and{" "}
+              {detail.missing || detail.prunable || detail.locked
+                ? "recovery"
+                : "details"}
+            </summary>
+            <p className="break-all py-1">{detail.path}</p>
+            <p className="font-mono">{detail.head}</p>
+            {(detail.missing || detail.prunable) && (
+              <p className="pt-1">
+                Restore the original folder, or run Git worktree repair from a
+                surviving checkout, then Retry. No metadata is pruned.
+              </p>
+            )}
+            {detail.locked && (
+              <p className="pt-1">
+                {detail.locked}. Unlock with Git before removal.
+              </p>
+            )}
+            <p className="pt-1">
+              Activity covers MonoCode only. Hide keeps files and conversations;
+              restore it from this list.
+            </p>
+          </details>
+          {!detail.main && (
+            <button
+              type="button"
+              disabled={busy}
+              className={rowClass}
+              onClick={() => {
+                try {
+                  setWorkingCopyHidden(
+                    detail.path,
+                    !hidden.some(
+                      (path) => pathKey(path) === pathKey(detail.path),
+                    ),
+                  );
+                } catch (err) {
+                  setError(String(err));
+                }
+              }}
+            >
+              {hidden.some((path) => pathKey(path) === pathKey(detail.path))
+                ? "Show in project"
+                : "Hide from project"}
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={busy}
+            className={rowClass}
+            onClick={() =>
+              void run(async () => {
+                setDetail({ ...detail });
+                notifyGitChanged();
+              })
+            }
+          >
+            <RefreshCw className="size-3.5" />
+            {safetyError || detail.missing || detail.prunable
+              ? "Retry"
+              : "Refresh status"}
+          </button>
+          <button
+            type="button"
+            disabled={
+              busy ||
+              detail.main ||
+              !detail.branch ||
+              pathKey(detail.path) === pathKey(activeCwd) ||
+              detail.missing ||
+              !!detail.locked ||
+              !!detail.prunable ||
+              !safety ||
+              safety.running
+            }
+            className={`${rowClass} text-red-400! [.theme-light_&]:text-red-700! focus-visible:ring-2 focus-visible:ring-red-500`}
+            onClick={() =>
+              void run(async () => {
+                setForceReview(null);
+                setForceFiles(null);
+                const current = await invoke<{
+                  dirty: boolean;
+                  running: boolean;
+                }>("git_worktree_safety", { cwd, path: detail.path });
+                if (current.running)
+                  throw new Error(
+                    "Close running agents or terminals before removal. No processes were stopped.",
+                  );
+                if (current.dirty) {
+                  const review = await invoke<NonNullable<typeof forceReview>>(
+                    "git_worktree_removal_preview",
+                    { cwd, path: detail.path, includeFiles: false },
+                  );
+                  setForceReview(review);
+                }
+                setConfirmation({ entry: detail, action: "remove" });
+              })
+            }
+          >
+            <Trash2 className="size-3.5" />
+            Remove Git worktree…
+          </button>
+          {pathKey(detail.path) === pathKey(activeCwd) && !detail.main && (
+            <p className="text-[11px] text-content/70">
+              Switch to another working copy before removing this checkout.
+            </p>
+          )}
+          {detail.main && (
+            <p className="text-[11px] text-content/70">
+              The main checkout is protected. Use the project menu to archive
+              its app association.
+            </p>
+          )}
+        </div>
+      ) : choosingBase ? (
+        <>
+          <label className="flex items-center gap-2 border-b border-content/10 px-2 py-2.5 text-content/50">
+            <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
+            <input
+              autoFocus
+              className={inputClass}
+              aria-label="Choose base branch"
+              placeholder="Search base branches…"
+              value={baseQuery}
+              onChange={(e) => setBaseQuery(e.target.value)}
+            />
+          </label>
+          <div className="px-1.5 py-1.5">
+            {refs
+              .filter((ref) =>
+                ref.name.toLowerCase().includes(baseQuery.toLowerCase()),
+              )
+              .slice(0, 200)
+              .map((ref) => (
+                <button
+                  type="button"
+                  key={ref.name}
+                  className={rowClass}
+                  onClick={() => {
+                    setBase(ref.name);
+                    setChoosingBase(false);
+                    setCreating(true);
+                  }}
+                >
+                  <GitBranch
+                    className="size-3.5 shrink-0 text-content/50"
+                    strokeWidth={1.75}
+                  />
+                  <span className="truncate font-mono">
+                    {ref.name.replace(/^refs\/(heads|remotes)\//, "")}
+                  </span>
+                </button>
+              ))}
+          </div>
+        </>
+      ) : creating ? (
+        <>
+          <div className="flex items-center gap-2 border-b border-content/10 px-2 py-2 text-content/60">
+            <button
+              type="button"
+              disabled={busy}
+              aria-label="Back to worktrees"
+              className="rounded p-0.5 hover:bg-content/10"
+              onClick={() => setCreating(false)}
+            >
+              <ArrowLeft className="size-3.5" strokeWidth={1.75} />
+            </button>
+            <span>New branch and worktree</span>
+          </div>
+          <p className="truncate px-2.5 py-2 text-content/50" title={cwd}>
+            Repository · {cwd.split("/").pop()}
+          </p>
+          <div className="space-y-0.5 px-1.5 py-1.5">
+            <button
+              type="button"
+              disabled={busy}
+              className={rowClass}
+              onClick={() => {
+                setBaseQuery("");
+                setChoosingBase(true);
+              }}
+            >
+              <GitBranch
+                className="size-3.5 shrink-0 text-content/50"
+                strokeWidth={1.75}
+              />
+              <span className="text-content/50">Base</span>
+              <span className="min-w-0 flex-1 truncate font-mono">
+                {selectedName || "Choose branch"}
+              </span>
+              <ChevronRight className="size-3 shrink-0 text-content/40" />
+            </button>
+            <label className="flex items-center gap-2 border-b border-content/10 px-2.5 py-2.5 text-content/50">
+              <GitBranch className="size-3.5 shrink-0" strokeWidth={1.75} />
+              <input
+                autoFocus
+                disabled={busy}
+                className={inputClass}
+                aria-label="New branch name"
+                placeholder="New branch name…"
+                value={branch}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    createAndOpen();
+                  }
+                }}
+                onChange={(e) => {
+                  setBranch(e.target.value);
+                  if (!path || path === `${cwd}-${branch.replace(/\//g, "-")}`)
+                    setPath(`${cwd}-${e.target.value.replace(/\//g, "-")}`);
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={busy}
+              title={path || "Choose a folder"}
+              className={rowClass}
+              onClick={() => setEditPath(!editPath)}
+            >
+              <Folder
+                className="size-3.5 shrink-0 text-content/50"
+                strokeWidth={1.75}
+              />
+              <span className="min-w-0 flex-1 truncate text-content/50">
+                {path.split("/").pop() || "Folder chosen from branch name"}
+              </span>
+              <ChevronRight className="size-3 shrink-0 text-content/40" />
+            </button>
+            {editPath && (
+              <input
+                aria-label="Worktree folder"
+                disabled={busy}
+                className="mb-1 w-full rounded-md bg-content/5 px-2 py-1.5 font-mono text-[11px] text-content outline-none"
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+              />
+            )}
+            <button
+              type="button"
+              disabled={busy || !selected || !branch || !path}
+              className="mt-1 flex h-8 w-full items-center gap-2 rounded-md bg-content/10 px-2 text-left text-content hover:bg-content/15 disabled:opacity-40"
+              onClick={createAndOpen}
+            >
+              <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
+              {busy ? "Creating…" : "Create branch and worktree"}
+            </button>
+          </div>
+          {selected && (
+            <p
+              className="border-t border-content/10 px-2.5 py-2 font-mono text-[10px] text-content/40"
+              title={`Base ${selected.name} at ${selected.commit}. Remote refs use the local cache; fetch explicitly and refresh.`}
+            >
+              Base commit {selected.commit.slice(0, 10)}
+            </p>
+          )}
+        </>
+      ) : (
+        <>
+          <label className="flex items-center gap-2 border-b border-content/10 px-2 py-2.5 text-content/50">
+            <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
+            <input
+              ref={search}
+              autoFocus
+              disabled={busy}
+              className={inputClass}
+              aria-label="Search or create a worktree"
+              placeholder="Search or create a worktree…"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setActiveIndex(0);
+              }}
+              onKeyDown={(e) => {
+                const count = visibleEntries.length + Number(canCreate);
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setActiveIndex((index) =>
+                    count
+                      ? (index + (e.key === "ArrowDown" ? 1 : count - 1)) %
+                        count
+                      : 0,
+                  );
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  const entry = visibleEntries[activeIndex];
+                  if (entry && !entry.missing && !entry.prunable)
+                    openEntry(entry);
+                  else if (!entry && canCreate) prepareCreate();
+                }
+              }}
+            />
+          </label>
+          <div className="flex items-center justify-between px-2.5 pt-2 text-[10px] text-content/60">
+            <span>Last used in MonoCode</span>
+            <button
+              type="button"
+              disabled={busy}
+              aria-pressed={oldestFirst}
+              className="rounded px-1.5 py-1 hover:bg-content/10"
+              onClick={() => {
+                setOldestFirst(!oldestFirst);
+                setActiveIndex(0);
+              }}
+            >
+              {oldestFirst ? "Oldest first ✓" : "Oldest first"}
+            </button>
+          </div>
+          <div className="px-1.5 py-1.5">
+            {visibleEntries.map((entry, index) => (
+              <div key={entry.path} className="flex items-center gap-1">
+                <button
+                  type="button"
+                  disabled={busy || entry.missing || !!entry.prunable}
+                  title={`${entry.path} · Local${entry.users.length ? ` · ${entry.users.length} conversations` : ""}`}
+                  className={`${rowClass} ${index === activeIndex ? "bg-content/10" : ""}`}
+                  onMouseEnter={() => setActiveIndex(index)}
+                  onClick={() => openEntry(entry)}
+                >
+                  {entry.path === cwd ? (
+                    <Check className="size-3.5 shrink-0" strokeWidth={1.75} />
+                  ) : (
+                    <GitBranch
+                      className="size-3.5 shrink-0 text-content/50"
+                      strokeWidth={1.75}
+                    />
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-mono">
+                    {entry.branch?.replace("refs/heads/", "") ??
+                      `Detached ${entry.head.slice(0, 8)}`}
+                    <span className="block truncate font-sans text-[10px] text-content/70">
+                      {workingCopyAge(lastWorkingCopyUse(entry, recents))}
+                      {hidden.some(
+                        (path) => pathKey(path) === pathKey(entry.path),
+                      )
+                        ? " · Hidden"
+                        : ""}
+                    </span>
+                  </span>
+                  <span className="shrink-0 text-[10px] text-content/40">
+                    {entry.missing
+                      ? "missing"
+                      : entry.locked
+                        ? "locked"
+                        : entry.main
+                          ? "main"
+                          : entry.path === cwd
+                            ? "current"
+                            : ""}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label={`Manage worktree ${entry.branch?.replace("refs/heads/", "") ?? entry.path}`}
+                  title="Worktree details and cleanup"
+                  className="shrink-0 rounded p-1 text-content/50 hover:bg-content/10"
+                  onClick={() => setDetail(entry)}
+                >
+                  <ChevronRight className="size-3.5" />
+                </button>
+              </div>
+            ))}
+            <div className="mt-1 border-t border-content/10 pt-1">
+              {canCreate && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  className={`${rowClass} ${activeIndex === visibleEntries.length ? "bg-content/10" : ""}`}
+                  onMouseEnter={() => setActiveIndex(visibleEntries.length)}
+                  onClick={prepareCreate}
+                >
+                  <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
+                  <span className="truncate">
+                    Create worktree <span className="font-mono">{name}</span>
+                  </span>
+                </button>
+              )}
+              {name && !visibleEntries.length && !canCreate && (
+                <p className="px-2 py-1.5 text-content/50">
+                  Branch already exists. Create its worktree from Branches.
+                </p>
+              )}
+              <button
+                type="button"
+                disabled={busy}
+                className={`${rowClass} text-content/50`}
+                onClick={() => void run(async () => {})}
+              >
+                <RefreshCw className="size-3.5" strokeWidth={1.75} />
+                {busy ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {error && (
+        <p
+          role="alert"
+          className="max-h-24 overflow-auto whitespace-pre-wrap border-t border-content/10 px-2.5 py-2 text-[11px] leading-4 text-red-400/90"
+        >
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}

@@ -152,7 +152,7 @@ type Props = {
   queueStatus?: MessageQueueStatus;
   hotkeys?: boolean;
   onFocus: () => void;
-  onCwdChange: (cwd: string) => void;
+  onCwdChange: (cwd: string, fresh?: boolean) => void;
   onBranchChange?: () => void;
   onNewTerminal?: () => void;
   onModelChange: (harness: HarnessId, model: string) => void;
@@ -1180,6 +1180,7 @@ export function Composer({
                   branch={branch}
                   enabled={enabled && !busy}
                   onChange={onBranchChange}
+                  onOpenWorktree={(path) => onCwdChange(path, true)}
                   onClose={() => ref.current?.focus()}
                 />
               )}
