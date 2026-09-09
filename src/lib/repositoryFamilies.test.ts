@@ -146,3 +146,22 @@ it("reconciles serialized legacy rows without erasing their original presentatio
   // Losing verification must make original entries recoverable, not delete them.
   expect(groupRepositoryFamilies(reloaded, new Map())).toEqual(old);
 });
+
+it("keeps identical Linux repository names separate across native and WSL hosts", () => {
+  const paths = [
+    "/home/user/repo",
+    "//wsl.localhost/Ubuntu/home/user/repo",
+    "//wsl.localhost/Debian/home/user/repo",
+  ];
+  const sections = {
+    pinned: [],
+    projects: paths.map((path) => ({ path, openedAt: 1 })),
+  };
+  const verified = new Map(
+    paths.map((path) => [
+      path,
+      { commonDir: `${path}/.git`, checkout: path, worktrees: [] },
+    ]),
+  );
+  expect(groupRepositoryFamilies(sections, verified)).toEqual(sections);
+});

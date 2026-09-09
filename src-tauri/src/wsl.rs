@@ -1162,6 +1162,7 @@ def run(argv, cwd, input_bytes=None, timeout=25):
                 .as_str()
                 .unwrap()
                 .starts_with("//wsl.localhost/")));
+        fs::worktrees::tests::verify_wsl_force_removal(&root.identity(), &child, head.trim());
         if std::env::var_os("MONOCODE_WSL_MEASURE").is_some() {
             let files: Vec<_> = (0..64)
                 .map(|index| {
@@ -1378,6 +1379,70 @@ assert not any(call[0] == 'signal' for call in calls)
             &bridge,
             registry.lock().unwrap().get("ubuntu").unwrap()
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_bridge_requests_keep_responses_and_disconnects_scoped() {
+        let mut command = Command::new("python3");
+        command.args(["-u", "-c", SCRIPT]);
+        let bridge = Arc::new(Bridge::start(&mut command).unwrap());
+        let directory = std::env::temp_dir().join(format!(
+            "monocode-queue-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..8).map(|index| {
+                let bridge = bridge.clone();
+                let file = directory.join(format!("request-{index}"));
+                scope.spawn(move || {
+                    bridge.request(json!({"op":"write_text", "path":file, "content":index.to_string()})).unwrap();
+                    assert_eq!(std::fs::read_to_string(file).unwrap(), index.to_string());
+                })
+            }).collect();
+            for task in tasks {
+                task.join().unwrap();
+            }
+        });
+        // Hold the real serialization boundary, then disconnect. Pending writes
+        // must fail without executing or being replayed onto a later connection.
+        let lock = bridge.io.lock().unwrap();
+        let (started, waiting) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..4)
+                .map(|index| {
+                    let bridge = bridge.clone();
+                    let started = started.clone();
+                    let file = directory.join(format!("cancelled-{index}"));
+                    scope.spawn(move || {
+                        started.send(()).unwrap();
+                        assert!(bridge
+                            .request(
+                                json!({"op":"write_text", "path":file, "content":"must not run"})
+                            )
+                            .unwrap_err()
+                            .contains("Reconnect"));
+                        assert!(!file.exists());
+                    })
+                })
+                .collect();
+            for _ in 0..4 {
+                waiting.recv().unwrap();
+            }
+            assert!(bridge
+                .finish_request(Err("fixture process disconnected".into()), false)
+                .is_err());
+            drop(lock);
+            for task in tasks {
+                task.join().unwrap();
+            }
+        });
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]

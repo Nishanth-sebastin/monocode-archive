@@ -135,6 +135,45 @@ def bounded_tree(path):
 def handle(request):
     op = request["op"]
     path = absolute(request["path"])
+    if op == "worktree_review":
+        # The Rust owner verifies Git family/HEAD/index and all removal policy.
+        # This OS boundary fingerprints Linux files without following symlinks.
+        digest = hashlib.sha256()
+        pending, count, total, files = [path], 0, 0, []
+        deadline = time.monotonic() + 25
+        while pending:
+            current = pending.pop()
+            count += 1
+            if count > 10_000 or time.monotonic() > deadline:
+                raise ValueError("Force review exceeds 10,000 entries or 25 seconds; clean up with Git")
+            meta = current.lstat()
+            digest.update(json.dumps([str(current.relative_to(path)), meta.st_mode, meta.st_mtime_ns], ensure_ascii=True).encode())
+            if stat.S_ISLNK(meta.st_mode):
+                digest.update(os.fsencode(os.readlink(current)))
+            elif stat.S_ISDIR(meta.st_mode):
+                children = []
+                with os.scandir(current) as entries:
+                    for child in entries:
+                        if current == path and child.name == ".git":
+                            continue
+                        if count + len(pending) + len(children) >= 10_000:
+                            raise ValueError("Force review exceeds 10,000 entries; clean up with Git")
+                        children.append(Path(child.path))
+                pending.extend(sorted(children))
+            elif stat.S_ISREG(meta.st_mode):
+                total += meta.st_size
+                if total > 64 * 1024 * 1024:
+                    raise ValueError("Force review exceeds 64 MiB; clean up with Git")
+                with current.open("rb") as source:
+                    data = source.read(64 * 1024 * 1024 + 1)
+                if len(data) != meta.st_size:
+                    raise ValueError("Files changed during review; refresh")
+                digest.update(data)
+            else:
+                raise ValueError("Special files cannot be reviewed safely; clean up with Git")
+            if request.get("includeFiles") and not stat.S_ISDIR(meta.st_mode) and len(files) < 100:
+                files.append(str(current.relative_to(path)))
+        return {"token": digest.hexdigest(), "fileCount": count - 1, "files": files}
     if op == "resolve_agent":
         provider = request["provider"]
         if provider == "opencode":

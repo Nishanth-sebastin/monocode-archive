@@ -359,7 +359,7 @@ pub fn git_worktree_create(
     create(&expand_home(&cwd), &base, &commit, &branch, &path)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovalPreview {
     token: String,
@@ -388,8 +388,11 @@ fn removal_entry(root: &Path, path: &str) -> Result<(String, Worktree), String> 
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     let target_root = git(Path::new(path), &["rev-parse", "--show-toplevel"])?;
-    if canonical(target_common.trim_end_matches(['\r', '\n']))? != family.common_dir
-        || canonical(target_root.trim_end_matches(['\r', '\n']))? != path
+    if canonical(&qualify(
+        root,
+        target_common.trim_end_matches(['\r', '\n']),
+    )?)? != family.common_dir
+        || canonical(&qualify(root, target_root.trim_end_matches(['\r', '\n']))?)? != path
     {
         return Err("Worktree identity changed; refresh and review again".into());
     }
@@ -412,6 +415,16 @@ fn removal_preview(root: &Path, path: &str, include_files: bool) -> Result<Remov
         &["diff", "--cached", "--no-ext-diff", "--binary", "HEAD"],
     )?
     .hash(&mut digest);
+    if let Some(location) = crate::wsl::location(path)? {
+        let mut review: RemovalPreview = crate::wsl::request(
+            &location,
+            "worktree_review",
+            serde_json::json!({"includeFiles": include_files}),
+        )?;
+        review.token.hash(&mut digest);
+        review.token = format!("{:016x}", digest.finish());
+        return Ok(review);
+    }
     let start = Instant::now();
     let mut pending = vec![std::path::PathBuf::from(path)];
     let mut count = 0;
@@ -625,11 +638,52 @@ pub fn git_worktree_safety(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(unix)]
+    pub(crate) fn verify_wsl_force_removal(root: &str, child: &str, head: &str) {
+        let location = crate::wsl::location(child).unwrap().unwrap();
+        let file = location
+            .with_path(&format!("{}/dirty ż.txt", location.path))
+            .unwrap();
+        let write = |text: &str| {
+            crate::wsl::request::<serde_json::Value>(
+                &file,
+                "write_text",
+                serde_json::json!({"content": text}),
+            )
+            .unwrap()
+        };
+        write("first");
+        assert!(remove(Path::new(root), child, head).is_err());
+        let before = removal_preview(Path::new(root), child, false).unwrap();
+        assert!(before.files.is_empty());
+        let details = removal_preview(Path::new(root), child, true).unwrap();
+        assert_eq!(before.token, details.token);
+        assert!(details.files.contains(&"dirty ż.txt".into()));
+        write("changed");
+        assert!(
+            remove_reviewed(Path::new(root), child, head, Some(&before.token))
+                .unwrap_err()
+                .contains("changed")
+        );
+        let reviewed = removal_preview(Path::new(root), child, false).unwrap();
+        remove_reviewed(Path::new(root), child, head, Some(&reviewed.token)).unwrap();
+        assert!(!inventory(Path::new(root))
+            .unwrap()
+            .iter()
+            .any(|entry| entry.path == child));
+        assert_eq!(
+            git(Path::new(root), &["rev-parse", "refs/heads/child-branch"])
+                .unwrap()
+                .trim(),
+            head
+        );
+    }
 
     #[test]
     fn activity_query_uses_index_without_scanning_or_sorting() {
