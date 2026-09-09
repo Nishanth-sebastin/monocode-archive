@@ -912,5 +912,27 @@ mod tests {
             "11 worktrees, 21 verified family calls: median {:?}, max {:?}",
             samples[10], samples[20]
         );
+        let target = repo.target("work-0");
+        for index in 0..64 {
+            std::fs::write(
+                Path::new(&target).join(format!("file-{index}")),
+                vec![b'x'; 4096],
+            )
+            .unwrap();
+        }
+        samples.clear();
+        for _ in 0..21 {
+            let start = Instant::now();
+            assert!(removal_preview(&repo.0, &target, false)
+                .unwrap()
+                .files
+                .is_empty());
+            samples.push(start.elapsed());
+        }
+        samples.sort();
+        println!(
+            "64 files / 256 KiB, 21 force reviews: median {:?}, max {:?}",
+            samples[10], samples[20]
+        );
     }
 }
