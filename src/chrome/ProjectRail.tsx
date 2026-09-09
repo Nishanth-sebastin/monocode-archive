@@ -989,7 +989,7 @@ function ProjectFamilyCard(
                 />
                 <span className="min-w-0 flex-1 truncate">{name}</span>
                 {branch !== name && (
-                  <span className="max-w-[45%] truncate text-[10px] text-content/40">
+                  <span className="max-w-[35%] truncate text-[10px] text-content/40">
                     {branch}
                   </span>
                 )}
@@ -1176,7 +1176,7 @@ function ProjectCard({
         ) : (
           <span className={nameClassName}>{name}</span>
         )}
-        {hasChanges ? (
+        {hasChanges && !worktreeControls ? (
           <span className="shrink-0 group-hover:hidden">
             <ProjectDiffStat additions={additions} deletions={deletions} />
           </span>
