@@ -345,7 +345,7 @@ export function WorktreePanel({
             <button
               type="button"
               disabled={busy}
-              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background-base disabled:opacity-40 ${confirmation.action === "remove" ? "bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500" : "bg-content/10 hover:bg-content/15 focus-visible:ring-content/30"}`}
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background-base disabled:opacity-40 ${confirmation.action === "remove" ? "bg-content/5 text-red-400 hover:bg-content/10 [.theme-light_&]:text-red-700 focus-visible:ring-red-500" : "bg-content/10 hover:bg-content/15 focus-visible:ring-content/30"}`}
               onClick={() => {
                 const { entry, action } = confirmation;
                 if (action === "open") {
@@ -503,7 +503,7 @@ export function WorktreePanel({
               !safety ||
               safety.running
             }
-            className={`${rowClass} bg-red-600 text-white! hover:bg-red-700! focus-visible:ring-2 focus-visible:ring-red-500`}
+            className={`${rowClass} text-red-400! [.theme-light_&]:text-red-700! focus-visible:ring-2 focus-visible:ring-red-500`}
             onClick={() =>
               void run(async () => {
                 setForceReview(null);
