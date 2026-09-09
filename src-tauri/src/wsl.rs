@@ -1120,6 +1120,33 @@ def run(argv, cwd, input_bytes=None, timeout=25):
             target.identity(),
         )
         .unwrap();
+        let branches = block_on(fs::git_branches(root.identity())).unwrap();
+        assert_eq!(
+            branches
+                .branches
+                .iter()
+                .find(|b| b.name == "child-branch")
+                .unwrap()
+                .worktree
+                .as_deref(),
+            Some(child.as_str())
+        );
+        let selected = block_on(fs::git_checkout(
+            root.identity(),
+            "child-branch".into(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(selected.worktree.as_deref(), Some(child.as_str()));
+        let returned = block_on(fs::git_checkout(child.clone(), "main".into(), None)).unwrap();
+        assert_eq!(
+            returned.worktree,
+            Some(
+                root.with_path(&directory.canonicalize().unwrap().to_string_lossy())
+                    .unwrap()
+                    .identity()
+            )
+        );
         let parent_family =
             serde_json::to_value(fs::worktrees::git_repository_family(root.identity()).unwrap())
                 .unwrap();
