@@ -68,6 +68,17 @@ pub struct CursorBinary {
 struct LiveChild {
     stdin: Mutex<ChildStdin>,
     pid: u32,
+    linux: Option<crate::wsl::LinuxProcess>,
+}
+
+impl LiveChild {
+    fn terminate(&self) -> Result<(), String> {
+        if let Some(linux) = &self.linux {
+            linux.stop()?;
+        }
+        terminate(self.pid);
+        Ok(())
+    }
 }
 
 struct LiveSse {
@@ -147,8 +158,10 @@ impl HarnessHost {
         if inner.epochs.get(&session_id) != Some(&epoch) {
             return Some(live);
         }
-        if let Some(prev) = inner.children.insert(session_id, live) {
-            terminate(prev.pid);
+        let previous = inner.children.insert(session_id, live);
+        drop(inner);
+        if let Some(prev) = previous {
+            let _ = prev.terminate();
         }
         None
     }
@@ -156,7 +169,8 @@ impl HarnessHost {
     fn kill_session(&self, session_id: &str) -> Option<Arc<LiveChild>> {
         let mut inner = self.lock_inner();
         *inner.epochs.entry(session_id.to_string()).or_insert(0) += 1;
-        inner.children.remove(session_id)
+        // Keep failed cancellations addressable; remove only this PID after cleanup.
+        inner.children.get(session_id).cloned()
     }
 
     fn remove_if_pid(&self, session_id: &str, pid: u32) -> Option<Arc<LiveChild>> {
@@ -174,6 +188,20 @@ impl HarnessHost {
             inner.children.drain().map(|(_, child)| child).collect()
         };
         self.stop_all_sse();
+        // Bound concurrent WSL launchers while avoiding serial shutdown waits.
+        for batch in kids.chunks(4) {
+            thread::scope(|scope| {
+                for live in batch {
+                    if let Some(linux) = &live.linux {
+                        scope.spawn(move || {
+                            if let Err(error) = linux.stop() {
+                                eprintln!("{error}");
+                            }
+                        });
+                    }
+                }
+            });
+        }
         let pids: Vec<u32> = kids.iter().map(|live| live.pid).collect();
         // Drop stdin before signaling so ACP CLIs that watch the pipe can exit.
         drop(kids);
@@ -335,29 +363,37 @@ pub fn harness_spawn(
     args: Vec<String>,
     cwd: String,
 ) -> Result<u32, String> {
+    let location = crate::wsl::location(&cwd)?;
     let _worktree_guard = crate::fs::worktrees::LIFECYCLE
         .try_read()
         .map_err(|_| "Worktree operation in progress; retry startup after it completes")?;
     let (epoch, kill_all, prev) = host.begin_spawn(&session_id);
     if let Some(prev) = prev {
-        terminate(prev.pid);
+        if let Err(error) = prev.terminate() {
+            host.install_spawn(session_id, epoch, kill_all, prev);
+            return Err(error);
+        }
     }
 
-    let workdir = expand_home(&cwd);
-    if !workdir.is_dir() {
-        return Err(format!(
-            "Working directory does not exist: {}",
-            workdir.display()
-        ));
-    }
-
-    let mut cmd = Command::new(&command);
-    cmd.args(&args)
-        .current_dir(&workdir)
-        .stdin(Stdio::piped())
+    let (mut cmd, nonce) = if let Some(location) = &location {
+        let (cmd, nonce) = crate::wsl::agent_command(location, &command, &args)?;
+        (cmd, Some(nonce))
+    } else {
+        let workdir = expand_home(&cwd);
+        if !workdir.is_dir() {
+            return Err(format!(
+                "Working directory does not exist: {}",
+                workdir.display()
+            ));
+        }
+        let mut cmd = Command::new(&command);
+        cmd.args(&args).current_dir(&workdir);
+        prepare_child(&mut cmd, &command);
+        (cmd, None)
+    };
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    prepare_child(&mut cmd, &command);
 
     let mut child =
         spawn_managed(&mut cmd).map_err(|e| format!("Failed to start {command}: {e}"))?;
@@ -376,50 +412,72 @@ pub fn harness_spawn(
         .take()
         .ok_or_else(|| "Failed to open harness stderr".to_string())?;
 
+    let (stdout, linux) = if let (Some(location), Some(nonce)) = (location, nonce.as_deref()) {
+        match crate::wsl::agent_handshake(stdout, location, nonce) {
+            Ok((reader, process)) => (reader, Some(process)),
+            Err(error) => {
+                drop(stdin);
+                terminate(pid);
+                thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Err(error);
+            }
+        }
+    } else {
+        (BufReader::new(stdout), None)
+    };
+
     let live = Arc::new(LiveChild {
         stdin: Mutex::new(stdin),
         pid,
+        linux,
     });
-    if let Some(rejected) = host.install_spawn(session_id.clone(), epoch, kill_all, live) {
+    if let Some(rejected) = host.install_spawn(session_id.clone(), epoch, kill_all, live.clone()) {
         // A kill, or a newer spawn, won the race while this one was forking.
         // Returning `Ok` here would hand the caller a dead pid to store as the
         // session's live child, and this child's stdout would be parsed as the
         // stream that replaced it. Reap it without emitting anything.
-        terminate(rejected.pid);
+        let _ = rejected.terminate();
         thread::spawn(move || {
             let _ = child.wait();
         });
         return Err(SPAWN_CANCELLED.to_string());
     }
 
+    if let Some(nonce) = nonce {
+        let result = live
+            .stdin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .write_all(format!("{nonce}\n").as_bytes());
+        if let Err(error) = result {
+            let _ = live.terminate();
+            host.remove_if_pid(&session_id, pid);
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return Err(format!("Could not acknowledge Linux startup: {error}"));
+        }
+    }
+
     let stdout_app = app.clone();
     let stdout_id = session_id.clone();
+    let stdout_live = Arc::clone(&live);
     thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            let _ = stdout_app.emit(
-                STDOUT_EVENT,
-                HarnessLine {
-                    session_id: stdout_id.clone(),
-                    line,
-                },
-            );
-        }
+        stream_lines(stdout, &stdout_app, &stdout_id, STDOUT_EVENT, &stdout_live);
     });
 
     let stderr_app = app.clone();
     let stderr_id = session_id.clone();
     thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            let Ok(line) = line else { break };
-            let _ = stderr_app.emit(
-                STDERR_EVENT,
-                HarnessLine {
-                    session_id: stderr_id.clone(),
-                    line,
-                },
-            );
-        }
+        stream_lines(
+            BufReader::new(stderr),
+            &stderr_app,
+            &stderr_id,
+            STDERR_EVENT,
+            &live,
+        );
     });
 
     let wait_app = app.clone();
@@ -454,6 +512,11 @@ pub fn harness_write(
     let live = host
         .get(&session_id)
         .ok_or_else(|| "Harness process is not running".to_string())?;
+    let line = if let Some(linux) = &live.linux {
+        linux.protocol_line(line)?
+    } else {
+        line
+    };
     let mut stdin = live.stdin.lock().unwrap_or_else(|e| e.into_inner());
     stdin
         .write_all(line.as_bytes())
@@ -462,13 +525,75 @@ pub fn harness_write(
         .map_err(|e| format!("Failed to write to harness: {e}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn harness_kill(host: State<HarnessHost>, session_id: String) -> Result<(), String> {
     host.stop_sse(&session_id);
     if let Some(live) = host.kill_session(&session_id) {
-        terminate(live.pid);
+        live.terminate()?;
+        host.remove_if_pid(&session_id, live.pid);
     }
     Ok(())
+}
+
+const MAX_HARNESS_LINE_BYTES: u64 = 32 * 1024 * 1024;
+
+fn bounded_line(reader: &mut impl BufRead, limit: u64) -> Result<Option<String>, String> {
+    let mut line = String::new();
+    let count = reader
+        .take(limit + 1)
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    if count == 0 {
+        return Ok(None);
+    }
+    if count as u64 > limit {
+        return Err("Agent output line exceeds 32 MiB; the process was stopped".into());
+    }
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    Ok(Some(line))
+}
+
+fn stream_lines(
+    mut reader: impl BufRead,
+    app: &AppHandle,
+    session_id: &str,
+    event: &str,
+    live: &LiveChild,
+) {
+    loop {
+        match bounded_line(&mut reader, MAX_HARNESS_LINE_BYTES) {
+            Ok(Some(line)) => {
+                let _ = app.emit(
+                    event,
+                    HarnessLine {
+                        session_id: session_id.into(),
+                        line,
+                    },
+                );
+            }
+            Ok(None) => break,
+            Err(error) => {
+                let cleanup = live
+                    .terminate()
+                    .err()
+                    .map(|error| format!("; {error}"))
+                    .unwrap_or_default();
+                let _ = app.emit(
+                    STDERR_EVENT,
+                    HarnessLine {
+                        session_id: session_id.into(),
+                        line: format!("{error}{cleanup}"),
+                    },
+                );
+                break;
+            }
+        }
+    }
 }
 
 /// Off the main thread: `kill_all` waits for the children to die before it
@@ -684,6 +809,18 @@ pub async fn harness_exec(
         return Err("harness_exec: unsupported arguments".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
+        if let Some(location) = cwd
+            .as_deref()
+            .map(crate::wsl::location)
+            .transpose()?
+            .flatten()
+        {
+            return crate::wsl::request(
+                &location,
+                "agent_exec",
+                serde_json::json!({"command":command,"args":args}),
+            );
+        }
         if !is_resolved_harness_binary(&command) {
             return Err("harness_exec: not a resolved harness CLI".to_string());
         }
@@ -2048,6 +2185,7 @@ mod tests {
         let stdin = child.stdin.take().expect("test child stdin");
         (
             Arc::new(LiveChild {
+                linux: None,
                 stdin: Mutex::new(stdin),
                 pid,
             }),
@@ -2058,6 +2196,25 @@ mod tests {
     fn reap(mut child: std::process::Child) {
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn agent_lines_are_bounded_without_splitting_protocol_messages() {
+        let mut reader = std::io::Cursor::new(b"one\r\ntwo\nlast");
+        assert_eq!(
+            bounded_line(&mut reader, 5).unwrap().as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            bounded_line(&mut reader, 5).unwrap().as_deref(),
+            Some("two")
+        );
+        assert_eq!(
+            bounded_line(&mut reader, 5).unwrap().as_deref(),
+            Some("last")
+        );
+        assert!(bounded_line(&mut reader, 5).unwrap().is_none());
+        assert!(bounded_line(&mut std::io::Cursor::new(b"no newline and too large"), 5).is_err());
     }
 
     #[test]
@@ -2107,6 +2264,23 @@ mod tests {
         assert!(host.spawn_stamp_current("s1", epoch, kill_all));
         host.kill_session("s1");
         assert!(!host.spawn_stamp_current("s1", epoch, kill_all));
+    }
+
+    #[test]
+    fn delayed_cancellation_never_removes_a_replacement_process() {
+        let host = HarnessHost::new();
+        let (epoch, all, _) = host.begin_spawn("same");
+        let (old, old_child) = live_child();
+        host.install_spawn("same".into(), epoch, all, old.clone());
+        let cancelled = host.kill_session("same").unwrap();
+        assert_eq!(host.get("same").unwrap().pid, old.pid);
+        let (epoch, all, _) = host.begin_spawn("same");
+        let (new, new_child) = live_child();
+        host.install_spawn("same".into(), epoch, all, new.clone());
+        assert!(host.remove_if_pid("same", cancelled.pid).is_none());
+        assert_eq!(host.get("same").unwrap().pid, new.pid);
+        reap(old_child);
+        reap(new_child);
     }
 
     #[test]
@@ -2177,6 +2351,7 @@ mod tests {
         let stdin = child.stdin.take().expect("grouped child stdin");
         (
             Arc::new(LiveChild {
+                linux: None,
                 stdin: Mutex::new(stdin),
                 pid,
             }),

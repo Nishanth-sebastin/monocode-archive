@@ -1,3 +1,4 @@
+import { wslLocation } from "../paths";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -47,9 +48,15 @@ function pushBounded(
 ) {
   const queued = map.get(sessionId) ?? [];
   queued.push(item);
-  if (queued.length > MAX_BUFFERED) {
-    queued.splice(0, queued.length - MAX_BUFFERED);
+  let retained = 0;
+  let start = queued.length;
+  while (start > 0 && queued.length - start < MAX_BUFFERED) {
+    const size = queued[start - 1].length * 2;
+    if (retained + size > 64 * 1024 * 1024) break;
+    retained += size;
+    start -= 1;
   }
+  if (start > 0) queued.splice(0, start);
   map.set(sessionId, queued);
 }
 
@@ -281,36 +288,52 @@ export function killAllChildren(): Promise<void> {
   return invoke("harness_kill_all");
 }
 
-export function resolveCursorBinary(): Promise<{ path: string }> {
-  return invoke("harness_resolve_cursor");
+export function resolveCursorBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "cursor" })
+    : invoke("harness_resolve_cursor");
 }
 
-export function resolveCodexBinary(): Promise<{ path: string }> {
-  return invoke("harness_resolve_codex");
+export function resolveCodexBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "codex" })
+    : invoke("harness_resolve_codex");
 }
 
-export function resolveOpenCodeBinary(): Promise<{ path: string }> {
-  return invoke("harness_resolve_opencode");
+export function resolveOpenCodeBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "opencode" })
+    : invoke("harness_resolve_opencode");
 }
 
-export function resolveClaudeBinary(): Promise<{ path: string }> {
-  return invoke("harness_resolve_claude");
+export function resolveClaudeBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "claude" })
+    : invoke("harness_resolve_claude");
 }
 
-export function resolvePiBinary(): Promise<{ path: string }> {
-  return invoke("harness_resolve_pi");
+export function resolvePiBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "pi" })
+    : invoke("harness_resolve_pi");
 }
 
-export function resolveOmpBinary(): Promise<{ path: string }> {
-  return invoke("harness_resolve_omp");
+export function resolveOmpBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "omp" })
+    : invoke("harness_resolve_omp");
 }
 
-export function resolveFxBinary(): Promise<{ path: string }> {
-  return invoke("harness_resolve_fx");
+export function resolveFxBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "fx" })
+    : invoke("harness_resolve_fx");
 }
 
-export function resolveGrokBinary(): Promise<{ path: string }> {
-  return invoke("harness_resolve_grok");
+export function resolveGrokBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "grok" })
+    : invoke("harness_resolve_grok");
 }
 
 export function freeHarnessPort(): Promise<number> {

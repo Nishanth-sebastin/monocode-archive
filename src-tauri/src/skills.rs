@@ -24,7 +24,15 @@ pub struct DiscoveredSkill {
 #[tauri::command(async)]
 pub fn list_skills(cwd: String) -> Result<Vec<DiscoveredSkill>, String> {
     let project = expand_home(&cwd);
-    let home = dirs_home().map(PathBuf::from);
+    let home = if let Some(location) = crate::wsl::location(&cwd)? {
+        Some(PathBuf::from(crate::wsl::path_request(
+            &location,
+            "home",
+            serde_json::json!({}),
+        )?))
+    } else {
+        dirs_home().map(PathBuf::from)
+    };
     Ok(list_skills_from(&project, home.as_deref()))
 }
 
@@ -36,7 +44,11 @@ pub(crate) fn list_skills_from(project: &Path, home: Option<&Path>) -> Vec<Disco
         if by_name.len() >= MAX_SKILLS {
             return;
         }
-        let key = std::fs::canonicalize(&root).unwrap_or(root.clone());
+        let key = if crate::wsl::path_location(&root).ok().flatten().is_some() {
+            root.clone()
+        } else {
+            std::fs::canonicalize(&root).unwrap_or(root.clone())
+        };
         if !seen_roots.insert(key) {
             return;
         }
@@ -72,8 +84,10 @@ pub(crate) fn list_skills_from(project: &Path, home: Option<&Path>) -> Vec<Disco
     if let Some(home) = home {
         add_root(home.join(".pi/agent/skills"), "user", "pi");
         add_root(home.join(".omp/agent/skills"), "user", "omp");
-        for (root, scope, namespace) in claude_plugin_skill_roots(home, project) {
-            add_namespaced_root(&mut by_name, root, scope, "claude", &namespace);
+        if crate::wsl::path_location(project).ok().flatten().is_none() {
+            for (root, scope, namespace) in claude_plugin_skill_roots(home, project) {
+                add_namespaced_root(&mut by_name, root, scope, "claude", &namespace);
+            }
         }
     }
 
@@ -268,6 +282,23 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
 }
 
 fn scan_root(root: &Path, scope: &str, source: &str) -> Vec<DiscoveredSkill> {
+    if let Ok(Some(location)) = crate::wsl::path_location(root) {
+        let entries: Vec<serde_json::Value> =
+            crate::wsl::files_request(&location, "skill_entries", serde_json::json!({}))
+                .unwrap_or_default();
+        return entries
+            .into_iter()
+            .filter_map(|entry| {
+                skill_from_text(
+                    entry["folder"].as_str()?,
+                    entry["text"].as_str()?,
+                    entry["path"].as_str()?.into(),
+                    scope,
+                    source,
+                )
+            })
+            .collect();
+    }
     let Ok(reader) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -291,23 +322,41 @@ fn scan_root(root: &Path, scope: &str, source: &str) -> Vec<DiscoveredSkill> {
         let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
-        let fallback = slug_name(folder);
-        if fallback.is_empty() {
-            continue;
+        if let Some(skill) = skill_from_text(
+            folder,
+            &text,
+            crate::fs::path_to_js(&skill_md),
+            scope,
+            source,
+        ) {
+            out.push(skill);
         }
-        let (name, description) = parse_frontmatter(&text, &fallback);
-        if name.is_empty() {
-            continue;
-        }
-        out.push(DiscoveredSkill {
-            name,
-            description,
-            path: crate::fs::path_to_js(&skill_md),
-            scope: scope.to_string(),
-            source: source.to_string(),
-        });
     }
     out
+}
+
+fn skill_from_text(
+    folder: &str,
+    text: &str,
+    path: String,
+    scope: &str,
+    source: &str,
+) -> Option<DiscoveredSkill> {
+    let fallback = slug_name(folder);
+    if fallback.is_empty() {
+        return None;
+    }
+    let (name, description) = parse_frontmatter(text, &fallback);
+    if name.is_empty() {
+        return None;
+    }
+    Some(DiscoveredSkill {
+        name,
+        description,
+        path,
+        scope: scope.into(),
+        source: source.into(),
+    })
 }
 
 fn skill_md_path(dir: &Path) -> Option<PathBuf> {

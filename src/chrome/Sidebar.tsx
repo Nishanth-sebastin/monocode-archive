@@ -1809,6 +1809,7 @@ function SidebarProjectPicker({
                   <Plus className="size-4 shrink-0" strokeWidth={1.75} />
                   <span>New project</span>
                 </button>
+
               </div>
             ) : null}
           </Popover>

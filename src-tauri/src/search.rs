@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +56,7 @@ fn search_project_sync(options: &SearchOptions) -> Result<SearchResult, String> 
     }
 
     let root = expand_home(&options.cwd);
-    if !root.is_dir() {
+    if crate::wsl::path_location(&root)?.is_none() && !root.is_dir() {
         return Err(format!("{}: Not a directory", root.display()));
     }
 
@@ -69,41 +68,20 @@ fn search_project_sync(options: &SearchOptions) -> Result<SearchResult, String> 
 }
 
 fn git_grep(root: &Path, options: &SearchOptions, query: &str) -> Option<SearchResult> {
-    let mut cmd = Command::new("git");
-    crate::hide_window_console(&mut cmd);
-    cmd.arg("-C").arg(root).arg("grep").arg("-z").arg("-n");
+    let mut args = vec!["grep", "-z", "-n"];
     if !options.case_sensitive {
-        cmd.arg("-i");
+        args.push("-i");
     }
     if options.whole_word {
-        cmd.arg("-w");
+        args.push("-w");
     }
-    if options.regex {
-        cmd.arg("-E");
-    } else {
-        cmd.arg("-F");
-    }
-    cmd.arg("-e").arg(query);
-
-    // Terminate option parsing so an include glob starting with `-` is treated
-    // as a pathspec instead of a git grep flag.
-    cmd.arg("--");
-    for spec in pathspecs(&options.include, &options.exclude) {
-        cmd.arg(spec);
-    }
-
-    let output = cmd.output().ok()?;
-    if !output.status.success() && !output.stdout.is_empty() {
-        // git grep exits 1 when there are no matches.
-        if output.status.code() != Some(1) {
-            return None;
-        }
-    }
-    if !output.status.success() && output.stdout.is_empty() {
-        return Some(SearchResult {
-            matches: Vec::new(),
-            truncated: false,
-        });
+    args.push(if options.regex { "-E" } else { "-F" });
+    args.extend(["-e", query, "--"]); // Upstream f8e900f: include tokens are pathspecs.
+    let specs = pathspecs(&options.include, &options.exclude);
+    args.extend(specs.iter().map(String::as_str));
+    let output = crate::fs::git_command_output(root, &args).ok()?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return None;
     }
 
     let root = root.to_path_buf();
@@ -138,7 +116,7 @@ fn git_grep(root: &Path, options: &SearchOptions, query: &str) -> Option<SearchR
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(1);
         let preview = String::from_utf8_lossy(preview_bytes).to_string();
-        let path = crate::fs::path_to_js(&root.join(&relative));
+        let path = crate::fs::path_to_js(&crate::fs::host_path(&root, &relative));
         let column = match_column(
             &preview,
             query,
@@ -176,6 +154,7 @@ fn scan_files(root: &Path, options: &SearchOptions, query: &str) -> Result<Searc
     }
 
     let files = list_project_files_sync(&root.to_string_lossy())?;
+    let remote = crate::wsl::path_location(root)?.is_some();
     let include = glob_tokens(&options.include);
     let exclude = glob_tokens(&options.exclude);
     let needle = if options.case_sensitive {
@@ -187,44 +166,71 @@ fn scan_files(root: &Path, options: &SearchOptions, query: &str) -> Result<Searc
     let mut matches = Vec::new();
     let mut truncated = false;
 
-    'files: for file in files {
-        if !matches_pathspec(&file.relative, &include, &exclude) {
-            continue;
+    let files = files
+        .into_iter()
+        .filter(|file| matches_pathspec(&file.relative, &include, &exclude))
+        .collect::<Vec<_>>();
+    'files: for batch in files.chunks(16) {
+        let mut remote_bytes = std::collections::HashMap::new();
+        if remote {
+            use base64::Engine;
+            let paths = batch
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>();
+            let results: Vec<serde_json::Value> = crate::wsl::file_batches(&paths, "search_read")?;
+            for result in results {
+                if let (Some(path), Some(data)) = (result["path"].as_str(), result["data"].as_str())
+                {
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
+                        remote_bytes.insert(path.to_owned(), bytes);
+                    }
+                }
+            }
         }
-        let path = PathBuf::from(&file.path);
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() || meta.len() > MAX_FILE_BYTES.min(MAX_TEXT_FILE_BYTES) {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        if bytes.contains(&0) {
-            continue;
-        }
-        let Ok(content) = String::from_utf8(bytes) else {
-            continue;
-        };
+        for file in batch {
+            let bytes = if remote {
+                let Some(bytes) = remote_bytes.remove(&file.path) else {
+                    continue;
+                };
+                bytes
+            } else {
+                let path = PathBuf::from(&file.path);
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                if !meta.is_file() || meta.len() > MAX_FILE_BYTES.min(MAX_TEXT_FILE_BYTES) {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                bytes
+            };
+            if bytes.contains(&0) {
+                continue;
+            }
+            let Ok(content) = String::from_utf8(bytes) else {
+                continue;
+            };
 
-        for (index, line) in content.lines().enumerate() {
-            if let Some(column) = find_on_line(line, &needle, options) {
-                matches.push(SearchMatch {
-                    path: file.path.clone(),
-                    relative: file.relative.clone(),
-                    line: (index + 1) as u32,
-                    column,
-                    preview: line.to_string(),
-                });
-                if matches.len() >= MAX_MATCHES {
-                    truncated = true;
-                    break 'files;
+            for (index, line) in content.lines().enumerate() {
+                if let Some(column) = find_on_line(line, &needle, options) {
+                    matches.push(SearchMatch {
+                        path: file.path.clone(),
+                        relative: file.relative.clone(),
+                        line: (index + 1) as u32,
+                        column,
+                        preview: line.to_string(),
+                    });
+                    if matches.len() >= MAX_MATCHES {
+                        truncated = true;
+                        break 'files;
+                    }
                 }
             }
         }
     }
-
     Ok(SearchResult { matches, truncated })
 }
 
@@ -330,6 +336,7 @@ fn pathspecs(include: &Option<String>, exclude: &Option<String>) -> Vec<String> 
 mod tests {
     use super::*;
     use std::io::ErrorKind;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -1,3 +1,4 @@
+import { WslBadge } from "./WslBadge";
 import {
   Archive,
   Check,
@@ -50,7 +51,7 @@ import {
 } from "../lib/appearance";
 import { basename, revealPath, type GitDiffStats } from "../lib/fs";
 import { IS_MAC, IS_WIN, MOD } from "../lib/platform";
-import { pathKey, projectKey, projectName } from "../lib/paths";
+import { pathKey, projectKey, projectName, wslLocation } from "../lib/paths";
 import {
   collectRailProjects,
   loadPinnedProjects,
@@ -1012,7 +1013,7 @@ function ProjectFamilyCard(
                 <button
                   type="button"
                   disabled={child.missing || !!child.prunable}
-                  title={`${child.path}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode\nLocal${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
+                  title={`${child.path}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode\n${wslLocation(child.path) ? `WSL · ${wslLocation(child.path)!.distribution}` : "Local"}${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
                   aria-current={active ? "true" : undefined}
                   className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 pr-6 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
                   onClick={() => onSelect(child.path)}
@@ -1186,6 +1187,7 @@ function ProjectCard({
       {showEnd ? (
         <div className="pointer-events-none absolute inset-x-2 bottom-0 z-20 h-0.5 rounded-full bg-accent" />
       ) : null}
+      <WslBadge cwd={item.path} />
       {worktreeControls && (
         <button
           type="button"
@@ -1237,6 +1239,7 @@ function ProjectCard({
           </span>
         ) : null}
       </button>
+      <WslBadge cwd={item.path} />
       {worktreeControls && (
         <button
           type="button"

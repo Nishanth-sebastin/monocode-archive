@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { slash } from "./paths";
+import { slash, wslLocation } from "./paths";
 
 export type FsEntry = {
   name: string;
@@ -333,15 +333,16 @@ export function revealPath(path: string): Promise<void> {
   return invoke<void>("reveal_path", { path });
 }
 
-export function homeDir(): Promise<string> {
-  return invoke<string>("home_dir");
+export function homeDir(cwd?: string): Promise<string> {
+  return cwd && wslLocation(cwd) ? invoke<string>("home_dir", { cwd }) : invoke<string>("home_dir");
 }
 
-export async function pickFolder(title = "Open project"): Promise<string | null> {
+export async function pickFolder(title = "Open project", defaultPath?: string): Promise<string | null> {
   const selected = await open({
     directory: true,
     multiple: false,
     title,
+    defaultPath,
   });
   return typeof selected === "string" && selected ? slash(selected) : null;
 }

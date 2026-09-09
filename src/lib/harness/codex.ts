@@ -66,7 +66,7 @@ const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
 const cancelledThreads = new Set<string>();
 
-let resolveCodexBinaryImpl: () => Promise<{ path: string }> =
+let resolveCodexBinaryImpl: (cwd?: string) => Promise<{ path: string }> =
   resolveCodexBinary;
 
 /** Test seam. */
@@ -241,7 +241,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     resumeByThread.delete(input.sessionId);
   }
 
-  const { path } = await resolveCodexBinaryImpl();
+  const { path } = await resolveCodexBinaryImpl(input.cwd);
   const liveRef: { current: Live | null } = { current: null };
 
   const rpc = new JsonRpcClient(

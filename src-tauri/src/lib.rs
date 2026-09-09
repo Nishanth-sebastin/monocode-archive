@@ -1,3 +1,5 @@
+mod bounded_process;
+mod wsl;
 use tauri::Manager;
 
 mod chat_background;
@@ -37,11 +39,14 @@ fn default_cwd() -> String {
         .unwrap_or_else(|| "~".into())
 }
 
-#[tauri::command]
-fn home_dir() -> String {
-    dirs_home()
+#[tauri::command(async)]
+fn home_dir(cwd: Option<String>) -> Result<String, String> {
+    if let Some(location) = cwd.as_deref().map(wsl::location).transpose()?.flatten() {
+        return wsl::path_request(&location, "home", serde_json::json!({}));
+    }
+    Ok(dirs_home()
         .map(|home| fs::path_to_js(std::path::Path::new(&home)))
-        .unwrap_or_else(|| "~".into())
+        .unwrap_or_else(|| "~".into()))
 }
 
 pub(crate) struct PasswdIdentity {
@@ -195,6 +200,10 @@ pub fn run() {
             menu::dispatch(app, event.id().as_ref());
         })
         .invoke_handler(tauri::generate_handler![
+            wsl::wsl_distributions,
+            wsl::wsl_connect,
+            wsl::wsl_resolve_harness,
+            wsl::wsl_connected,
             default_cwd,
             home_dir,
             notifications::notification_permission,

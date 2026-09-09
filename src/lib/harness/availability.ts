@@ -1,3 +1,4 @@
+import { wslLocation } from "../paths";
 import type { HarnessId } from "../session";
 import { HARNESSES } from "../session";
 import {
@@ -32,7 +33,7 @@ const CLI: Record<HarnessId, { name: string; install?: string }> = {
   fx: { name: "fx CLI", install: "curl -fsSL https://fx.sh/setup.sh | bash" },
 };
 
-let availability: HarnessAvailability = {
+const emptyAvailability: HarnessAvailability = {
   claude: false,
   codex: false,
   cursor: false,
@@ -42,9 +43,18 @@ let availability: HarnessAvailability = {
   omp: false,
   fx: false,
 };
+type Probe = {
+  availability: HarnessAvailability;
+  probedAt: number;
+  inflight: Promise<void> | null;
+};
+const probes = new Map<string, Probe>();
+function hostKey(cwd?: string): string {
+  return cwd && wslLocation(cwd)
+    ? `wsl:${wslLocation(cwd)!.distribution.toLowerCase()}`
+    : "native";
+}
 let version = 0;
-let inflight: Promise<void> | null = null;
-let probedAt = 0;
 const listeners = new Set<() => void>();
 
 /**
@@ -60,7 +70,9 @@ function emit() {
   for (const listener of listeners) listener();
 }
 
-export function subscribeHarnessAvailability(onStoreChange: () => void): () => void {
+export function subscribeHarnessAvailability(
+  onStoreChange: () => void,
+): () => void {
   listeners.add(onStoreChange);
   return () => {
     listeners.delete(onStoreChange);
@@ -71,106 +83,86 @@ export function getHarnessAvailabilitySnapshot(): number {
   return version;
 }
 
-export function hasProbedHarnessAvailability(): boolean {
-  return probedAt > 0;
+export function hasProbedHarnessAvailability(cwd?: string): boolean {
+  return (probes.get(hostKey(cwd))?.probedAt ?? 0) > 0;
 }
 
-export function isHarnessAvailable(id: HarnessId): boolean {
-  return availability[id];
+export function isHarnessAvailable(id: HarnessId, cwd?: string): boolean {
+  return probes.get(hostKey(cwd))?.availability[id] ?? false;
 }
 
-export function harnessUnavailableHint(id: HarnessId): string {
+export function harnessUnavailableHint(id: HarnessId, cwd?: string): string {
+  if (cwd && wslLocation(cwd)) {
+    if (id === "opencode") return "OpenCode HTTP is not supported in WSL yet. Choose a stdio agent such as Claude or Codex.";
+    return `${CLI[id].name} is unavailable in ${wslLocation(cwd)!.distribution}. Install its Linux CLI, reconnect WSL and retry.`;
+  }
   const { name, install } = CLI[id];
   const how = install ? ` (\`${install}\`)` : "";
   return `${name} not found${how}. Install it, or restart MonoCode if it is already installed.`;
 }
 
-export function probeHarnessAvailability(
-  options?: { force?: boolean },
-): Promise<void> {
-  if (inflight) return inflight;
-  if (!options?.force && probedAt > 0 && Date.now() - probedAt < PROBE_TTL_MS) {
-    return Promise.resolve();
+export function probeHarnessAvailability(options?: {
+  force?: boolean;
+  cwd?: string;
+}): Promise<void> {
+  const key = hostKey(options?.cwd);
+  let probe = probes.get(key);
+  if (!probe) {
+    // One native host plus four WSL distributions; discard only cached probes.
+    if (probes.size >= 5) {
+      const oldest = [...probes]
+        .filter(([host, value]) => host !== "native" && !value.inflight)
+        .sort((a, b) => a[1].probedAt - b[1].probedAt)[0];
+      if (!oldest) return Promise.resolve();
+      probes.delete(oldest[0]);
+    }
+    probe = {
+      availability: { ...emptyAvailability },
+      probedAt: 0,
+      inflight: null,
+    };
+    probes.set(key, probe);
   }
-  inflight = Promise.all(
+  if (probe.inflight) return probe.inflight;
+  if (
+    !options?.force &&
+    probe.probedAt > 0 &&
+    Date.now() - probe.probedAt < PROBE_TTL_MS
+  )
+    return Promise.resolve();
+  const current = probe;
+  const resolvers = {
+    cursor: resolveCursorBinary,
+    claude: resolveClaudeBinary,
+    codex: resolveCodexBinary,
+    opencode: resolveOpenCodeBinary,
+    pi: resolvePiBinary,
+    omp: resolveOmpBinary,
+    fx: resolveFxBinary,
+    grok: resolveGrokBinary,
+  };
+  current.inflight = Promise.all(
     HARNESSES.map(async (id) => {
       if (!isLiveHarness(id)) return [id, false] as const;
-      if (id === "cursor") {
-        try {
-          await resolveCursorBinary();
-          return [id, true] as const;
-        } catch {
-          return [id, false] as const;
-        }
+      try {
+        if (options?.cwd) await resolvers[id](options.cwd);
+        else await resolvers[id]();
+        return [id, true] as const;
+      } catch {
+        return [id, false] as const;
       }
-      if (id === "claude") {
-        try {
-          await resolveClaudeBinary();
-          return [id, true] as const;
-        } catch {
-          return [id, false] as const;
-        }
-      }
-      if (id === "codex") {
-        try {
-          await resolveCodexBinary();
-          return [id, true] as const;
-        } catch {
-          return [id, false] as const;
-        }
-      }
-      if (id === "opencode") {
-        try {
-          await resolveOpenCodeBinary();
-          return [id, true] as const;
-        } catch {
-          return [id, false] as const;
-        }
-      }
-      if (id === "pi") {
-        try {
-          await resolvePiBinary();
-          return [id, true] as const;
-        } catch {
-          return [id, false] as const;
-        }
-      }
-      if (id === "omp") {
-        try {
-          await resolveOmpBinary();
-          return [id, true] as const;
-        } catch {
-          return [id, false] as const;
-        }
-      }
-      if (id === "fx") {
-        try {
-          await resolveFxBinary();
-          return [id, true] as const;
-        } catch {
-          return [id, false] as const;
-        }
-      }
-      if (id === "grok") {
-        try {
-          await resolveGrokBinary();
-          return [id, true] as const;
-        } catch {
-          return [id, false] as const;
-        }
-      }
-      return [id, false] as const;
     }),
   )
     .then((entries) => {
-      const next = { ...availability };
-      for (const [id, ok] of entries) next[id] = ok;
-      availability = next;
+      current.availability = {
+        ...emptyAvailability,
+        ...Object.fromEntries(entries),
+      };
       emit();
     })
     .finally(() => {
-      probedAt = Date.now();
-      inflight = null;
+      current.probedAt = Date.now();
+      current.inflight = null;
     });
-  return inflight;
+  return current.inflight;
 }

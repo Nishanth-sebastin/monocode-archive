@@ -40,6 +40,19 @@ pub struct Worktree {
 // Drain both pipes while retaining at most 1 MiB; hooks are disabled for these
 // explicit local operations. A timeout is uncertain, so callers always read back.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+    if let Some(location) = crate::wsl::path_location(root)? {
+        let mut options = vec!["-c", "core.hooksPath=/dev/null"];
+        options.extend_from_slice(args);
+        let output = crate::wsl::git(&location, &options, None)?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+        }
+        if output.stdout.len() > 1024 * 1024 {
+            return Err("Git output exceeds 1 MiB".into());
+        }
+        return String::from_utf8(output.stdout)
+            .map_err(|_| "Git returned a non-UTF-8 path".into());
+    }
     let mut child = git_cmd()
         .arg("-C")
         .arg(path_to_js(root))
@@ -96,6 +109,7 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn inventory(root: &Path) -> Result<Vec<Worktree>, String> {
+    let location = crate::wsl::path_location(root)?;
     let text = git(root, &["worktree", "list", "--porcelain", "-z"])?;
     let mut result = Vec::new();
     let mut entry = Worktree::default();
@@ -103,7 +117,10 @@ fn inventory(root: &Path) -> Result<Vec<Worktree>, String> {
         if field.is_empty() {
             if !entry.path.is_empty() {
                 entry.main = result.is_empty();
-                entry.missing = !Path::new(&entry.path).is_dir();
+                entry.missing = location.is_none() && !Path::new(&entry.path).is_dir();
+                if let Some(location) = &location {
+                    entry.path = location.with_path(&entry.path)?.identity();
+                }
                 result.push(entry);
                 entry = Worktree::default();
             }
@@ -119,6 +136,21 @@ fn inventory(root: &Path) -> Result<Vec<Worktree>, String> {
             entry.prunable = Some(field.to_owned());
         }
     }
+    if location.is_some() {
+        let paths = result
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        let metadata: Vec<serde_json::Value> = crate::wsl::file_batches(&paths, "inspect")?;
+        let directories = metadata
+            .iter()
+            .filter(|item| item["isDir"] == true)
+            .filter_map(|item| item["path"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for entry in &mut result {
+            entry.missing = !directories.contains(entry.path.as_str());
+        }
+    }
     Ok(result)
 }
 
@@ -130,10 +162,35 @@ pub(super) fn branch_paths(root: &Path) -> Result<HashMap<String, String>, Strin
 }
 
 fn canonical(path: &str) -> Result<String, String> {
+    if let Some(location) = crate::wsl::location(path)? {
+        return crate::wsl::path_request(&location, "canonical", serde_json::json!({}));
+    }
     expand_home(path)
         .canonicalize()
         .map(|p| path_to_js(&p))
         .map_err(|e| e.to_string())
+}
+
+fn qualify(root: &Path, path: &str) -> Result<String, String> {
+    match crate::wsl::path_location(root)? {
+        Some(location) => Ok(location.with_path(path)?.identity()),
+        None => Ok(path.into()),
+    }
+}
+
+fn git_path(root: &Path, path: &str) -> Result<String, String> {
+    match (
+        crate::wsl::path_location(root)?,
+        crate::wsl::location(path)?,
+    ) {
+        (Some(root), Some(target))
+            if root.distribution.eq_ignore_ascii_case(&target.distribution) =>
+        {
+            Ok(target.path)
+        }
+        (None, None) => Ok(path.into()),
+        _ => Err("Repository and worktree must be on the same execution host".into()),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -154,8 +211,8 @@ pub fn git_repository_family(cwd: String) -> Result<RepositoryFamily, String> {
     )?;
     let checkout = git(&root, &["rev-parse", "--show-toplevel"])?;
     Ok(RepositoryFamily {
-        common_dir: canonical(common.trim_end_matches(['\r', '\n']))?,
-        checkout: canonical(checkout.trim_end_matches(['\r', '\n']))?,
+        common_dir: canonical(&qualify(&root, common.trim_end_matches(['\r', '\n']))?)?,
+        checkout: canonical(&qualify(&root, checkout.trim_end_matches(['\r', '\n']))?)?,
         worktrees: inventory(&root)?,
     })
 }
@@ -251,20 +308,28 @@ fn create(
         return Err("Invalid branch name".into());
     }
     git(root, &["check-ref-format", &format!("refs/heads/{branch}")])?;
-    let target = expand_home(path);
-    if !target.is_absolute() || target.exists() {
-        return Err("Choose a new absolute worktree path; existing paths are preserved.".into());
-    }
-    let parent = target
-        .parent()
-        .ok_or("Missing parent directory")?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let target = parent.join(target.file_name().ok_or("Missing directory name")?);
-    let target = path_to_js(&target);
+    git_path(root, path)?;
+    let target = if let Some(location) = crate::wsl::location(path)? {
+        crate::wsl::path_request(&location, "new_path", serde_json::json!({}))?
+    } else {
+        let target = expand_home(path);
+        if !target.is_absolute() || target.exists() {
+            return Err(
+                "Choose a new absolute worktree path; existing paths are preserved.".into(),
+            );
+        }
+        let parent = target
+            .parent()
+            .ok_or("Missing parent directory")?
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let target = parent.join(target.file_name().ok_or("Missing directory name")?);
+        path_to_js(&target)
+    };
+    let linux_target = git_path(root, &target)?;
     let result = git(
         root,
-        &["worktree", "add", "-b", branch, "--", &target, commit],
+        &["worktree", "add", "-b", branch, "--", &linux_target, commit],
     );
     let entries = inventory(root)?;
     if entries.iter().any(|e| {
@@ -294,7 +359,7 @@ pub fn git_worktree_create(
     create(&expand_home(&cwd), &base, &commit, &branch, &path)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovalPreview {
     token: String,
@@ -323,8 +388,11 @@ fn removal_entry(root: &Path, path: &str) -> Result<(String, Worktree), String> 
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     let target_root = git(Path::new(path), &["rev-parse", "--show-toplevel"])?;
-    if canonical(target_common.trim_end_matches(['\r', '\n']))? != family.common_dir
-        || canonical(target_root.trim_end_matches(['\r', '\n']))? != path
+    if canonical(&qualify(
+        root,
+        target_common.trim_end_matches(['\r', '\n']),
+    )?)? != family.common_dir
+        || canonical(&qualify(root, target_root.trim_end_matches(['\r', '\n']))?)? != path
     {
         return Err("Worktree identity changed; refresh and review again".into());
     }
@@ -347,6 +415,16 @@ fn removal_preview(root: &Path, path: &str, include_files: bool) -> Result<Remov
         &["diff", "--cached", "--no-ext-diff", "--binary", "HEAD"],
     )?
     .hash(&mut digest);
+    if let Some(location) = crate::wsl::location(path)? {
+        let mut review: RemovalPreview = crate::wsl::request(
+            &location,
+            "worktree_review",
+            serde_json::json!({"includeFiles": include_files}),
+        )?;
+        review.token.hash(&mut digest);
+        review.token = format!("{:016x}", digest.finish());
+        return Ok(review);
+    }
     let start = Instant::now();
     let mut pending = vec![std::path::PathBuf::from(path)];
     let mut count = 0;
@@ -479,10 +557,11 @@ fn remove_reviewed(
             "Worktree has modified, untracked or ignored files; all files are preserved.".into(),
         );
     }
+    let target = git_path(root, path)?;
     let result = if reviewed.is_some() {
-        git(root, &["worktree", "remove", "--force", "--", path])
+        git(root, &["worktree", "remove", "--force", "--", &target])
     } else {
-        git(root, &["worktree", "remove", "--", path])
+        git(root, &["worktree", "remove", "--", &target])
     };
     if !inventory(root)?.iter().any(|e| e.path == path) {
         return Ok(());
@@ -559,11 +638,52 @@ pub fn git_worktree_safety(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(unix)]
+    pub(crate) fn verify_wsl_force_removal(root: &str, child: &str, head: &str) {
+        let location = crate::wsl::location(child).unwrap().unwrap();
+        let file = location
+            .with_path(&format!("{}/dirty ż.txt", location.path))
+            .unwrap();
+        let write = |text: &str| {
+            crate::wsl::request::<serde_json::Value>(
+                &file,
+                "write_text",
+                serde_json::json!({"content": text}),
+            )
+            .unwrap()
+        };
+        write("first");
+        assert!(remove(Path::new(root), child, head).is_err());
+        let before = removal_preview(Path::new(root), child, false).unwrap();
+        assert!(before.files.is_empty());
+        let details = removal_preview(Path::new(root), child, true).unwrap();
+        assert_eq!(before.token, details.token);
+        assert!(details.files.contains(&"dirty ż.txt".into()));
+        write("changed");
+        assert!(
+            remove_reviewed(Path::new(root), child, head, Some(&before.token))
+                .unwrap_err()
+                .contains("changed")
+        );
+        let reviewed = removal_preview(Path::new(root), child, false).unwrap();
+        remove_reviewed(Path::new(root), child, head, Some(&reviewed.token)).unwrap();
+        assert!(!inventory(Path::new(root))
+            .unwrap()
+            .iter()
+            .any(|entry| entry.path == child));
+        assert_eq!(
+            git(Path::new(root), &["rev-parse", "refs/heads/child-branch"])
+                .unwrap()
+                .trim(),
+            head
+        );
+    }
 
     #[test]
     fn activity_query_uses_index_without_scanning_or_sorting() {

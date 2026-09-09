@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { forgetRemovedWorktree, loadRecents } from "../lib/recents";
-import { pathKey } from "../lib/paths";
+import { pathKey, prettyCwd, wslLocation, wslPath } from "../lib/paths";
 import {
   getVerifiedFamilies,
   publishRepositoryFamilies,
@@ -58,6 +58,8 @@ export function WorktreePanel({
   initialPath?: string;
   activeCwd?: string;
 }) {
+  const location = wslLocation(cwd);
+  const rootPath = location?.path ?? cwd;
   const [entries, setEntries] = useState<Worktree[]>(() =>
     (getVerifiedFamilies().get(pathKey(cwd))?.worktrees ?? []).map((entry) => ({
       ...entry,
@@ -177,7 +179,7 @@ export function WorktreePanel({
       )
         suggestion = `work-${n}`;
       setBranch(suggestion);
-      setPath(`${cwd}-${suggestion}`);
+      setPath(`${rootPath}-${suggestion}`);
     }
   };
   const pendingDefaults = useRef(false);
@@ -221,7 +223,7 @@ export function WorktreePanel({
     name.length > 0 && !refs.some((ref) => ref.name === `refs/heads/${name}`);
   const prepareCreate = () => {
     setBranch(name);
-    setPath(`${cwd}-${name.replace(/\//g, "-")}`);
+    setPath(`${rootPath}-${name.replace(/\//g, "-")}`);
     const current = entries.find((entry) => entry.path === cwd)?.branch;
     if (!base && current) setBase(current);
     setCreating(true);
@@ -252,7 +254,7 @@ export function WorktreePanel({
         base,
         commit: selected.commit,
         branch,
-        path,
+        path: location ? wslPath(location.distribution, path) : path,
       });
       notifyGitChanged();
     }).then(() => {
@@ -287,7 +289,7 @@ export function WorktreePanel({
             {confirmation.entry.head.slice(0, 10)}
           </p>
           <p className="break-all text-[11px] text-content/50">
-            {confirmation.entry.path}
+            {prettyCwd(confirmation.entry.path)}
           </p>
           <p className="text-[11px] leading-4 text-content/60">
             {confirmation.action === "remove"
@@ -404,9 +406,9 @@ export function WorktreePanel({
           </p>
           <p
             className="truncate text-[11px] text-content/70"
-            title={detail.path}
+            title={prettyCwd(detail.path)}
           >
-            {detail.path}
+            {prettyCwd(detail.path)}
           </p>
           <p
             title="Latest recorded conversation update or project open in MonoCode. External activity is not tracked."
@@ -433,7 +435,7 @@ export function WorktreePanel({
                 ? "recovery"
                 : "details"}
             </summary>
-            <p className="break-all py-1">{detail.path}</p>
+            <p className="break-all py-1">{prettyCwd(detail.path)}</p>
             <p className="font-mono">{detail.head}</p>
             {(detail.missing || detail.prunable) && (
               <p className="pt-1">
@@ -597,7 +599,10 @@ export function WorktreePanel({
             </button>
             <span>New branch and worktree</span>
           </div>
-          <p className="truncate px-2.5 py-2 text-content/50" title={cwd}>
+          <p
+            className="truncate px-2.5 py-2 text-content/50"
+            title={prettyCwd(cwd)}
+          >
             Repository · {cwd.split("/").pop()}
           </p>
           <div className="space-y-0.5 px-1.5 py-1.5">
@@ -637,8 +642,13 @@ export function WorktreePanel({
                 }}
                 onChange={(e) => {
                   setBranch(e.target.value);
-                  if (!path || path === `${cwd}-${branch.replace(/\//g, "-")}`)
-                    setPath(`${cwd}-${e.target.value.replace(/\//g, "-")}`);
+                  if (
+                    !path ||
+                    path === `${rootPath}-${branch.replace(/\//g, "-")}`
+                  )
+                    setPath(
+                      `${rootPath}-${e.target.value.replace(/\//g, "-")}`,
+                    );
                 }}
               />
             </label>
@@ -743,7 +753,7 @@ export function WorktreePanel({
                 <button
                   type="button"
                   disabled={busy || entry.missing || !!entry.prunable}
-                  title={`${entry.path} · Local${entry.users.length ? ` · ${entry.users.length} conversations` : ""}`}
+                  title={`${prettyCwd(entry.path)} · ${location ? `WSL · ${location.distribution}` : "Local"}${entry.users.length ? ` · ${entry.users.length} conversations` : ""}`}
                   className={`${rowClass} ${index === activeIndex ? "bg-content/10" : ""}`}
                   onMouseEnter={() => setActiveIndex(index)}
                   onClick={() => openEntry(entry)}

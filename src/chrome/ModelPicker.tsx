@@ -1,3 +1,4 @@
+import { wslLocation } from "../lib/paths";
 import { ChevronDown, Search, Star } from "./icons";
 import {
   useEffect,
@@ -50,6 +51,7 @@ type Props = {
   harness: HarnessId;
   model: string;
   hotkeys?: boolean;
+  cwd?: string;
   onChange: (harness: HarnessId, model: string) => void;
   onClose?: () => void;
 };
@@ -62,6 +64,7 @@ export function ModelPicker({
   harness,
   model,
   hotkeys = false,
+  cwd,
   onChange,
   onClose,
 }: Props) {
@@ -97,8 +100,8 @@ export function ModelPicker({
   const shownInPicker = (id: HarnessId) =>
     showProviderInModelPicker(
       id,
-      isHarnessAvailable(id),
-      hasProbedHarnessAvailability(),
+      isHarnessAvailable(id, cwd),
+      hasProbedHarnessAvailability(cwd),
     );
   const pickerHarnesses = HARNESSES.filter(shownInPicker);
   const visibleTab = coerceModelPickerTab(tab, shownInPicker);
@@ -136,15 +139,15 @@ export function ModelPicker({
 
   useEffect(() => {
     if (!open) return;
-    void probeHarnessAvailability();
+    void probeHarnessAvailability({ cwd });
     setTab(coerceModelPickerTab(loadModelPickerTab(), shownInPicker));
     setQuery("");
-  }, [open]);
+  }, [open, cwd]);
 
   useEffect(() => {
-    if (!open || visibleTab === "favorites") return;
+    if (!open || visibleTab === "favorites" || (cwd && wslLocation(cwd))) return;
     void refreshHarnessCatalogs([visibleTab]);
-  }, [open, visibleTab]);
+  }, [open, visibleTab, cwd]);
 
   useEffect(() => {
     const inBlockingUi = (target: EventTarget | null) => {
@@ -220,9 +223,9 @@ export function ModelPicker({
             .map((id) => findModel(id))
             .filter(
               (item): item is AgentModel =>
-                item != null && shownInPicker(item.harness),
+                item != null && shownInPicker(item.harness) && modelsFor(item.harness, cwd).some((model) => model.id === item.id),
             )
-        : modelsFor(visibleTab);
+        : modelsFor(visibleTab, cwd);
     if (!needle) return pool;
     return pool.filter((item) => {
       const hay =
@@ -232,6 +235,7 @@ export function ModelPicker({
     // Catalog, install probes, and picker-visibility all feed this list:
     // catalogs land after mount, and hiding a provider must drop its favorites.
   }, [
+    cwd,
     visibleTab,
     query,
     favorites,
@@ -253,7 +257,7 @@ export function ModelPicker({
   }, [visible.length]);
 
   const pick = (item: AgentModel) => {
-    if (!isHarnessAvailable(item.harness)) return;
+    if (!isHarnessAvailable(item.harness, cwd)) return;
     onChange(item.harness, item.id);
     dismiss(true);
   };
@@ -282,14 +286,14 @@ export function ModelPicker({
     if (e.key === "Enter") {
       e.preventDefault();
       const item = visible[active];
-      if (item && isHarnessAvailable(item.harness)) pick(item);
+      if (item && isHarnessAvailable(item.harness, cwd)) pick(item);
       return;
     }
     const mod = e.metaKey || e.ctrlKey;
     if (mod && !e.altKey && !e.shiftKey && e.key >= "1" && e.key <= "9") {
       e.preventDefault();
       const item = visible[Number(e.key) - 1];
-      if (item && isHarnessAvailable(item.harness)) pick(item);
+      if (item && isHarnessAvailable(item.harness, cwd)) pick(item);
     }
   };
 
@@ -384,6 +388,7 @@ export function ModelPicker({
               </label>
             </div>
             <ModelList
+              cwd={cwd}
               models={visible}
               active={active}
               currentId={current.id}
@@ -392,8 +397,8 @@ export function ModelPicker({
                 visibleTab === "favorites" && !query.trim()
                   ? "No favorite models"
                   : visibleTab !== "favorites" &&
-                      !isHarnessAvailable(visibleTab)
-                    ? harnessUnavailableHint(visibleTab)
+                      !isHarnessAvailable(visibleTab, cwd)
+                    ? harnessUnavailableHint(visibleTab, cwd)
                     : visibleTab === "codex" && !query.trim()
                       ? "Loading Codex models…"
                       : "No matching models"
@@ -453,6 +458,7 @@ function ProviderTabButton({
 }
 
 function ModelList({
+  cwd,
   models,
   active,
   currentId,
@@ -462,6 +468,7 @@ function ModelList({
   onPick,
   onToggleFavorite,
 }: {
+  cwd?: string;
   models: AgentModel[];
   active: number;
   currentId: string;
@@ -514,7 +521,7 @@ function ModelList({
         const selected = item.id === currentId;
         const highlighted = index === active;
         const favorited = favorites.includes(item.id);
-        const disabled = !isHarnessAvailable(item.harness);
+        const disabled = !isHarnessAvailable(item.harness, cwd);
         const shortcut = index < 9 && !disabled ? `${MOD}${index + 1}` : null;
         return (
           <div
@@ -536,7 +543,7 @@ function ModelList({
               aria-disabled={disabled}
               disabled={disabled}
               title={
-                disabled ? harnessUnavailableHint(item.harness) : undefined
+                disabled ? harnessUnavailableHint(item.harness, cwd) : undefined
               }
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {

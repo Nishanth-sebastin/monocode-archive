@@ -1,3 +1,4 @@
+import { wslLocation } from "./paths";
 import { invoke } from "@tauri-apps/api/core";
 import { basename, pickFiles as pickFilePaths } from "./fs";
 import type { Attachment, AttachmentKind } from "./session";
@@ -251,7 +252,33 @@ export async function attachmentsFromFiles(
 
 export async function prepareAttachments(
   files: Attachment[],
+  cwd?: string,
 ): Promise<Attachment[]> {
+  const host = cwd && wslLocation(cwd);
+  if (host) {
+    if (files.length > MAX_ATTACHMENTS) throw new Error("At most 20 attachments per message");
+    const prepared: Attachment[] = [];
+    // Transfer sequentially: one file buffer and one Linux write at a time.
+    for (const file of files) {
+      const source = file.path && wslLocation(file.path);
+      if (source) {
+        if (source.distribution.toLowerCase() !== host.distribution.toLowerCase()) throw new Error("Attachment belongs to another WSL distribution");
+        prepared.push({ ...file, path: source.path });
+      } else if (file.data && isVisionImage(file.mimeType)) {
+        prepared.push({ ...file, path: undefined });
+      } else if (file.path) {
+        if (file.size > MAX_EMBED_BYTES) throw new Error("Move attachments larger than 20 MiB into the Linux repository first");
+        const data = await invoke<string>("read_file_base64", { path: file.path });
+        const path = await invoke<string>("write_attachment", { name: file.name, data, cwd });
+        const target = wslLocation(path);
+        if (!target || target.distribution.toLowerCase() !== host.distribution.toLowerCase()) throw new Error("Attachment transfer returned a different execution host");
+        prepared.push({ ...file, path: target.path });
+      } else {
+        prepared.push(file);
+      }
+    }
+    return prepared;
+  }
   return Promise.all(
     files.map(async (file) => {
       if (file.data || !file.path) return file;

@@ -63,7 +63,7 @@ type Props = {
 
 export function FilePreview({ preview, status, cwd, onOpenFile }: Props) {
   const path = preview.path;
-  const filePath = path ? (resolveWorkspacePath(path, cwd) ?? path) : undefined;
+  const filePath = path ? resolveWorkspacePath(path, cwd, true) : undefined;
   const fileName = preview.fileName || fileNameOf(path);
   const lines = (preview.lines ?? [])
     .filter(

@@ -12,6 +12,7 @@ import {
   loadLastModelSettings,
   mergeModelSettings,
   modelPickerTabs,
+  modelsFor,
   preferredModelId,
   preferredModelSettings,
   resetHarnessModelOverlays,
@@ -303,4 +304,14 @@ describe("live catalog overlays", () => {
     expect(hasLiveCatalog("pi")).toBe(true);
     expect(hasLiveCatalog("omp")).toBe(false);
   });
+});
+
+it("keeps Windows-discovered model catalogs out of WSL pickers", () => {
+  const cwd = "//wsl.localhost/Ubuntu/home/me/repo";
+  const builtin = modelsFor("claude", cwd);
+  setHarnessModels("claude", [{ ...opus, id: "claude:windows-only", name: "Windows account model" }]);
+  expect(modelsFor("claude").some((model) => model.id === "claude:windows-only")).toBe(true);
+  expect(modelsFor("claude", cwd)).toEqual(builtin);
+  expect(preferredModelId("claude", cwd)).not.toBe("claude:windows-only");
+  resetHarnessModelOverlays();
 });

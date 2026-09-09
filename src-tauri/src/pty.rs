@@ -122,7 +122,7 @@ impl Drop for PtyHost {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_spawn(
     app: AppHandle,
     host: State<PtyHost>,
@@ -131,6 +131,9 @@ pub fn pty_spawn(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    if crate::wsl::location(&cwd)?.is_some() && !cfg!(windows) {
+        return Err("WSL terminals require the native Windows app".into());
+    }
     let _worktree_guard = crate::fs::worktrees::LIFECYCLE
         .try_read()
         .map_err(|_| "Worktree operation in progress; retry terminal startup after it completes")?;
@@ -380,8 +383,7 @@ fn spawn_windows(
 ) -> Result<(), String> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-    let workdir = working_dir(&cwd);
-    let (shell, args) = default_shell();
+    let location = crate::wsl::location(&cwd)?;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -392,22 +394,36 @@ fn spawn_windows(
         })
         .map_err(|err| format!("Failed to open terminal: {err}"))?;
 
-    let mut cmd = CommandBuilder::new(&shell);
-    cmd.args(&args);
-    cmd.cwd(&workdir);
+    let mut cmd = if let Some(location) = &location {
+        // ConPTY hosts wsl.exe; WSL supplies the Linux terminal and job control.
+        // Dropping the master closes that terminal, rather than running a
+        // Windows shell or walking UNC metadata here.
+        let command = crate::wsl::terminal_command(location)?;
+        let mut cmd = CommandBuilder::new(command.get_program());
+        cmd.args(command.get_args());
+        cmd.env("WSLENV", "");
+        cmd
+    } else {
+        let workdir = working_dir(&cwd);
+        let (shell, args) = default_shell();
+        let mut cmd = CommandBuilder::new(&shell);
+        cmd.args(&args);
+        cmd.cwd(&workdir);
+        cmd.env("PATH", crate::harness::gui_search_path());
+        if let Some(home) = dirs_home() {
+            cmd.env("HOME", &home);
+            cmd.env("USERPROFILE", &home);
+        }
+        cmd.env("PWD", workdir.to_string_lossy().as_ref());
+        cmd
+    };
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("COLORFGBG", "15;0");
     cmd.env("TERM_PROGRAM", "MonoCode");
-    cmd.env("PATH", crate::harness::gui_search_path());
-    if let Some(home) = dirs_home() {
-        cmd.env("HOME", &home);
-        cmd.env("USERPROFILE", &home);
-    }
-    cmd.env("PWD", workdir.to_string_lossy().as_ref());
 
     let mut child = crate::windows::spawn_pty(pair.slave.as_ref(), cmd)
-        .map_err(|err| format!("Failed to start {shell}: {err}"))?;
+        .map_err(|err| format!("Failed to start terminal: {err}"))?;
     let pid = child.process_id().unwrap_or(0);
     let mut reader = pair
         .master

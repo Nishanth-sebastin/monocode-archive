@@ -25,7 +25,9 @@ import {
   saveProjectRailOpen,
   type SidebarTabId,
 } from "./lib/appearance";
-import { HAS_NATIVE_GLASS, IS_MAC } from "./lib/platform";
+import { HAS_NATIVE_GLASS, IS_MAC, IS_WIN } from "./lib/platform";
+import { WslProjectDialog } from "./chrome/WslProjectDialog";
+import { connectWslProject } from "./lib/wsl";
 import {
   applyUiScale,
   loadUiScale,
@@ -202,6 +204,8 @@ import {
   projectName,
   rebasePath,
   resolveWorkspacePath,
+  wslLocation,
+  prettyCwd,
 } from "./lib/paths";
 import { removeProjectData } from "./lib/projectData";
 import {
@@ -644,6 +648,21 @@ export default function App({
     () => true,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [wslOpening, setWslOpening] = useState<{ path: string; busy: boolean; error?: string } | null>(null);
+  const wslOpenRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => wslOpenRequest.current?.abort(), []);
+  useEffect(() => {
+    const location = wslLocation(projectCwd);
+    if (!location) return;
+    let disposed = false;
+    const openingAtStart = wslOpenRequest.current;
+    void invoke<boolean>("wsl_connected", { distribution: location.distribution }).then((connected) => {
+      if (!disposed && wslOpenRequest.current === openingAtStart && !connected) setWslOpening((current) => current ?? { path: projectCwd, busy: false, error: "Reconnect WSL to access this project. Windows execution will not be used." });
+    }).catch((error) => {
+      if (!disposed && wslOpenRequest.current === openingAtStart) setWslOpening((current) => current ?? { path: projectCwd, busy: false, error: String(error) });
+    });
+    return () => { disposed = true; };
+  }, [projectCwd]);
   const [updateNotice, setUpdateNotice] = useState(installedUpdate);
   const [whatsNewVersion, setWhatsNewVersion] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] =
@@ -694,6 +713,14 @@ export default function App({
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
   const projectCwdRef = useRef(projectCwd);
+  useEffect(() => {
+    const unlisten = listen<string>("wsl:disconnected", (event) => {
+      const path = projectCwdRef.current;
+      if (wslLocation(path)?.distribution.toLowerCase() === event.payload.toLowerCase())
+        setWslOpening((current) => current?.busy ? current : { path, busy: false, error: "WSL connection interrupted. Reconnect, then inspect any in-flight action before retrying it." });
+    });
+    return () => { void unlisten.then((stop) => stop()); };
+  }, []);
   projectCwdRef.current = projectCwd;
   const searchViewOpenRef = useRef(searchViewOpen);
   searchViewOpenRef.current = searchViewOpen;
@@ -3177,7 +3204,7 @@ export default function App({
     [persistSession],
   );
 
-  const onSelectProject = useCallback(
+  const selectProject = useCallback(
     (path: string) => {
       setSearchViewOpen(false);
       setInboxViewOpen(false);
@@ -3234,10 +3261,33 @@ export default function App({
     [activateTab, appendTab, onCwdChange],
   );
 
+  const onSelectProject = useCallback((path: string) => {
+    wslOpenRequest.current?.abort();
+    if (!wslLocation(path)) {
+      setWslOpening(null);
+      selectProject(path);
+      return;
+    }
+    const controller = new AbortController();
+    wslOpenRequest.current = controller;
+    setWslOpening({ path, busy: true });
+    void connectWslProject(path, controller.signal).then((canonical) => {
+      if (controller.signal.aborted) return;
+      setWslOpening(null);
+      selectProject(canonical);
+    }).catch((error) => {
+      if (!controller.signal.aborted) setWslOpening({ path, busy: false, error: String(error) });
+    });
+  }, [selectProject]);
+
+  const [wslPickerOpen, setWslPickerOpen] = useState(false);
   const pickProject = useCallback(async () => {
+    if (IS_WIN) { setWslPickerOpen(true); return; }
     const path = await pickFolder();
     if (path) onSelectProject(path);
   }, [onSelectProject]);
+
+  const pickWslProject = useCallback(() => setWslPickerOpen(true), []);
 
   const onRemoveProject = useCallback(
     (path: string, options: { purgeData: boolean }) => {
@@ -3685,7 +3735,7 @@ export default function App({
         );
         void (async () => {
           try {
-            const prepared = await prepareAttachments(attachments);
+            const prepared = await prepareAttachments(attachments, workCwd);
             const prompt = await preparePrompt(harnessText, {
               harness: current.harness,
               sessionId,
@@ -3944,7 +3994,7 @@ export default function App({
         if (turnGen.current.get(sessionId) !== gen) return;
         let buildSucceeded = false;
         try {
-          const prepared = await prepareAttachments(attachments);
+          const prepared = await prepareAttachments(attachments, workCwd);
           const prompt =
             intent === "build" && approvedPlan
               ? buildPlanPrompt(approvedPlan.text)
@@ -5378,7 +5428,18 @@ export default function App({
         onDismissUpdate={() => setUpdateNotice(null)}
       />
 
+      {wslPickerOpen && <WslProjectDialog cwd={projectCwd} onOpen={selectProject} onClose={() => setWslPickerOpen(false)} />}
       <div className="body-glass flex min-h-0 min-w-0 flex-1 flex-col">
+        {wslOpening && (
+          <div role={wslOpening.error ? "alert" : "status"} className="flex shrink-0 items-center gap-3 border-b border-content/10 px-4 py-2 text-[12px]">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-content/75" title={prettyCwd(wslOpening.path)}>{prettyCwd(wslOpening.path)}</p>
+              <p className="text-content/50">{wslOpening.error || "Connecting to WSL…"}</p>
+            </div>
+            {!wslOpening.busy && <button className="rounded-md px-2 py-1 text-content/75 hover:bg-content/8" onClick={() => wslLocation(wslOpening.path) ? onSelectProject(wslOpening.path) : void pickWslProject()}>Retry</button>}
+            <button className="rounded-md px-2 py-1 text-content/60 hover:bg-content/8" onClick={() => { wslOpenRequest.current?.abort(); setWslOpening(null); }}>{wslOpening.busy ? "Cancel" : "Dismiss"}</button>
+          </div>
+        )}
         <div
           className={
             searchViewOpen || settingsOpen || inboxViewOpen || notesViewOpen
@@ -5911,7 +5972,7 @@ function nudgeOpenEditors(event: HarnessEvent, cwd: string) {
 
   if (!isEditTool(event.kind, event.title, event.preview)) return;
   const raw = event.preview?.path;
-  const resolved = raw ? (resolveWorkspacePath(raw, cwd) ?? raw) : undefined;
+  const resolved = raw ? resolveWorkspacePath(raw, cwd, true) : undefined;
   if (resolved) {
     nudgeWatchedFiles([resolved]);
   } else if (completed) {
