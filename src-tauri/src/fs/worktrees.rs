@@ -170,13 +170,15 @@ pub fn git_worktrees(
     Ok(entries)
 }
 
+const ACTIVITY_QUERY: &str = "SELECT id, title, updated_at FROM sessions WHERE COALESCE(NULLIF(worktree_cwd, ''), cwd) = ?1 AND has_user_message = 1 ORDER BY updated_at DESC LIMIT 100";
+
 fn add_session_activity(
     entries: &mut [Worktree],
     store: &crate::session_store::SessionStore,
 ) -> Result<(), String> {
     let conn = store.lock_conn()?;
+    let mut stmt = conn.prepare(ACTIVITY_QUERY).map_err(|e| e.to_string())?;
     for entry in entries {
-        let mut stmt = conn.prepare("SELECT id, title, updated_at FROM sessions WHERE COALESCE(NULLIF(worktree_cwd, ''), cwd) = ?1 AND has_user_message = 1 ORDER BY updated_at DESC LIMIT 100").map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([&entry.path], |r| {
                 Ok((
@@ -562,6 +564,40 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn activity_query_uses_index_without_scanning_or_sorting() {
+        let repo = Repo::new();
+        let path = repo.0.join("sessions.db");
+        let store = crate::session_store::SessionStore::open(path.clone()).unwrap();
+        // Simulate a database previously opened by a build without this index.
+        store
+            .lock_conn()
+            .unwrap()
+            .execute_batch("DROP INDEX sessions_worktree_activity_idx")
+            .unwrap();
+        drop(store);
+        let store = crate::session_store::SessionStore::open(path).unwrap();
+        let conn = store.lock_conn().unwrap();
+        let mut query = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {ACTIVITY_QUERY}"))
+            .unwrap();
+        let plan = query
+            .query_map(["/child"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" ");
+        assert!(
+            plan.contains("SEARCH sessions USING")
+                && plan.contains("sessions_worktree_activity_idx"),
+            "{plan}"
+        );
+        assert!(
+            !plan.contains("SCAN") && !plan.contains("TEMP B-TREE"),
+            "{plan}"
+        );
+    }
 
     #[test]
     fn activity_uses_effective_checkout_and_bounds_retained_users() {
