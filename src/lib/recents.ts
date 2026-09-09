@@ -94,6 +94,47 @@ export function forgetProject(path: string): RecentProject[] {
   return dropFromRail(path);
 }
 
+type RemovedWorktree = { path: string; replacement: string };
+const removedWorktreeListeners = new Set<(change: RemovedWorktree) => void>();
+export function subscribeRemovedWorktree(
+  listener: (change: RemovedWorktree) => void,
+) {
+  removedWorktreeListeners.add(listener);
+  return () => {
+    removedWorktreeListeners.delete(listener);
+  };
+}
+
+/** After confirmed Git removal, retain the repository's rail slot and pin on a
+ * surviving checkout. Session paths/history are deliberately untouched. */
+export function forgetRemovedWorktree(path: string, replacement: string) {
+  const replace = (value: string) =>
+    sameProjectPath(value, path) ? normalize(replacement) : value;
+  const remap = (paths: string[]) => {
+    const seen = new Set<string>();
+    return paths.map(replace).filter((value) => {
+      const key = pathKey(value);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const recents = new Map<string, RecentProject>();
+  for (const item of loadRecents()) {
+    const target = replace(item.path);
+    const key = pathKey(target);
+    const previous = recents.get(key);
+    if (!previous) recents.set(key, { ...item, path: target });
+    else previous.openedAt = Math.max(previous.openedAt, item.openedAt);
+  }
+  save([...recents.values()]);
+  saveProjectRailOrder(remap(loadProjectRailOrder()));
+  savePinnedProjects(remap(loadPinnedProjects()));
+  dropArchived(path);
+  for (const listener of removedWorktreeListeners)
+    listener({ path, replacement });
+}
+
 /** Removes a project from the rail and files it in the archive (Archive). */
 export function archiveProject(path: string): RecentProject[] {
   const normalized = normalize(path);

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { loadRecents } from "../lib/recents";
+import { forgetRemovedWorktree, loadRecents } from "../lib/recents";
 import { pathKey } from "../lib/paths";
 import {
   getVerifiedFamilies,
@@ -366,6 +366,11 @@ export function WorktreePanel({
                     setForceReview(null);
                     throw error;
                   }
+                  forgetRemovedWorktree(
+                    entry.path,
+                    entries.find((tree) => tree.main)?.path ?? cwd,
+                  );
+                  setWorkingCopyHidden(entry.path, false);
                   notifyGitChanged();
                   setConfirmation(null);
                   setDetail(null);

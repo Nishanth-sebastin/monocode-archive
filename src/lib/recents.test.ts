@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   archiveProject,
   forgetProject,
+  forgetRemovedWorktree,
+  subscribeRemovedWorktree,
   loadArchivedProjects,
   loadPinnedProjects,
   loadProjectRailOrder,
@@ -199,5 +201,44 @@ describe("archiveProject", () => {
     forgetProject("/tmp/gone");
     expect(loadArchivedProjects()).toEqual([]);
     expect(loadRecents()).toEqual([]);
+  });
+});
+
+describe("confirmed worktree removal", () => {
+  beforeEach(mockLocalStorage);
+  it("keeps one pinned repository after the removed child loses its Git identity", () => {
+    rememberProject("/tmp/repo");
+    rememberProject("/tmp/unrelated");
+    rememberProject("/tmp/child");
+    saveProjectRailOrder(["/tmp/child", "/tmp/unrelated", "/tmp/repo"]);
+    savePinnedProjects(["/tmp/child", "/tmp/repo"]);
+    let notified = false;
+    const unsubscribe = subscribeRemovedWorktree(({ path, replacement }) => {
+      expect(path).toBe("/tmp/child");
+      expect(replacement).toBe("/tmp/repo");
+      expect(loadRecents().some((item) => item.path === path)).toBe(false);
+      notified = true;
+    });
+    forgetRemovedWorktree("/tmp/child", "/tmp/repo");
+    unsubscribe();
+    expect(notified).toBe(true);
+    expect(loadProjectRailOrder()).toEqual(["/tmp/repo", "/tmp/unrelated"]);
+    expect(loadPinnedProjects()).toEqual(["/tmp/repo"]);
+    const sections = projectRailSections(
+      loadRecents(),
+      "/tmp/repo",
+      loadProjectRailOrder(),
+      loadPinnedProjects(),
+      new Map(),
+    );
+    expect(sections.pinned.map((item) => item.path)).toEqual(["/tmp/repo"]);
+    expect(sections.projects.map((item) => item.path)).toEqual([
+      "/tmp/unrelated",
+    ]);
+  });
+  it("retains the repository when only the removed child was remembered", () => {
+    rememberProject("/tmp/child");
+    forgetRemovedWorktree("/tmp/child/", "/tmp/repo");
+    expect(loadRecents().map((item) => item.path)).toEqual(["/tmp/repo"]);
   });
 });

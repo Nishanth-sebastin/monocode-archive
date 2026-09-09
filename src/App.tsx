@@ -213,6 +213,7 @@ import {
   projectRailItems,
   rememberProject,
   sameProjectPath,
+  subscribeRemovedWorktree,
 } from "./lib/recents";
 import {
   applyPlaceSessionOnPane,
@@ -563,6 +564,15 @@ export default function App({
     resumed?.projectCwd && looksLikeProject(resumed.projectCwd)
       ? rememberProject(resumed.projectCwd)
       : loadRecents(),
+  );
+  useEffect(
+    () => subscribeRemovedWorktree(({ path, replacement }) => {
+      setRecents(loadRecents());
+      setProjectCwd((current) =>
+        sameProjectPath(current, path) ? replacement : current,
+      );
+    }),
+    [],
   );
   const [seed] = useState(() => {
     const cwd = lastProjectPath() ?? "~";

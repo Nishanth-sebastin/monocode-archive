@@ -61,6 +61,7 @@ import {
   savePinnedProjects,
   saveProjectRailOrder,
   syncProjectRailOrder,
+  subscribeRemovedWorktree,
   type RecentProject,
 } from "../lib/recents";
 import {
@@ -202,6 +203,13 @@ export function ProjectRail({
   });
   const [railOrder, setRailOrder] = useState(loadProjectRailOrder);
   const [pinnedPaths, setPinnedPaths] = useState(loadPinnedProjects);
+  useEffect(
+    () => subscribeRemovedWorktree(() => {
+      setRailOrder(loadProjectRailOrder());
+      setPinnedPaths(loadPinnedProjects());
+    }),
+    [],
+  );
   const [groupLabels, setGroupLabels] = useState(loadTabGroupLabels);
   const [groupColors, setGroupColors] = useState(loadTabGroupColors);
   const [groupMascots, setGroupMascots] = useState(loadTabGroupMascots);
