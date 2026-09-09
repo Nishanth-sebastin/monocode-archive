@@ -19,6 +19,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -30,6 +31,7 @@ import {
   type SidebarTabId,
 } from "../lib/appearance";
 import { basename, type GitHistoryCommit } from "../lib/fs";
+import { getVerifiedFamilies, subscribeRepositoryFamilies } from "../lib/repositoryFamilies";
 import { IS_MAC, MOD } from "../lib/platform";
 import { resolveModel } from "../lib/models";
 import { prettyParent, projectKey, projectName } from "../lib/paths";
@@ -1573,6 +1575,7 @@ function SidebarProjectPicker({
   const label = resolveTabGroupLabel(key, groupLabels, basename(cwd) || seed);
   const logoPath = resolveTabGroupLogo(key, groupLogos);
   const color = resolveTabGroupColor(key, groupColors, groupCustomColors, seed);
+  useSyncExternalStore(subscribeRepositoryFamilies, getVerifiedFamilies);
   const projects = projectRailItems(recents, cwd);
   const orderedProjects = [
     ...projects.filter((item) => sameProjectPath(item.path, cwd)),

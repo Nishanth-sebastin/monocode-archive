@@ -127,6 +127,30 @@ fn canonical(path: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryFamily {
+    common_dir: String,
+    checkout: String,
+    worktrees: Vec<Worktree>,
+}
+
+/// Shared Git metadata identifies linked checkouts; remotes do not identify clones.
+#[tauri::command(async)]
+pub fn git_repository_family(cwd: String) -> Result<RepositoryFamily, String> {
+    let root = expand_home(&cwd);
+    let common = git(
+        &root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let checkout = git(&root, &["rev-parse", "--show-toplevel"])?;
+    Ok(RepositoryFamily {
+        common_dir: canonical(common.trim_end_matches(['\r', '\n']))?,
+        checkout: canonical(checkout.trim_end_matches(['\r', '\n']))?,
+        worktrees: inventory(&root)?,
+    })
+}
+
 #[tauri::command(async)]
 pub fn git_worktrees(
     cwd: String,
@@ -362,6 +386,25 @@ mod tests {
     }
 
     #[test]
+    fn family_groups_linked_checkouts_but_not_clones() {
+        let repo = Repo::new();
+        let child = repo.target("linked żółć space");
+        create(&repo.0, "refs/heads/main", &repo.head(), "child", &child).unwrap();
+        let parent = git_repository_family(path_to_js(&repo.0)).unwrap();
+        let linked = git_repository_family(child.clone()).unwrap();
+        assert_eq!(parent.common_dir, linked.common_dir);
+        assert_eq!(linked.checkout, child);
+        assert_eq!(linked.worktrees.len(), 2);
+        let clone = repo.target("independent clone");
+        git(&repo.0, &["clone", "--no-hardlinks", ".", &clone]).unwrap();
+        assert_ne!(
+            parent.common_dir,
+            git_repository_family(clone).unwrap().common_dir
+        );
+        assert!(git_repository_family(repo.target("missing")).is_err());
+    }
+
+    #[test]
     fn selected_bases_unicode_collisions_and_external_discovery() {
         let repo = Repo::new();
         let base = repo.head();
@@ -504,6 +547,23 @@ mod tests {
         samples.sort();
         println!(
             "11 worktrees, 21 inventory calls: median {:?}, max {:?}",
+            samples[10], samples[20]
+        );
+        samples.clear();
+        for _ in 0..21 {
+            let start = Instant::now();
+            assert_eq!(
+                git_repository_family(path_to_js(&repo.0))
+                    .unwrap()
+                    .worktrees
+                    .len(),
+                11
+            );
+            samples.push(start.elapsed());
+        }
+        samples.sort();
+        println!(
+            "11 worktrees, 21 verified family calls: median {:?}, max {:?}",
             samples[10], samples[20]
         );
     }

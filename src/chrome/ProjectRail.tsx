@@ -5,6 +5,7 @@ import {
   ChevronUp,
   CircleAlert,
   FolderOpen,
+  GitBranch,
   ImagePlus,
   Inbox,
   MoreHorizontal,
@@ -17,6 +18,12 @@ import {
   Trash2,
 } from "./icons";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useRepositoryFamilies } from "../hooks/useRepositoryFamilies";
+import {
+  groupRepositoryFamilies,
+  workingCopyName,
+  type RepositoryFamily,
+} from "../lib/repositoryFamilies";
 import { useDragResize } from "../hooks/useDragResize";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useProjectDiffStats } from "../hooks/useProjectDiffStats";
@@ -31,7 +38,7 @@ import {
 } from "../lib/appearance";
 import { basename, revealPath, type GitDiffStats } from "../lib/fs";
 import { IS_MAC, IS_WIN, MOD } from "../lib/platform";
-import { projectKey, projectName } from "../lib/paths";
+import { pathKey, projectKey, projectName } from "../lib/paths";
 import {
   collectRailProjects,
   loadPinnedProjects,
@@ -73,6 +80,8 @@ import { SettingsNav } from "./SettingsRail";
 import { Shimmer } from "../surfaces/Shimmer";
 import { TabGroupMenu, type TabGroupMenuExtraItem } from "./TabGroupMenu";
 import { TerminalSpinner } from "./TerminalSpinner";
+import { Popover } from "./Popover";
+import { WorktreePanel } from "./WorktreePicker";
 import type { SettingsSectionId } from "../lib/settings";
 
 const REVEAL_LABEL = IS_MAC
@@ -207,9 +216,14 @@ export function ProjectRail({
     () => collectRailProjects(recents, cwd),
     [cwd, recents],
   );
-  const sections = useMemo(
-    () => projectRailSections(recents, cwd, railOrder, pinnedPaths),
+  const rawSections = useMemo(
+    () => projectRailSections(recents, cwd, railOrder, pinnedPaths, new Map()),
     [cwd, pinnedPaths, railOrder, recents],
+  );
+  const families = useRepositoryFamilies(recents, cwd);
+  const sections = useMemo(
+    () => groupRepositoryFamilies(rawSections, families),
+    [rawSections, families],
   );
   const busy = useMemo(() => {
     const set = new Set<string>();
@@ -436,6 +450,7 @@ export function ProjectRail({
               <ProjectSection
                 label="Pinned"
                 items={sections.pinned}
+                families={families}
                 cwd={cwd}
                 busy={busy}
                 sortable={pinnedSortable}
@@ -456,6 +471,7 @@ export function ProjectRail({
             <ProjectSection
               label="Projects"
               items={sections.projects}
+              families={families}
               emptyLabel="No projects yet"
               onAdd={onOpenProject}
               cwd={cwd}
@@ -783,6 +799,7 @@ function LiveAgentCard({
 function ProjectSection({
   label,
   items,
+  families,
   emptyLabel,
   onAdd,
   cwd,
@@ -802,6 +819,7 @@ function ProjectSection({
 }: {
   label: string;
   items: RecentProject[];
+  families: ReadonlyMap<string, RepositoryFamily>;
   emptyLabel?: string;
   onAdd?: () => void;
   cwd: string;
@@ -844,9 +862,12 @@ function ProjectSection({
       ) : null}
       <div className="flex flex-col gap-px px-2">
         {items.map((item, index) => (
-          <ProjectCard
+          <ProjectFamilyCard
             key={item.path}
             item={item}
+            family={families.get(pathKey(item.path))}
+            cwd={cwd}
+            busyPaths={busy}
             selected={!searchActive && sameProjectPath(item.path, cwd)}
             busy={isBusyPath(item.path, busy)}
             pinned={pinned}
@@ -871,8 +892,153 @@ function ProjectSection({
 const nameClassName =
   "min-w-0 flex-1 truncate text-sm font-medium leading-tight";
 
+function ProjectFamilyCard(
+  props: Parameters<typeof ProjectCard>[0] & {
+    family?: RepositoryFamily;
+    cwd: string;
+    busyPaths: Set<string>;
+  },
+) {
+  const { family, cwd, busyPaths, onSelect } = props;
+  const anchor = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState(false);
+  const [working, setWorking] = useState(false);
+  const expandedKey = `monocode.worktreeExpanded:${family?.commonDir ?? props.item.path}`;
+  const [expanded, setExpanded] = useState<boolean | null>(null);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(expandedKey);
+      setExpanded(saved === null ? null : saved === "true");
+    } catch {
+      setExpanded(null);
+    }
+  }, [expandedKey]);
+  const children = family?.worktrees ?? [];
+  const visible = expanded ?? children.length > 1;
+  const selected = children.some((child) => sameProjectPath(child.path, cwd));
+  const lastKey = `monocode.worktreeLast:${family?.commonDir ?? props.item.path}`;
+  useEffect(() => {
+    if (selected) {
+      try {
+        localStorage.setItem(lastKey, cwd);
+      } catch {
+        /* quota */
+      }
+    }
+  }, [selected, lastKey, cwd]);
+  const openLast = () => {
+    let last: string | null = null;
+    try {
+      last = localStorage.getItem(lastKey);
+    } catch {
+      /* private mode */
+    }
+    onSelect(
+      children.find(
+        (child) => !child.missing && last && sameProjectPath(child.path, last),
+      )?.path ?? props.item.path,
+    );
+  };
+  return (
+    <div ref={anchor}>
+      <ProjectCard
+        {...props}
+        selected={!visible && (props.selected || selected)}
+        onSelect={openLast}
+        worktreeControls={
+          family
+            ? {
+                expanded: visible,
+                toggle: () => {
+                  setExpanded(!visible);
+                  try {
+                    localStorage.setItem(expandedKey, String(!visible));
+                  } catch {
+                    /* quota */
+                  }
+                },
+                create: () => setMenu(true),
+              }
+            : undefined
+        }
+      />
+      {visible && children.length > 0 && (
+        <div className="my-0.5 ml-3 border-l border-content/10 pl-2">
+          {children.map((child) => {
+            const name = family
+              ? workingCopyName(child, family)
+              : basename(child.path);
+            const branch =
+              child.branch?.replace("refs/heads/", "") ??
+              child.head.slice(0, 8);
+            const active = sameProjectPath(child.path, cwd);
+            const working = isBusyPath(child.path, busyPaths);
+            return (
+              <button
+                type="button"
+                key={child.path}
+                disabled={child.missing || !!child.prunable}
+                title={`${child.path}\n${child.head}\nLocal${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
+                aria-current={active ? "true" : undefined}
+                className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+                onClick={() => onSelect(child.path)}
+              >
+                <GitBranch
+                  className="size-3 shrink-0 text-content/40"
+                  strokeWidth={1.5}
+                />
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+                {branch !== name && (
+                  <span className="max-w-[45%] truncate text-[10px] text-content/40">
+                    {branch}
+                  </span>
+                )}
+                {child.missing || child.prunable ? (
+                  <span className="text-[10px]">Missing</span>
+                ) : working ? (
+                  <span title="Working" aria-label="Working">
+                    <TerminalSpinner className="size-3" />
+                  </span>
+                ) : active ? (
+                  <Check
+                    className="size-3 shrink-0 text-content/45"
+                    strokeWidth={1.5}
+                  />
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {menu && (
+        <Popover
+          anchor={anchor}
+          side="right"
+          width={320}
+          maxHeight={380}
+          onDismiss={() => {
+            if (!working) setMenu(false);
+          }}
+          role="dialog"
+          aria-label="Worktrees"
+          className="flex flex-col overflow-hidden"
+        >
+          <WorktreePanel
+            initialCreate
+            cwd={props.item.path}
+            onClose={() => setMenu(false)}
+            onOpen={onSelect}
+            onBusyChange={setWorking}
+          />
+        </Popover>
+      )}
+    </div>
+  );
+}
+
 function ProjectCard({
   item,
+  worktreeControls,
   selected,
   busy,
   pinned,
@@ -889,6 +1055,11 @@ function ProjectCard({
   groupMascots,
 }: {
   item: RecentProject;
+  worktreeControls?: {
+    expanded: boolean;
+    toggle: () => void;
+    create: () => void;
+  };
   selected: boolean;
   busy: boolean;
   pinned: boolean;
@@ -960,12 +1131,26 @@ function ProjectCard({
       {showEnd ? (
         <div className="pointer-events-none absolute inset-x-2 bottom-0 z-20 h-0.5 rounded-full bg-accent" />
       ) : null}
+      {worktreeControls && (
+        <button
+          type="button"
+          data-no-drag
+          aria-label="Show working copies"
+          aria-expanded={worktreeControls.expanded}
+          onClick={worktreeControls.toggle}
+          className="mr-1 shrink-0 rounded text-content/45 hover:text-content"
+        >
+          <ChevronDown
+            className={`size-3 ${worktreeControls.expanded ? "" : "-rotate-90"}`}
+          />
+        </button>
+      )}
       <button
         type="button"
         title={cardTitle}
         aria-label={cardAriaLabel}
         aria-current={selected ? "true" : undefined}
-        className="flex min-w-0 flex-1 cursor-default items-center gap-2 text-left group-hover:pr-6"
+        className={`flex min-w-0 flex-1 cursor-default items-center gap-2 text-left ${worktreeControls ? "" : "group-hover:pr-6"}`}
       >
         <div className="grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0">
           {logoPath && !busy ? (
@@ -997,6 +1182,18 @@ function ProjectCard({
           </span>
         ) : null}
       </button>
+      {worktreeControls && (
+        <button
+          type="button"
+          data-no-drag
+          title="New worktree"
+          aria-label={`New worktree in ${name}`}
+          onClick={worktreeControls.create}
+          className="mr-5 shrink-0 rounded px-1 text-content/45 hover:bg-content/8 hover:text-content"
+        >
+          <Plus className="size-3.5" />
+        </button>
+      )}
       <button
         type="button"
         data-no-drag
@@ -1022,7 +1219,7 @@ function ProjectCard({
           event.stopPropagation();
           onTogglePin(item.path);
         }}
-        className="absolute left-2 top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-content/55 opacity-0 pointer-events-none transition-opacity hover:text-content group-hover:pointer-events-auto group-hover:opacity-100"
+        className={`absolute ${worktreeControls ? "left-6" : "left-2"} top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-content/55 opacity-0 pointer-events-none transition-opacity hover:text-content group-hover:pointer-events-auto group-hover:opacity-100`}
       >
         {pinned ? (
           <PinOff className="size-3.5" strokeWidth={1.75} />

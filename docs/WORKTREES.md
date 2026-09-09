@@ -64,3 +64,34 @@ agents or UI rendering. It is not an app responsiveness or WSL benchmark.
 Native Windows interaction and Windows-to-WSL acceptance remain unverified on this
 Mac. #22 extends this local boundary; ticket kickoff follows #6/#8 and each
 connector. Neither live WSL nor the full ticket/provider matrix is claimed here.
+# Project hierarchy revision (September 9)
+
+The project rail now groups existing recent paths only after Git proves that
+they share a canonical common Git directory. Independent clones remain separate.
+Original recents, labels, pins, ordering and session paths are retained; the
+navigation grouping is a recoverable projection, not a destructive migration.
+Unavailable paths remain visible independently. Expanded state and the last
+selected working copy are saved per repository family.
+
+Use the parent row's **New worktree** button. The existing popover now opens
+directly at Repository, Base, Branch and Location, with an editable unused branch
+suggestion. Child rows select the exact checkout through the existing session
+selection path. The same verified grouping feeds the compact project selector.
+
+Native macOS smoke: a disposable repository with an external Unicode-path
+worktree was opened; two further worktrees were created using the parent button,
+both appeared under one parent, and selecting the external child changed the
+visible branch to its own branch. Disclosure and parent last-used selection
+were exercised. These checks do not establish multi-agent, terminal, restart,
+Windows or WSL acceptance of the expanded hierarchy requirements.
+
+Release backend measurement on Apple M5 Pro / 24 GiB / macOS 26.6.2, 11 working
+copies and 21 calls: inventory median 12.97 ms, maximum 24.08 ms; verified family
+median 38.15 ms, maximum 49.94 ms. Family verification includes two extra Git
+identity calls. It runs off the UI thread, reuses sibling inventory evidence and
+has no timer-based polling. These numbers exclude WebView and agent costs.
+
+The expanded #32 contract is still in progress: scoped child removal menus,
+explicit unavailable-path repair, full migration/restart and concurrent-agent
+acceptance, and shared inventory consumption by the branch picker remain to be
+completed. Do not treat this revision as acceptance of the whole updated issue.

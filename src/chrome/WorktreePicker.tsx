@@ -31,17 +31,21 @@ export function WorktreePanel({
   onOpen,
   onBusyChange,
   initialBase = "",
+  initialCreate = false,
 }: {
   cwd: string;
   onClose: () => void;
   onOpen: (path: string) => void;
   onBusyChange: (busy: boolean) => void;
   initialBase?: string;
+  initialCreate?: boolean;
 }) {
   const [entries, setEntries] = useState<Worktree[]>([]);
   const [refs, setRefs] = useState<Ref[]>([]);
   const [base, setBase] = useState(initialBase);
-  const [creating, setCreating] = useState(Boolean(initialBase));
+  const [creating, setCreating] = useState(
+    initialCreate || Boolean(initialBase),
+  );
   const [choosingBase, setChoosingBase] = useState(false);
   const [baseQuery, setBaseQuery] = useState("");
   const [query, setQuery] = useState("");
@@ -65,7 +69,27 @@ export function WorktreePanel({
     ]);
     setEntries(trees);
     setRefs(branches);
+    if (initialCreate && !pendingDefaults.current) {
+      pendingDefaults.current = true;
+      const defaults = branches.filter((ref) =>
+        /^refs\/remotes\/[^/]+\/HEAD$/.test(ref.name),
+      );
+      const main = trees.find((entry) => entry.main)?.branch;
+      setBase(
+        initialBase || (defaults.length === 1 ? defaults[0].name : main) || "",
+      );
+      let suggestion = "work";
+      for (
+        let n = 2;
+        branches.some((ref) => ref.name === `refs/heads/${suggestion}`);
+        n++
+      )
+        suggestion = `work-${n}`;
+      setBranch(suggestion);
+      setPath(`${cwd}-${suggestion}`);
+    }
   };
+  const pendingDefaults = useRef(false);
   const run = async (work: () => Promise<unknown>) => {
     if (pending.current) return;
     pending.current = true;
@@ -269,28 +293,9 @@ export function WorktreePanel({
             </button>
             <span>New branch and worktree</span>
           </div>
-          <label className="flex items-center gap-2 border-b border-content/10 px-2.5 py-2.5 text-content/50">
-            <GitBranch className="size-3.5 shrink-0" strokeWidth={1.75} />
-            <input
-              autoFocus
-              disabled={busy}
-              className={inputClass}
-              aria-label="New branch name"
-              placeholder="New branch name…"
-              value={branch}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  createAndOpen();
-                }
-              }}
-              onChange={(e) => {
-                setBranch(e.target.value);
-                if (!path || path === `${cwd}-${branch.replace(/\//g, "-")}`)
-                  setPath(`${cwd}-${e.target.value.replace(/\//g, "-")}`);
-              }}
-            />
-          </label>
+          <p className="truncate px-2.5 py-2 text-content/50" title={cwd}>
+            Repository · {cwd.split("/").pop()}
+          </p>
           <div className="space-y-0.5 px-1.5 py-1.5">
             <button
               type="button"
@@ -305,12 +310,34 @@ export function WorktreePanel({
                 className="size-3.5 shrink-0 text-content/50"
                 strokeWidth={1.75}
               />
-              <span className="text-content/50">From</span>
+              <span className="text-content/50">Base</span>
               <span className="min-w-0 flex-1 truncate font-mono">
                 {selectedName || "Choose branch"}
               </span>
               <ChevronRight className="size-3 shrink-0 text-content/40" />
             </button>
+            <label className="flex items-center gap-2 border-b border-content/10 px-2.5 py-2.5 text-content/50">
+              <GitBranch className="size-3.5 shrink-0" strokeWidth={1.75} />
+              <input
+                autoFocus
+                disabled={busy}
+                className={inputClass}
+                aria-label="New branch name"
+                placeholder="New branch name…"
+                value={branch}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    createAndOpen();
+                  }
+                }}
+                onChange={(e) => {
+                  setBranch(e.target.value);
+                  if (!path || path === `${cwd}-${branch.replace(/\//g, "-")}`)
+                    setPath(`${cwd}-${e.target.value.replace(/\//g, "-")}`);
+                }}
+              />
+            </label>
             <button
               type="button"
               disabled={busy}

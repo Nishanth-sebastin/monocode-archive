@@ -1,4 +1,5 @@
 import { pathKey, prettyCwd, slash } from "./paths";
+import { getVerifiedFamilies, groupRepositoryFamilies, type RepositoryFamily } from "./repositoryFamilies";
 
 const KEY = "monocode.recentProjects";
 const RAIL_ORDER_KEY = "monocode.projectRailOrder";
@@ -283,6 +284,7 @@ export function projectRailSections(
   currentCwd: string,
   order: string[],
   pinnedPaths: string[],
+  families: ReadonlyMap<string, RepositoryFamily> = getVerifiedFamilies(),
 ): ProjectRailSections {
   const projects = collectRailProjects(recents, currentCwd);
   const syncedOrder = syncProjectRailOrder(order, projects);
@@ -296,7 +298,7 @@ export function projectRailSections(
     if (pinnedSet.has(key)) pinned.push(item);
     else unpinned.push(item);
   }
-  return { pinned, projects: unpinned };
+  return groupRepositoryFamilies({ pinned, projects: unpinned }, families);
 }
 
 /** Recents plus the current folder when it is a project not yet remembered. */
