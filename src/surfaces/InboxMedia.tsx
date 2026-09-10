@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { GithubWorkItemDetails, InboxItem } from "../lib/githubTasks";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   fetchInboxMedia,
@@ -9,6 +11,7 @@ import {
 type Props = {
   src: string;
   alt?: string;
+  load?: () => Promise<Uint8Array>;
 };
 
 type LoadState =
@@ -16,15 +19,16 @@ type LoadState =
   | { status: "ready"; url: string; type: InboxMediaType }
   | { status: "error" };
 
-export function InboxMedia({ src, alt }: Props) {
+export function InboxMedia({ src, alt, load }: Props) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | null = null;
     setState({ status: "loading" });
 
-    void fetchInboxMedia(src)
+    void (load ? load() : fetchInboxMedia(src))
       .then((bytes) => {
         const type = sniffInboxMedia(bytes);
         if (!type) throw new Error("unsupported");
@@ -44,7 +48,7 @@ export function InboxMedia({ src, alt }: Props) {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [src]);
+  }, [src, load, retry]);
 
   if (state.status === "loading") {
     return (
@@ -56,7 +60,18 @@ export function InboxMedia({ src, alt }: Props) {
   }
 
   if (state.status === "error") {
-    return <MediaFallback src={src} alt={alt} />;
+    return (
+      <span className="inline-flex items-center gap-2 text-xs">
+        <MediaFallback src={src} alt={alt} />
+        <button
+          type="button"
+          className="text-content/55 underline"
+          onClick={() => setRetry((value) => value + 1)}
+        >
+          Retry image
+        </button>
+      </span>
+    );
   }
 
   if (state.type.kind === "video") {
@@ -89,6 +104,81 @@ export function InboxMedia({ src, alt }: Props) {
         void openUrl(src);
       }}
     />
+  );
+}
+
+export function JiraImages({
+  item,
+  attachments,
+}: {
+  item: InboxItem;
+  attachments: NonNullable<GithubWorkItemDetails["attachments"]>;
+}) {
+  const [count, setCount] = useState(4);
+  const images = attachments.filter((file) =>
+    file.mimeType.startsWith("image/"),
+  );
+  if (!images.length) return null;
+  return (
+    <section aria-label="Jira images" className="my-4 space-y-2">
+      <h3 className="text-[12px] font-medium text-content/55">
+        Images · {images.length}
+      </h3>
+      <div className="grid grid-cols-1 gap-3 min-[1000px]:grid-cols-2">
+        {images.slice(0, count).map((file) => (
+          <JiraImage key={file.id} item={item} file={file} />
+        ))}
+      </div>
+      {images.length > count && count < 12 ? (
+        <button
+          type="button"
+          className="text-xs text-content/55 underline"
+          onClick={() => setCount((value) => value + 4)}
+        >
+          Show more images
+        </button>
+      ) : null}
+      {images.length > 12 && count >= 12 ? (
+        <button
+          type="button"
+          className="text-xs text-content/55 underline"
+          onClick={() => void openUrl(item.url)}
+        >
+          View remaining images in Jira
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+function JiraImage({
+  item,
+  file,
+}: {
+  item: InboxItem;
+  file: NonNullable<GithubWorkItemDetails["attachments"]>[number];
+}) {
+  const load = useCallback(
+    async () =>
+      new Uint8Array(
+        await invoke<ArrayBuffer>("jira_image", {
+          site: item.site,
+          id: item.id,
+          attachmentId: file.id,
+        }),
+      ),
+    [item.site, item.id, file.id],
+  );
+  return (
+    <figure className="min-w-0">
+      <InboxMedia src={item.url} alt={file.name} load={load} />
+      <figcaption
+        className="truncate text-[11px] text-content/45"
+        title={file.name}
+      >
+        {file.name}
+      </figcaption>
+    </figure>
   );
 }
 

@@ -66,6 +66,7 @@ export type InboxItem = Omit<GithubWorkItem, "kind"> & {
 };
 
 export type GithubWorkItemDetails = {
+  attachments?: { id: string; name: string; mimeType: string }[];
   body: string;
   author: string;
   authorAvatarUrl?: string;

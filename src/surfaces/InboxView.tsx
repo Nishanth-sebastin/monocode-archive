@@ -133,6 +133,7 @@ import {
   resolveTabGroupMascot,
 } from "../lib/tabGroups";
 import { AgentMarkdown } from "./AgentMarkdown";
+import { JiraImages } from "./InboxMedia";
 import {
   InboxComments,
   InboxCommentForm,
@@ -1748,6 +1749,7 @@ function InboxDetail({
           ) : (
             <p className="text-[13px] text-content/45">No description</p>
           )}
+          {jira && details?.attachments?.length ? <JiraImages key={`${item.site}:${item.id}:${revision}`} item={item} attachments={details.attachments} /> : null}
           <InboxComments
             thread={thread}
             loading={threadLoading}

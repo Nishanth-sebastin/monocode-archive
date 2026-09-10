@@ -158,6 +158,15 @@ pub(crate) fn request(
     path: &str,
     query: &[(&str, String)],
 ) -> Result<Value, String> {
+    serde_json::from_slice(&request_bytes(config, path, query)?)
+        .map_err(|_| "Jira returned an invalid response".into())
+}
+
+fn request_bytes(
+    config: &JiraConfig,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Vec<u8>, String> {
     if BACKOFF
         .lock()
         .map_err(|_| "Jira request state unavailable")?
@@ -177,7 +186,7 @@ pub(crate) fn request(
     let mut req = agent
         .get(&format!("{}/rest/api/3/{path}", config.site))
         .set("Authorization", &format!("Basic {authorization}"))
-        .set("Accept", "application/json");
+        .set("Accept", "*/*");
     for (key, value) in query {
         req = req.query(key, value);
     }
@@ -211,7 +220,7 @@ pub(crate) fn request(
     if bytes.len() as u64 > MAX_RESPONSE {
         return Err("Jira response is too large. Choose a narrower filter.".into());
     }
-    serde_json::from_slice(&bytes).map_err(|_| "Jira returned an invalid response".into())
+    Ok(bytes)
 }
 
 fn numeric_id(id: &str) -> bool {
@@ -371,7 +380,7 @@ pub async fn jira_issue_content(
             request(
                 &config,
                 &format!("issue/{id}"),
-                &[("fields", "description,creator".into())],
+                &[("fields", "description,creator,attachment".into())],
             )
         }
     })
@@ -379,9 +388,71 @@ pub async fn jira_issue_content(
     .map_err(|_| "Jira details task failed")?
 }
 
+fn image_on_issue(issue: &Value, attachment_id: &str) -> bool {
+    numeric_id(attachment_id)
+        && issue["fields"]["attachment"]
+            .as_array()
+            .is_some_and(|files| {
+                files.iter().any(|file| {
+                    file["id"].as_str() == Some(attachment_id)
+                        && file["mimeType"]
+                            .as_str()
+                            .is_some_and(|mime| mime.starts_with("image/"))
+                })
+            })
+}
+
+#[tauri::command]
+pub async fn jira_image(
+    app: AppHandle,
+    site: String,
+    id: String,
+    attachment_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &site)?;
+        if !numeric_id(&id) || !numeric_id(&attachment_id) {
+            return Err("Invalid Jira image identity".into());
+        }
+        let issue = request(
+            &config,
+            &format!("issue/{id}"),
+            &[("fields", "attachment".into())],
+        )?;
+        if !image_on_issue(&issue, &attachment_id) {
+            return Err("This image is no longer available on the selected Jira ticket".into());
+        }
+        let bytes = request_bytes(
+            &config,
+            &format!("attachment/thumbnail/{attachment_id}"),
+            &[
+                ("redirect", "false".into()),
+                ("fallbackToDefault", "false".into()),
+                ("width", "800".into()),
+                ("height", "600".into()),
+            ],
+        )?;
+        if crate::inbox_context::image_mime(&bytes).is_none() {
+            return Err("Jira did not return a supported image preview".into());
+        }
+        Ok::<_, String>(bytes)
+    })
+    .await
+    .map_err(|_| "Jira image task failed")??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn image_preview_requires_membership_and_image_type() {
+        let issue = json!({"fields":{"attachment":[{"id":"12","mimeType":"image/png"},{"id":"13","mimeType":"text/html"}]}});
+        assert!(image_on_issue(&issue, "12"));
+        assert!(!image_on_issue(&issue, "13"));
+        assert!(!image_on_issue(&issue, "14"));
+        assert!(!image_on_issue(&issue, "../12"));
+    }
     #[test]
     fn pagination_bounds_rows_requests_and_repeated_tokens() {
         let mut calls = Vec::new();

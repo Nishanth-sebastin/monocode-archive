@@ -17,9 +17,11 @@ Select a ticket to load its description/comments. **Send to agent** uses Linear'
 
 ## Validation for #11
 
-Local `npm run check` passed after the context changes: 1,531 web tests and 259 Rust tests (one ignored), including Jira pagination, custom states, site/project identity, favorite selection, ADF bounds, secret-free failures, disconnection races, selection persistence and rendered Inbox handoff/retry tests. Production `npm run build` was also repeated.
+Local checks passed after the context/image changes: 1,532 web tests and 260 Rust tests (one ignored), including Jira pagination, custom states, site/project identity, favorite selection, ADF bounds, secret-free failures, disconnection races, selection persistence and rendered Inbox handoff/retry/image tests. Production `npm run build` was also repeated.
 
 ## Selected agent context
+
+Jira ticket details also show authenticated image thumbnails below the description, separately from agent selection. The existing Inbox media renderer handles loading, fallback, retry and object-URL cleanup. Previews request 800×600 thumbnails, cap each response at 2 MiB, initially show four images and let the user reveal up to twelve. More images remain accessible in Jira. Thumbnail access validates current credentials and attachment membership; private bytes are not put in the global media cache. These are a ticket-level gallery, not guessed inline positions for ADF media UUIDs. Viewing thumbnails does not add any image to an agent message.
 
 For GitHub, GitLab, Linear and Jira, **Ask** and **Send to agent** open the same compact review dialog. The detail pane has no permanent Context/Edit row. Description starts selected; comments and files are individual opt-ins. Expandable sections show author/date/excerpt, image preview and file sizes where known. Send uses the existing explicit local-project chooser inside this dialog. Confirmation opens a draft, never sends automatically.
 
@@ -42,10 +44,11 @@ Before/after Inbox images use the same 1280×800 dark viewport; the compact ligh
 ![Jira Inbox, compact light](images/jira-inbox-compact-light.png)
 ![Jira Settings, compact dark](images/jira-settings-compact-dark.png)
 ![Visible Inbox sources](images/jira-visible-sources.png)
+![Jira authenticated image previews, fictional fixture](images/jira-image-previews.png)
 
 ### Performance, compatibility and remaining acceptance
 
-On Apple M5 Pro/macOS with Node 22.23.2, the production frontend main chunk changed from 2,891.71 kB (gzip 876.13 kB) at `840ed4c` to 2,922.46 kB (gzip 881.69 kB), including the shared context dialog. Existing large-chunk/dynamic-import build warnings remain. No dependency was added. This is bundle measurement, not app speed.
+On Apple M5 Pro/macOS with Node 22.23.2, the production frontend main chunk changed from 2,891.71 kB (gzip 876.13 kB) at `840ed4c` to 2,924.06 kB (gzip 882.15 kB), including the shared context dialog and Jira image previews. Existing large-chunk/dynamic-import build warnings remain. No dependency was added. This is bundle measurement, not app speed.
 
 A development microbenchmark of minified affected JS (1,000 warmups, median of nine 1,000-call batches) measured filtering 100 GitHub items at 0.0134 ms before / 0.0122 ms after, and converting roughly 50k characters of Jira ADF at 0.0263 ms. These are Node-only measurements, not native/WebView/backend/network/agent costs; small differences are noise. Native release memory/CPU and responsiveness while a real agent streams remain unmeasured.
 

@@ -261,6 +261,7 @@ pub fn run() {
             jira::jira_list_issues,
             jira::jira_options,
             jira::jira_issue_content,
+            jira::jira_image,
             linear::linear_set_token,
             linear::linear_list_teams,
             linear::linear_list_issues,

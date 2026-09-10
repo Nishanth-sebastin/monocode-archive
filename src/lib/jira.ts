@@ -204,6 +204,7 @@ type IssueResponse = {
     labels?: string[];
     assignee?: { displayName?: string };
     description?: unknown;
+    attachment?: { id: string; filename: string; mimeType: string }[];
     creator?: { displayName?: string };
   };
 };
@@ -273,6 +274,14 @@ export async function jiraDetails(
   const result = {
     body: jiraMarkdown(response.fields.description),
     author: response.fields.creator?.displayName ?? "",
+    attachments: (response.fields.attachment ?? [])
+      .slice(0, 200)
+      .filter((file) => /^\d+$/.test(file.id))
+      .map((file) => ({
+        id: file.id,
+        name: file.filename,
+        mimeType: file.mimeType,
+      })),
   };
   retain(details, key(item), result);
   return result;
