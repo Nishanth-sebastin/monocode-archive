@@ -1275,7 +1275,8 @@ def run(argv, cwd, input_bytes=None, timeout=25):
             "---\nname: test-wsl\ndescription: Linux skill ż\n---\nInstructions",
         )
         .unwrap();
-        let skills = crate::skills::list_skills_from(std::path::Path::new(&root.identity()), None);
+        let skills =
+            crate::skills::list_skills_from(std::path::Path::new(&root.identity()), None, None);
         assert!(skills.iter().any(|skill| skill.name == "test-wsl"
             && skill.description == "Linux skill ż"
             && skill.path.starts_with("//wsl.localhost/")));
