@@ -15,7 +15,7 @@ export function formatEditorSelectionReference({
     startLine === endLine
       ? `line ${startLine}`
       : `lines ${startLine}-${endLine}`;
-  return `Code selection: ${file} (${lines})`;
+  return `${file} (${lines})`;
 }
 
 function formatFileReference(path: string): string {

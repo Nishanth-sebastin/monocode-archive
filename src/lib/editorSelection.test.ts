@@ -9,7 +9,7 @@ describe("formatEditorSelectionReference", () => {
         startLine: 12,
         endLine: 13,
       }),
-    ).toBe("Code selection: @src/FileEditor.tsx (lines 12-13)");
+    ).toBe("@src/FileEditor.tsx (lines 12-13)");
   });
 
   it("uses a compact location for a single selected line", () => {
@@ -19,7 +19,7 @@ describe("formatEditorSelectionReference", () => {
         startLine: 7,
         endLine: 7,
       }),
-    ).toBe("Code selection: @src/value.ts (line 7)");
+    ).toBe("@src/value.ts (line 7)");
   });
 
   it("quotes paths that cannot be represented as composer mentions", () => {
@@ -29,6 +29,6 @@ describe("formatEditorSelectionReference", () => {
         startLine: 3,
         endLine: 5,
       }),
-    ).toBe("Code selection: `docs/read me.md` (lines 3-5)");
+    ).toBe("`docs/read me.md` (lines 3-5)");
   });
 });
