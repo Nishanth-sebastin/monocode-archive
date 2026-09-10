@@ -140,6 +140,7 @@ import {
   gitlabConnected,
   saveGitlabConfig,
 } from "../lib/gitlab";
+import { jiraConnected, saveJiraConfig, type JiraStatus } from "../lib/jira";
 import {
   disconnectLinear,
   LINEAR_CHANGE_EVENT,
@@ -545,8 +546,144 @@ function GeneralPage({
       <Heading title="Linear" />
       <LinearSettings />
 
+      <Heading title="Jira Cloud" />
+      <JiraSettings />
+
       <Heading title="About" />
       <UpdateRow onOpenWhatsNew={onOpenWhatsNew} />
+    </>
+  );
+}
+
+function JiraSettings() {
+  const [status, setStatus] = useState<JiraStatus>({
+    connected: false,
+    site: "",
+    account: "",
+  });
+  const [site, setSite] = useState("");
+  const [email, setEmail] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    void jiraConnected()
+      .then((next) => {
+        if (!cancelled) {
+          setStatus(next);
+          setSite(next.site);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const save = async (disconnect = false) => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      setStatus(await saveJiraConfig(site, email, disconnect ? "" : token));
+      setToken("");
+      clearInboxCache();
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Row
+        label={
+          <span className="flex items-center gap-2">
+            <InboxProviderMark provider="jira" className="size-4 shrink-0" />
+            Connection
+          </span>
+        }
+        description="Read Jira Cloud issues with your Atlassian email and an API token without scopes. Disconnect removes the local token."
+      >
+        {status.connected ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span
+              className="max-w-56 truncate text-[12px] text-content/50"
+              title={`${status.site} · ${status.account}`}
+            >
+              {status.site} · {status.account}
+            </span>
+            <SecondaryButton onClick={() => void save(true)} disabled={busy}>
+              Disconnect
+            </SecondaryButton>
+          </div>
+        ) : (
+          <div className="flex min-w-0 max-w-md flex-wrap items-center justify-end gap-2">
+            {(
+              [
+                {
+                  value: site,
+                  change: setSite,
+                  type: "url",
+                  label: "Jira Cloud site",
+                  placeholder: "https://team.atlassian.net",
+                },
+                {
+                  value: email,
+                  change: setEmail,
+                  type: "email",
+                  label: "Atlassian email",
+                  placeholder: "you@example.com",
+                },
+                {
+                  value: token,
+                  change: setToken,
+                  type: "password",
+                  label: "Jira API token",
+                  placeholder: "API token",
+                },
+              ] as const
+            ).map((field) => (
+              <label
+                key={field.label}
+                className="flex h-7 w-52 items-center rounded-md border border-content/10 px-2 focus-within:border-content/20"
+              >
+                <input
+                  type={field.type}
+                  value={field.value}
+                  onChange={(event) => field.change(event.target.value)}
+                  placeholder={field.placeholder}
+                  aria-label={field.label}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={busy}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      site.trim() &&
+                      email.trim() &&
+                      token.trim()
+                    )
+                      void save();
+                  }}
+                  className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/35"
+                />
+              </label>
+            ))}
+            <SecondaryButton
+              disabled={busy || !site.trim() || !email.trim() || !token.trim()}
+              onClick={() => void save()}
+            >
+              {busy ? "Connecting" : "Connect"}
+            </SecondaryButton>
+          </div>
+        )}
+      </Row>
+      {error ? (
+        <p className="pb-2 text-[12px] text-red-400/90">{error}</p>
+      ) : null}
     </>
   );
 }

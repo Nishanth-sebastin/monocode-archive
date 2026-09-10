@@ -62,7 +62,7 @@ const SOURCE_KEY = "monocode.inboxSource";
 export function loadInboxSource(): InboxSource {
   try {
     const raw = localStorage.getItem(SOURCE_KEY);
-    return raw === "linear" || raw === "gitlab" ? raw : "github";
+    return raw === "linear" || raw === "gitlab" || raw === "jira" ? raw : "github";
   } catch {
     return "github";
   }
@@ -271,8 +271,8 @@ export function applyInboxFilters(
   source?: InboxSource,
 ): InboxItem[] {
   const scoped = source ? filterInboxByProvider(items, source) : [...items];
-  const hiddenProjects = source === "linear" ? [] : filters.hiddenProjects;
-  const hiddenKinds = source === "linear" ? [] : filters.hiddenKinds;
+  const hiddenProjects = source === "linear" || source === "jira" ? [] : filters.hiddenProjects;
+  const hiddenKinds = source === "linear" || source === "jira" ? [] : filters.hiddenKinds;
   return filterInboxItems(
     filterInboxByStatus(
       filterInboxByTime(
@@ -296,7 +296,7 @@ export function statusFilterForSource(
   status: InboxStatusFilter,
   source?: InboxSource,
 ): InboxStatusFilter {
-  if (source !== "linear") return status;
+  if (source !== "linear" && source !== "jira") return status;
   return {
     open: status.open,
     closed: status.closed,

@@ -9,6 +9,7 @@ mod fs;
 mod gitlab;
 mod harness;
 mod inbox_media;
+mod jira;
 mod linear;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -252,6 +253,11 @@ pub fn run() {
             gitlab::gitlab_work_item_comment,
             gitlab::gitlab_mr_diff,
             linear::linear_status,
+            jira::jira_status,
+            jira::jira_set_config,
+            jira::jira_list_issues,
+            jira::jira_options,
+            jira::jira_issue_content,
             linear::linear_set_token,
             linear::linear_list_teams,
             linear::linear_list_issues,

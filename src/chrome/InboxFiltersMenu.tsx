@@ -10,6 +10,7 @@ import {
   type LinearProjectOption,
 } from "../lib/inboxFilters";
 import type { LinearTeam } from "../lib/linear";
+import { DEFAULT_JIRA_FILTER, type JiraFilter, type JiraOption } from "../lib/jira";
 import { Popover } from "./Popover";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
 
@@ -34,6 +35,11 @@ type Props = {
   /** Shared with Settings → Linear Teams; narrows the fetch, not just the list. */
   onLinearTeamsChange: (ids: string[]) => void;
   onClose: () => void;
+  jiraFilter?: JiraFilter;
+  jiraProjects?: JiraOption[];
+  jiraFavorites?: JiraOption[];
+  jiraOptionsError?: string;
+  onJiraFilterChange?: (filter: JiraFilter) => void;
 };
 
 const TIME_OPTIONS: { id: InboxTimeFilter; label: string }[] = [
@@ -72,7 +78,13 @@ export function InboxFiltersMenu({
   onChange,
   onLinearTeamsChange,
   onClose,
+  jiraFilter = DEFAULT_JIRA_FILTER,
+  jiraProjects = [],
+  jiraFavorites = [],
+  jiraOptionsError,
+  onJiraFilterChange,
 }: Props) {
+  const ticket = source === "linear" || source === "jira";
   const hiddenProjects = new Set(filters.hiddenProjects);
   const hiddenLinearProjects = new Set(filters.hiddenLinearProjects);
   const hiddenTeams = new Set(hiddenLinearTeamIds);
@@ -136,8 +148,16 @@ export function InboxFiltersMenu({
     >
       <FilterItem
         label="Assigned to me"
-        checked={filters.assignedToMe}
-        onClick={toggleAssigned}
+        checked={source === "jira" ? jiraFilter.assigned : filters.assignedToMe}
+        onClick={
+          source === "jira"
+            ? () =>
+                onJiraFilterChange?.({
+                  ...jiraFilter,
+                  assigned: !jiraFilter.assigned,
+                })
+            : toggleAssigned
+        }
       />
 
       <SectionLabel>Status</SectionLabel>
@@ -146,7 +166,7 @@ export function InboxFiltersMenu({
         checked={filters.status.open}
         onClick={() => toggleStatus("open")}
       />
-      {source !== "linear" ? (
+      {!ticket ? (
         <FilterItem
           label="Draft"
           checked={filters.status.draft}
@@ -158,7 +178,7 @@ export function InboxFiltersMenu({
         checked={filters.status.closed}
         onClick={() => toggleStatus("closed")}
       />
-      {source !== "linear" ? (
+      {!ticket ? (
         <FilterItem
           label="Merged"
           checked={filters.status.merged}
@@ -176,7 +196,7 @@ export function InboxFiltersMenu({
         />
       ))}
 
-      {source !== "linear" ? (
+      {!ticket ? (
         <>
           <SectionLabel>Type</SectionLabel>
           {KIND_OPTIONS.map((option) => (
@@ -223,7 +243,53 @@ export function InboxFiltersMenu({
         </>
       ) : null}
 
-      {source !== "linear" && projects.length > 0 ? (
+      {source === "jira" ? (
+        <>
+          <SectionLabel>Projects</SectionLabel>
+          <FilterItem
+            label="All projects"
+            checked={!jiraFilter.project}
+            onClick={() => onJiraFilterChange?.({ ...jiraFilter, project: "" })}
+          />
+          {jiraProjects.map((project) => (
+            <FilterItem
+              key={project.id}
+              label={project.name}
+              checked={jiraFilter.project === project.id}
+              onClick={() =>
+                onJiraFilterChange?.({ ...jiraFilter, project: project.id })
+              }
+            />
+          ))}
+          <SectionLabel>Favorite filters</SectionLabel>
+          <FilterItem
+            label="No saved filter"
+            checked={!jiraFilter.filter}
+            onClick={() => onJiraFilterChange?.({ ...jiraFilter, filter: "" })}
+          />
+          {jiraFavorites.map((filter) => (
+            <FilterItem
+              key={filter.id}
+              label={filter.name}
+              checked={jiraFilter.filter === filter.id}
+              onClick={() =>
+                onJiraFilterChange?.({
+                  ...jiraFilter,
+                  filter: filter.id,
+                  assigned: false,
+                })
+              }
+            />
+          ))}
+          {jiraOptionsError ? (
+            <p className="px-2 py-1 text-[12px] text-content/50">
+              {jiraOptionsError} Close and reopen filters to retry.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+
+      {!ticket && projects.length > 0 ? (
         <>
           <SectionLabel>Projects</SectionLabel>
           {projects.map((project) => (
@@ -246,7 +312,9 @@ export function InboxFiltersMenu({
         </>
       ) : null}
 
-      {hasActiveInboxFilters(filters, source, hiddenLinearTeamIds) ? (
+      {hasActiveInboxFilters(filters, source, hiddenLinearTeamIds) ||
+      (source === "jira" &&
+        (jiraFilter.project || jiraFilter.filter || !jiraFilter.assigned)) ? (
         <>
           <div role="separator" className="my-1 h-px bg-content/10" />
           <button
@@ -256,6 +324,7 @@ export function InboxFiltersMenu({
             onClick={() => {
               onChange(DEFAULT_INBOX_FILTERS);
               if (teamsActive) onLinearTeamsChange([]);
+              if (source === "jira") onJiraFilterChange?.(DEFAULT_JIRA_FILTER);
             }}
             className="flex h-7 w-full items-center rounded-lg px-2 text-left text-[13px] leading-none text-content/70 hover:bg-content/5 hover:text-content"
           >

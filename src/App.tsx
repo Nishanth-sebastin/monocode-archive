@@ -336,6 +336,7 @@ import {
   resolveLinkedWorkItem,
 } from "./lib/sessionWorkItem";
 import { linearIssueDetails, peekLinearIssueDetails } from "./lib/linear";
+import { jiraDetails, peekJiraDetails } from "./lib/jira";
 import { gitlabWorkItemDetails, peekGitlabWorkItemDetails } from "./lib/gitlab";
 import {
   loadLiveAgentsEnabled,
@@ -1484,7 +1485,7 @@ export default function App({
         const cwd =
           item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
         const ref =
-          item.provider === "linear"
+          item.provider === "linear" || item.provider === "jira"
             ? item.identifier?.trim() || `#${item.number}`
             : `#${item.number}`;
         const linkedWorkItem = linkedWorkItemFromInboxItem(item);
@@ -1501,6 +1502,11 @@ export default function App({
         setComposerFocused(true);
       };
 
+      if (item.provider === "jira") {
+        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
+        start(body ?? (peekJiraDetails(item) ?? await jiraDetails(item)).body);
+        return;
+      }
       if (item.provider !== "linear") {
         start();
         return;
@@ -2632,26 +2638,28 @@ export default function App({
               ? candidate
               : await invoke<string>("default_cwd");
           const description =
-            item.provider === "linear" && item.id
-              ? (
-                  peekLinearIssueDetails(item.id) ??
-                  (await linearIssueDetails(item.id))
-                ).body
-              : item.provider === "gitlab" &&
-                  (item.kind === "issue" || item.kind === "pr")
+            item.provider === "jira"
+              ? (peekJiraDetails(item) ?? (await jiraDetails(item))).body
+              : item.provider === "linear" && item.id
                 ? (
-                    peekGitlabWorkItemDetails(
-                      item.projectPath,
-                      item.kind,
-                      item.number,
-                    ) ??
-                    (await gitlabWorkItemDetails(
-                      item.projectPath,
-                      item.kind,
-                      item.number,
-                    ))
+                    peekLinearIssueDetails(item.id) ??
+                    (await linearIssueDetails(item.id))
                   ).body
-                : undefined;
+                : item.provider === "gitlab" &&
+                    (item.kind === "issue" || item.kind === "pr")
+                  ? (
+                      peekGitlabWorkItemDetails(
+                        item.projectPath,
+                        item.kind,
+                        item.number,
+                      ) ??
+                      (await gitlabWorkItemDetails(
+                        item.projectPath,
+                        item.kind,
+                        item.number,
+                      ))
+                    ).body
+                  : undefined;
           session = {
             ...newDefaultSession(cwd),
             title: `Ask · ${item.title}`,
@@ -2660,6 +2668,13 @@ export default function App({
               title: item.title,
               url: item.url,
               provider: item.provider,
+              ...(item.provider === "jira"
+                ? {
+                    site: item.site,
+                    project: item.projectName,
+                    identifier: item.identifier,
+                  }
+                : {}),
               description,
             },
           };
@@ -5674,6 +5689,7 @@ export default function App({
             onClose={onLeaveInbox}
             onToggleSidebar={onToggleSidebar}
             onStart={onStartInboxItem}
+            onOpenSettings={() => openSettings("general")}
             onAsk={onAskInboxItem}
             onAskRestart={onRestartInboxAsk}
             onAskMount={setInboxAskPortal}

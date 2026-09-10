@@ -1011,7 +1011,7 @@ fn delete_config(app: &AppHandle) -> Result<(), String> {
     }
 }
 
-fn write_secret_file(path: &Path, value: &str) -> Result<(), String> {
+pub(crate) fn write_secret_file(path: &Path, value: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::io::Write;

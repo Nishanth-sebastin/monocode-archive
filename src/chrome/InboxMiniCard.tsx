@@ -17,7 +17,7 @@ export function InboxMiniCard({ card, onDismiss }: Props) {
         : "Pull request"
       : "Issue";
   const providerLabel =
-    card.provider === "linear"
+    card.provider === "jira" ? "Jira" : card.provider === "linear"
       ? "Linear"
       : card.provider === "gitlab"
         ? "GitLab"
