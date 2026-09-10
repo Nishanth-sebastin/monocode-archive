@@ -55,7 +55,7 @@ export function queuedMessageForSubmit(
     (entry) => entry.id === messageId,
   );
   if (!message) return undefined;
-  if (mode === "steer") return message;
+  if (mode === "steer") return message.repair ? undefined : message;
   if (queuedHead(session)?.id !== messageId) return undefined;
   if (!canDispatchQueuedHead(session)) return undefined;
   return message;

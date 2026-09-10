@@ -1,3 +1,5 @@
+import { ciRepair } from "../lib/repair";
+import { RepairStatus } from "./RepairStatus";
 import { useEffect, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -486,7 +488,7 @@ function CiSourcePanel({
         setLog(data);
       }
     }, true);
-  const handoff = () =>
+  const handoff = (repair = false) =>
     void run(async (current) => {
       if (!selected || !job || !log || !ciMatches(selected)) return;
       const checked = await ciRead<CiLog>(
@@ -502,8 +504,10 @@ function CiSourcePanel({
         },
       );
       if (!current()) return;
+      const draft = repair ? ciRepair(source, head, selected, job, checked) : undefined;
       requestAgentContext({
-        context: ciLogContext(source, head, selected, job, checked),
+        repair: draft?.evidence,
+        context: draft?.context ?? ciLogContext(source, head, selected, job, checked),
         cwd: head.cwd,
         sourceSessionId: source.session,
         requireDestinationSelection: !source.session,
@@ -516,6 +520,7 @@ function CiSourcePanel({
     );
   return (
     <section className="space-y-2 border-t border-content/10 pt-3">
+      <RepairStatus scope={ciKey(source.target)} cwd={head.cwd} />
       <h3 className="font-medium">
         {source.definitionName} · {source.projectName}
       </h3>
@@ -697,10 +702,11 @@ function CiSourcePanel({
                 <button
                   className={button}
                   disabled={busy || !sameAccount || !ciMatches(selected)}
-                  onClick={handoff}
+                  onClick={() => handoff()}
                 >
                   Send log to agent
                 </button>
+                {selected.result === "failed" && job.result === "failed" && ciMatches(selected) ? <button className={button} disabled={busy || !sameAccount} onClick={() => handoff(true)}>Fix CI</button> : null}
               </div>
               {!ciMatches(selected) ? (
                 <p className="text-content/50">

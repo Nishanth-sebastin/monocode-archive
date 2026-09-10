@@ -1,3 +1,4 @@
+import { repairOwnerError } from "../lib/repair";
 import { searchSessions, type SessionSummary } from "../lib/sessionStore";
 import { useEffect, useRef, useState } from "react";
 import { getVerifiedFamilies } from "../lib/repositoryFamilies";
@@ -43,8 +44,10 @@ export function AgentContextPicker({
     request.context.entries.length > 0 &&
     request.context.entries.every((entry) => !!entry.ticket);
   const [destination, setDestination] = useState(
-    request.requireDestinationSelection ? "" : request.sourceSessionId ?? "new",
+    request.requireDestinationSelection || (request.repair && !sessions.some(s => s.id === request.sourceSessionId && !repairOwnerError(s, request.repair!))) ? "" : request.sourceSessionId ?? "new",
   );
+  const [instruction, setInstruction] = useState(request.context.instruction ?? "");
+  const [selected, setSelected] = useState(() => request.context.entries.map(entry => entry.id));
   const [fresh, setFresh] = useState(() => newDefaultSession(request.cwd));
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
@@ -97,7 +100,8 @@ export function AgentContextPicker({
     destination === "new"
       ? fresh
       : available.find((session) => session.id === destination);
-  const unsupported = !destination
+  const repairError = request.repair ? !selected.length || !instruction.trim() ? "Select evidence and enter an instruction." : destination === "new" ? repairOwnerError(fresh, request.repair) : sessions.find(s => s.id === destination) ? repairOwnerError(sessions.find(s => s.id === destination), request.repair) : "" : "";
+  const unsupported = repairError || (!destination
     ? "Choose an agent conversation or a new conversation."
     : !target
     ? "Conversation closed. Choose another."
@@ -107,7 +111,7 @@ export function AgentContextPicker({
       ? "This agent does not support attachments."
       : destination === "new" && (!fresh.cwd || fresh.cwd === "~")
         ? "Choose a project."
-        : "";
+        : "");
   const knownProjects = [
     ...new Map(
       [
@@ -138,9 +142,9 @@ export function AgentContextPicker({
     .slice(0, 30);
   return (
     <Modal
-      title={tickets ? "Open conversation" : "Send to agent"}
+      title={request.repair ? request.repair.kind === "ci" ? "Fix CI" : "Address comments" : tickets ? "Open conversation" : "Send to agent"}
       description={
-        tickets
+        request.repair ? "Review selected evidence and send one repair request" : tickets
           ? `${request.context.entries.length} selected · titles and descriptions · send when ready`
           : "Selected context · does not auto-send"
       }
@@ -148,6 +152,12 @@ export function AgentContextPicker({
       className="max-h-[85vh] [&_header_h2]:text-base"
     >
       <div ref={body} className="p-2 text-[12px] text-content">
+        {request.repair ? <div className="mb-2 space-y-2">
+          <p className="break-all text-content/60">{request.repair.head.cwd} · {wslLocation(request.repair.head.cwd) ? "WSL" : "Local host"}<br />{request.repair.head.branch} · commit {request.repair.head.commit}</p>
+          <div className="max-h-40 overflow-auto">{request.context.entries.map(entry => <details key={entry.id} className="border-b border-content/10 py-1"><summary><label><input type="checkbox" checked={selected.includes(entry.id)} onChange={event => setSelected(ids => event.target.checked ? [...ids, entry.id] : ids.filter(id => id !== entry.id))} /> {entry.title}</label></summary><p className="break-all text-content/50">{entry.origin}</p><pre className="whitespace-pre-wrap break-words">{entry.text}</pre></details>)}</div>
+          <label className="block">Repair instruction<textarea aria-label="Repair instruction" maxLength={4000} rows={3} className="mt-1 w-full rounded border border-content/10 bg-transparent p-1" value={instruction} onChange={event => setInstruction(event.target.value)} /></label>
+          <p className="text-content/50">Busy agents receive a queued turn while the app is open. Mid-turn steering is unavailable for tracked repair requests. No automatic replies, reruns, pushes or merges.</p>
+        </div> : null}
         <input
           autoFocus
           aria-label="Search conversations"
@@ -235,6 +245,7 @@ export function AgentContextPicker({
         {error || unsupported ? (
           <p role="alert" className="px-2 py-1 text-red-400">
             {error || unsupported}
+            {request.repair && error ? <button className="ml-2 underline" onClick={onClose}>Close and refresh evidence</button> : null}
           </p>
         ) : null}
         <div className="sticky bottom-0 mt-2 flex justify-end gap-2 border-t border-content/10 bg-background-base pt-2">
@@ -259,7 +270,7 @@ export function AgentContextPicker({
                 const id = await onPrepare(
                   {
                     ...request,
-                    context: request.context,
+                    context: request.repair ? { ...request.context, entries: request.context.entries.filter(entry => selected.includes(entry.id)), instruction } : request.context,
                   },
                   destination === "new" ? fresh : destination,
                   controller.signal,
@@ -276,7 +287,8 @@ export function AgentContextPicker({
             }}
           >
             {pending
-              ? "Loading context…"
+              ? request.repair ? "Checking evidence…" : "Loading context…"
+              : request.repair ? destination === "new" ? "Start repair session" : target && "busy" in target && target.busy ? "Queue for owner" : "Send to owner"
               : tickets
                 ? "Open conversation"
                 : "Add to chat"}

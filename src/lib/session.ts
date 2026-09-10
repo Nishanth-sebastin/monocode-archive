@@ -136,6 +136,7 @@ export type Attachment = {
 };
 
 export type QueuedMessage = {
+  repair?: import("./repair").RepairDelivery;
   id: string;
   text: string;
   attachments: Attachment[];

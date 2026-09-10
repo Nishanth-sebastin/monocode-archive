@@ -351,6 +351,8 @@ function MessageQueue({
                   </span>
                   <button
                     type="button"
+                    disabled={!!message.repair}
+                    title={message.repair ? "Tracked repairs run as a separate queued turn" : undefined}
                     onClick={() => onSteer?.(message.id)}
                     className="flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 hover:bg-content/10 hover:text-content"
                   >
@@ -361,6 +363,7 @@ function MessageQueue({
                     type="button"
                     title="Edit queued message"
                     aria-label="Edit queued message"
+                    disabled={!!message.repair}
                     onClick={() => startEdit(message)}
                     className="grid size-6 shrink-0 place-items-center rounded-md hover:bg-content/10 hover:text-content"
                   >

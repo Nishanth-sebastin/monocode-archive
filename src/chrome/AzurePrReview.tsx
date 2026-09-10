@@ -1,3 +1,5 @@
+import { commentsRepair, unresolvedThread } from "../lib/repair";
+import { RepairStatus } from "./RepairStatus";
 import type { LinkedWorkItem } from "../lib/session";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
@@ -757,8 +759,16 @@ function AzurePrDetails({
       });
       onHandoff();
     });
+  const repairComments = () => read(async () => {
+    const draft = await commentsRepair(association, threads?.items ?? [], pageRef.current);
+    if (!mounted.current) return;
+    requestAgentContext({ context: draft.context, repair: draft.evidence, cwd: association.cwd, sourceSessionId: association.sourceSessionId, requireDestinationSelection: !association.sourceSessionId });
+    onHandoff();
+  });
   return (
     <div className="space-y-2">
+      <RepairStatus scope={azurePrKey(association.target)} cwd={association.cwd} />
+      {association.pr.status === "active" && threads?.items.some(unresolvedThread) ? <button className={button} disabled={busy} onClick={() => void repairComments()}>Address comments · this page</button> : null}
       <button className={button} disabled={busy} onClick={() => void load()}>
         {busy
           ? "Loading review…"
