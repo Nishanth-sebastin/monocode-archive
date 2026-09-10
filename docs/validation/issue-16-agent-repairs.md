@@ -18,9 +18,19 @@ A failed run's selected failing job/log is the initial CI repair unit. Review se
 
 ## Validation
 
-- 1,598 web tests and TypeScript pass before fresh review. Targeted tests cover changed commit/log/comment state, source ownership/provider changes, duplicate/uncertain records, explicit reconciliation, exact destination while another session is present, selection and rapid clicks.
-- Full native checks, production web build, browser interactions and fresh independent review are recorded in the PR after completion.
-- Screenshot/interaction fixture uses actual Changes, Azure views and AgentContextPicker, with disposable native/provider IO. It does not prove authenticated agent or service acceptance.
+- 1,601 web tests and TypeScript pass after review fixes. Targeted tests cover changed commit/log/comment state, source ownership/provider changes, duplicate/uncertain records, explicit reconciliation, exact destination while another session is present, selection and rapid clicks.
+- Native formatting, Clippy and 269 Rust tests (1 ignored) pass. Production web build passes. Fresh independent review and follow-up verification have no remaining findings. Parent follow-up found and fixed the asynchronous queue scheduling race; regression tests gate queue scheduling/timer dispatch and reject reservation during another check. Stale drafts disable send and retain refresh recovery.
+- Browser interactions at 1100×760 use actual Changes/Azure views and AgentContextPicker. Other-checkout selection is rejected; deselection, editable instructions, keyboard submit and stale-evidence recovery were exercised in light/dark themes.
+- A separate isolated full-App fixture registers disposable Codex/Claude adapters and native IO. With another session focused, two rapid clicks produce one Codex transport to `fixture-session` in `/fixture/repository`. A second pipeline repair remains queued while the first runs. Holding `azure_ci_context` through tab rerenders creates one pending check; releasing it produces exactly one additional transport. Stop changes the record to uncertain; retry does not add a third transport. A selected unresolved Azure thread also reaches the exact Codex owner through the real App submit path. Final fixture has no browser errors. These are manual checks with mocked IO, not authenticated provider/platform acceptance.
+
+| View | Evidence |
+| --- | --- |
+| Before: CI log, same 1100×760 dark fixture | [Before](../images/azure-ci-log-dark.png) |
+| Localized Fix CI entry | [After](../images/repair-ci-entry-dark.png) |
+| Repair sheet, dark and light | [Dark](../images/repair-sheet-dark.png) · [Light](../images/repair-sheet-light.png) |
+| Selected review comment | [Comments](../images/repair-comments-dark.png) |
+| Uncertain dispatch prevents retry in the actual App | [Recovery](../images/repair-uncertain-app-dark.png) |
+
 
 ## Remaining acceptance
 

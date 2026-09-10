@@ -109,7 +109,11 @@ function save(next: RepairRecord[]) {
   records = next;
   window.dispatchEvent(new Event(REPAIR_CHANGE));
 }
-export function reserveRepair(delivery: RepairDelivery) {
+export function reserveRepair(delivery: RepairDelivery, checkingOwner = false) {
+  if (checkingOwner)
+    throw new Error(
+      "Another repair is checking this agent. Wait before trying again.",
+    );
   const rows = repairRecords();
   const { evidence: e, owner } = delivery;
   // One active repair per artifact and checkout, including overlapping thread/job selections.

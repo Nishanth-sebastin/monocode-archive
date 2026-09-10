@@ -118,3 +118,9 @@ describe("queuedMessageForSubmit", () => {
     expect(queuedMessageForSubmit(chat(), "missing", "steer")).toBeUndefined();
   });
 });
+
+it("holds a queued head through asynchronous repair checking", () => {
+ const session = { busy: false, blocks: [], queuedMessages: [{ id: "repair", text: "Fix", attachments: [] }] } as unknown as Session;
+ expect(canDispatchQueuedHead(session, true)).toBe(false);
+ expect(canDispatchQueuedHead(session, false)).toBe(true);
+});

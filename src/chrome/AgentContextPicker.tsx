@@ -101,6 +101,7 @@ export function AgentContextPicker({
       ? fresh
       : available.find((session) => session.id === destination);
   const repairError = request.repair ? !selected.length || !instruction.trim() ? "Select evidence and enter an instruction." : destination === "new" ? repairOwnerError(fresh, request.repair) : sessions.find(s => s.id === destination) ? repairOwnerError(sessions.find(s => s.id === destination), request.repair) : "" : "";
+  const staleRepair = !!request.repair && /changed|no longer|stale|already attempted/i.test(error);
   const unsupported = repairError || (!destination
     ? "Choose an agent conversation or a new conversation."
     : !target
@@ -154,6 +155,7 @@ export function AgentContextPicker({
       <div ref={body} className="p-2 text-[12px] text-content">
         {request.repair ? <div className="mb-2 space-y-2">
           <p className="break-all text-content/60">{request.repair.head.cwd} · {wslLocation(request.repair.head.cwd) ? "WSL" : "Local host"}<br />{request.repair.head.branch} · commit {request.repair.head.commit}</p>
+          <p className="break-all text-content/60">{request.repair.kind === "ci" ? `Run ${request.repair.run.id} · attempt ${request.repair.log.attempt} · account ${request.repair.source.target.accountId} · ${request.repair.source.target.repositoryType}/${request.repair.source.target.repositoryId}` : `PR #${request.repair.association.target.number} · account ${request.repair.association.target.accountId} · repository ${request.repair.association.target.repository}`}<br />Revision: {request.repair.kind === "ci" ? request.repair.run.revision : request.repair.association.revision}</p>
           <div className="max-h-40 overflow-auto">{request.context.entries.map(entry => <details key={entry.id} className="border-b border-content/10 py-1"><summary><label><input type="checkbox" checked={selected.includes(entry.id)} onChange={event => setSelected(ids => event.target.checked ? [...ids, entry.id] : ids.filter(id => id !== entry.id))} /> {entry.title}</label></summary><p className="break-all text-content/50">{entry.origin}</p><pre className="whitespace-pre-wrap break-words">{entry.text}</pre></details>)}</div>
           <label className="block">Repair instruction<textarea aria-label="Repair instruction" maxLength={4000} rows={3} className="mt-1 w-full rounded border border-content/10 bg-transparent p-1" value={instruction} onChange={event => setInstruction(event.target.value)} /></label>
           <p className="text-content/50">Busy agents receive a queued turn while the app is open. Mid-turn steering is unavailable for tracked repair requests. No automatic replies, reruns, pushes or merges.</p>
@@ -258,10 +260,10 @@ export function AgentContextPicker({
           </button>
           <button
             type="button"
-            disabled={!!unsupported || pending}
+            disabled={!!unsupported || pending || staleRepair}
             className="rounded-md bg-content/10 px-2.5 py-1.5 disabled:opacity-40"
             onClick={async () => {
-              if (submitting.current || unsupported) return;
+              if (submitting.current || unsupported || staleRepair) return;
               submitting.current = true;
               setPending(true);
               const controller = new AbortController();

@@ -227,3 +227,12 @@ it("verifies selected unresolved comments as well as PR revision", async () => {
     "Selected comments changed",
   );
 });
+
+it("does not reserve a second scope while its destination is being checked", () => {
+  const draft = delivery();
+  draft.evidence.scope = "another-pipeline";
+  expect(() => reserveRepair(draft, true)).toThrow(
+    "Another repair is checking",
+  );
+  expect(repairRecords().some((row) => row.id === draft.id)).toBe(false);
+});

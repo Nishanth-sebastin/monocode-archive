@@ -278,7 +278,7 @@ it("requires exact-checkout repair ownership, editable selection, and sends only
   const root = createRoot(host);
   const sessions = [{ id: "owner", harness: "codex", cwd: "/repo", title: "Owner", blocks: [], busy: true }, { id: "focused", harness: "codex", cwd: "/other", title: "Other focused session", blocks: [] }] as unknown as Session[];
   const context = contextFromText("Failure", "Run 8, attempt 2", "Azure account/repo/run"); context.instruction = "Fix selected failure";
-  const request: import("../lib/agentContext").AgentContextRequest = { context, cwd: "/repo", sourceSessionId: "owner", repair: { kind: "ci", scope: "pipeline-7", head: { cwd: "/repo", branch: "feature", commit: "abc", remote: "https://github.com/team/repo" } } as import("../lib/repair").RepairEvidence };
+  const request: import("../lib/agentContext").AgentContextRequest = { context, cwd: "/repo", sourceSessionId: "owner", repair: { kind: "ci", scope: "pipeline-7", run: { id: 8, revision: "run-8" }, log: { attempt: 2 }, source: { target: { accountId: "account", repositoryType: "GitHub", repositoryId: "team/repo" } }, head: { cwd: "/repo", branch: "feature", commit: "abc", remote: "https://github.com/team/repo" } } as import("../lib/repair").RepairEvidence };
   let finish!: (id: string) => void;
   const onPrepare = vi.fn(() => new Promise<string>(resolve => { finish = resolve; }));
   const onOpen = vi.fn(), onClose = vi.fn();
@@ -298,4 +298,21 @@ it("requires exact-checkout repair ownership, editable selection, and sends only
     expect(onPrepare).toHaveBeenCalledWith(expect.objectContaining({ context: expect.objectContaining({ instruction: "Fix selected failure" }) }), "owner", expect.any(AbortSignal));
     await act(async () => finish("owner")); expect(onOpen).toHaveBeenCalledExactlyOnceWith("owner");
   } finally { await act(async () => root.unmount()); host.remove(); live.mockRestore(); vi.unstubAllGlobals(); }
+});
+
+it("keeps a stale repair draft visible but prevents another send until evidence is refreshed", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const registry = await import("../lib/harness/registry"); const live = vi.spyOn(registry, "isLiveHarness").mockReturnValue(true);
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  const context = contextFromText("Failure", "Selected log", "Azure"); context.instruction = "Fix failure";
+  const request = { context, cwd: "/repo", sourceSessionId: "owner", repair: {kind: "ci", scope: "ci", run: {id: 8, revision: "run-8"}, log: {attempt: 2}, source: {target: {accountId: "a",repositoryId:"repo",repositoryType:"GitHub"}}, head: {cwd:"/repo",branch:"feature",commit:"head",remote:"https://github.com/a/b"}} } as import("../lib/agentContext").AgentContextRequest;
+  const sessions = [{id:"owner",harness:"codex",cwd:"/repo",title:"Owner",blocks:[]}] as unknown as Session[];
+  const onPrepare = vi.fn().mockRejectedValue(new Error("Run changed. Refresh evidence."));
+  try {
+    await act(async()=>root.render(createElement(AgentContextPicker,{request,sessions,recents:[],onPrepare,onOpen:vi.fn(),onClose:vi.fn()})));
+    const button=()=>[...document.querySelectorAll("button")].find(b=>b.textContent==="Send to owner")!;
+    await act(async()=>button().click());
+    expect(button().disabled).toBe(true); expect(document.body.textContent).toContain("Close and refresh evidence");
+    await act(async()=>button().click()); expect(onPrepare).toHaveBeenCalledOnce();
+  } finally {await act(async()=>root.unmount());host.remove();live.mockRestore();vi.unstubAllGlobals();}
 });

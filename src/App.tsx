@@ -1561,7 +1561,7 @@ export default function App({
       if (error) throw new Error(error);
       const delivery: RepairDelivery = { id: crypto.randomUUID(), evidence: request.repair, context, owner: { id: target.id, harness: target.harness, model: target.model, cwd: sessionWorkCwd(target), runtimeMode: target.runtimeMode, providerSessionId: target.providerSessionId } };
       signal?.throwIfAborted();
-      reserveRepair(delivery);
+      reserveRepair(delivery, repairCheckingRef.current.has(target.id));
       if (!existing) {
         const updated = [...sessionsRef.current, target];
         sessionsRef.current = updated;
@@ -3827,7 +3827,7 @@ export default function App({
       const repair = options?.repair ?? storedCurrent?.queuedMessages?.find(row => row.id === options?.queuedMessageId)?.repair;
       if (!storedCurrent) return;
       if (repair) {
-        if (repairCheckingRef.current.has(sessionId)) { updateRepair(repair.id, "blocked", "Another repair is checking this agent. Wait before trying again."); return false; }
+        if (repairCheckingRef.current.has(sessionId)) return false;
         repairCheckingRef.current.add(sessionId);
         try {
           options?.signal?.throwIfAborted();
@@ -4449,7 +4449,7 @@ export default function App({
         continue;
       }
       if (
-        !canDispatchQueuedHead(session) ||
+        !canDispatchQueuedHead(session, repairCheckingRef.current.has(session.id)) ||
         queueDispatchingRef.current.has(session.id)
       ) {
         continue;
@@ -4470,7 +4470,7 @@ export default function App({
             !latest ||
             !head ||
             head.id !== next.id ||
-            !canDispatchQueuedHead(latest)
+            !canDispatchQueuedHead(latest, repairCheckingRef.current.has(session.id))
           ) {
             return;
           }
