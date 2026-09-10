@@ -2,6 +2,8 @@
 
 Connect in **Settings → General → Jira Cloud**, then choose **Jira** in the existing Inbox. The default is **Assigned to me**. The existing filter popover offers friendly project and favorite-filter names, remembers the site-specific selection, and combines it with text, time and open/closed filters. Jira's actual status remains visible on cards and details.
 
+Use **Inbox → Filter inbox → Visible sources** to choose which provider tabs to show. Multiple sources can remain visible, at least one stays selected, and the preference survives reopening. This controls tab visibility, not account connections or the shared refresh lifecycle. The Jira form uses visible field labels and a shared Jira mark (Simple Icons, CC0), with a full-width site field and aligned email/token fields.
+
 Select a ticket to load its description/comments. **Send to agent** uses Linear's explicit local-project chooser and prepares a fresh conversation's existing composer card; the user reviews and sends it. **Ask** uses the existing Inbox conversation flow. **Open in Jira** opens the original ticket. Imported content is untrusted reference data. No Jira comments, transitions or assignments are written. Failed handoff retains the selected ticket/project; read errors offer local Retry. Jira never determines the Git, PR, CI or agent provider.
 
 ## Connection and limits
@@ -25,6 +27,7 @@ Before/after Inbox images use the same 1280×800 dark viewport; the compact ligh
 ![Jira Inbox, dark](images/jira-inbox-dark.png)
 ![Jira Inbox, compact light](images/jira-inbox-compact-light.png)
 ![Jira Settings, compact dark](images/jira-settings-compact-dark.png)
+![Visible Inbox sources](images/jira-visible-sources.png)
 
 ### Performance, compatibility and remaining acceptance
 

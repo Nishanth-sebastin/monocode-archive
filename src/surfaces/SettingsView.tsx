@@ -546,7 +546,7 @@ function GeneralPage({
       <Heading title="Linear" />
       <LinearSettings />
 
-      <Heading title="Jira Cloud" />
+      <Heading title={<span className="flex items-center gap-2"><InboxProviderMark provider="jira" className="size-4 shrink-0" />Jira Cloud</span>} />
       <JiraSettings />
 
       <Heading title="About" />
@@ -599,13 +599,9 @@ function JiraSettings() {
   return (
     <>
       <Row
-        label={
-          <span className="flex items-center gap-2">
-            <InboxProviderMark provider="jira" className="size-4 shrink-0" />
-            Connection
-          </span>
-        }
-        description="Read Jira Cloud issues with your Atlassian email and an API token without scopes. Disconnect removes the local token."
+        stacked={!status.connected}
+        label={status.connected ? "Connected account" : "Connect your account"}
+        description="Browse issues from your Jira Cloud site. Your API token stays on this device."
       >
         {status.connected ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -620,7 +616,13 @@ function JiraSettings() {
             </SecondaryButton>
           </div>
         ) : (
-          <div className="flex min-w-0 max-w-md flex-wrap items-center justify-end gap-2">
+          <form
+            className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (site.trim() && email.trim() && token.trim()) void save();
+            }}
+          >
             {(
               [
                 {
@@ -648,8 +650,11 @@ function JiraSettings() {
             ).map((field) => (
               <label
                 key={field.label}
-                className="flex h-7 w-52 items-center rounded-md border border-content/10 px-2 focus-within:border-content/20"
+                className={`flex min-w-0 flex-col gap-1.5 ${field.type === "url" ? "sm:col-span-2" : ""}`}
               >
+                <span className="text-[12px] text-content/60">
+                  {field.label}
+                </span>
                 <input
                   type={field.type}
                   value={field.value}
@@ -659,30 +664,40 @@ function JiraSettings() {
                   autoComplete="off"
                   spellCheck={false}
                   disabled={busy}
-                  onKeyDown={(event) => {
-                    if (
-                      event.key === "Enter" &&
-                      site.trim() &&
-                      email.trim() &&
-                      token.trim()
-                    )
-                      void save();
-                  }}
-                  className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/35"
+                  required
+                  className="h-8 w-full min-w-0 rounded-md border border-content/10 bg-transparent px-2.5 text-[12px] text-content outline-none placeholder:text-content/35 focus:border-content/30 disabled:opacity-50"
                 />
               </label>
             ))}
-            <SecondaryButton
-              disabled={busy || !site.trim() || !email.trim() || !token.trim()}
-              onClick={() => void save()}
-            >
-              {busy ? "Connecting" : "Connect"}
-            </SecondaryButton>
-          </div>
+            <div className="flex items-start justify-between gap-4 sm:col-span-2">
+              <p className="max-w-sm text-[12px] leading-relaxed text-content/45">
+                Use an API token without scopes. Jira Server and Data Center
+                aren't supported.
+              </p>
+              <SecondaryButton
+                type="submit"
+                disabled={
+                  busy || !site.trim() || !email.trim() || !token.trim()
+                }
+              >
+                {busy ? "Connecting…" : "Connect"}
+              </SecondaryButton>
+            </div>
+            {error ? (
+              <p
+                role="alert"
+                className="text-[12px] text-red-400/90 sm:col-span-2"
+              >
+                {error}
+              </p>
+            ) : null}
+          </form>
         )}
       </Row>
-      {error ? (
-        <p className="pb-2 text-[12px] text-red-400/90">{error}</p>
+      {error && status.connected ? (
+        <p role="alert" className="pb-2 text-[12px] text-red-400/90">
+          {error}
+        </p>
       ) : null}
     </>
   );
@@ -1853,7 +1868,7 @@ function PageHeader({
   );
 }
 
-function Heading({ title, first = false }: { title: string; first?: boolean }) {
+function Heading({ title, first = false }: { title: ReactNode; first?: boolean }) {
   return (
     <h2
       className={`pb-1 text-[15px] font-semibold text-content ${
@@ -1869,13 +1884,15 @@ function Row({
   label,
   description,
   children,
+  stacked = false,
 }: {
   label: ReactNode;
   description?: string;
   children?: ReactNode;
+  stacked?: boolean;
 }) {
   return (
-    <div className="flex items-start gap-6 border-b border-content/5 py-4 last:border-b-0">
+    <div className={`flex items-start border-b border-content/5 py-4 last:border-b-0 ${stacked ? "flex-col gap-4" : "gap-6"}`}>
       <div className="min-w-0 flex-1">
         <div className="text-[13px] font-medium text-content">{label}</div>
         {description ? (
@@ -1884,7 +1901,7 @@ function Row({
           </p>
         ) : null}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      <div className={stacked ? "w-full min-w-0" : "flex shrink-0 flex-wrap items-center justify-end gap-2"}>
         {children}
       </div>
     </div>
@@ -2192,18 +2209,20 @@ function Select({
 
 function SecondaryButton({
   onClick,
+  type = "button",
   disabled = false,
   danger = false,
   children,
 }: {
-  onClick: () => void;
+  onClick?: () => void;
+  type?: "button" | "submit";
   disabled?: boolean;
   danger?: boolean;
   children: ReactNode;
 }) {
   return (
     <button
-      type="button"
+      type={type}
       onClick={onClick}
       disabled={disabled}
       className={`flex shrink-0 items-center gap-1.5 rounded-md border border-content/10 px-2.5 py-1 text-[12px] ${

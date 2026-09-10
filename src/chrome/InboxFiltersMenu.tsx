@@ -3,6 +3,8 @@ import { type ReactNode } from "react";
 import type { InboxKind } from "../lib/githubTasks";
 import {
   DEFAULT_INBOX_FILTERS,
+  INBOX_SOURCES,
+  INBOX_SOURCE_LABELS,
   hasActiveInboxFilters,
   type InboxFilters,
   type InboxSource,
@@ -10,9 +12,14 @@ import {
   type LinearProjectOption,
 } from "../lib/inboxFilters";
 import type { LinearTeam } from "../lib/linear";
-import { DEFAULT_JIRA_FILTER, type JiraFilter, type JiraOption } from "../lib/jira";
+import {
+  DEFAULT_JIRA_FILTER,
+  type JiraFilter,
+  type JiraOption,
+} from "../lib/jira";
 import { Popover } from "./Popover";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
+import { InboxProviderMark } from "./InboxProviderMark";
 
 export const INBOX_FILTER_MENU_WIDTH = 228;
 
@@ -40,6 +47,8 @@ type Props = {
   jiraFavorites?: JiraOption[];
   jiraOptionsError?: string;
   onJiraFilterChange?: (filter: JiraFilter) => void;
+  visibleSources?: InboxSource[];
+  onVisibleSourcesChange?: (sources: InboxSource[]) => void;
 };
 
 const TIME_OPTIONS: { id: InboxTimeFilter; label: string }[] = [
@@ -83,6 +92,8 @@ export function InboxFiltersMenu({
   jiraFavorites = [],
   jiraOptionsError,
   onJiraFilterChange,
+  visibleSources = INBOX_SOURCES,
+  onVisibleSourcesChange,
 }: Props) {
   const ticket = source === "linear" || source === "jira";
   const hiddenProjects = new Set(filters.hiddenProjects);
@@ -146,6 +157,37 @@ export function InboxFiltersMenu({
       onContextMenu={(event) => event.preventDefault()}
       className="overflow-y-auto overscroll-none p-1"
     >
+      {onVisibleSourcesChange ? (
+        <>
+          <SectionLabel>Visible sources</SectionLabel>
+          {INBOX_SOURCES.map((provider) => (
+            <FilterItem
+              key={provider}
+              label={INBOX_SOURCE_LABELS[provider]}
+              icon={
+                <InboxProviderMark
+                  provider={provider}
+                  className="size-3.5 shrink-0"
+                />
+              }
+              checked={visibleSources.includes(provider)}
+              disabled={
+                visibleSources.length === 1 && visibleSources.includes(provider)
+              }
+              onClick={() =>
+                onVisibleSourcesChange(
+                  INBOX_SOURCES.filter((candidate) =>
+                    candidate === provider
+                      ? !visibleSources.includes(candidate)
+                      : visibleSources.includes(candidate),
+                  ),
+                )
+              }
+            />
+          ))}
+          <div role="separator" className="my-1 h-px bg-content/10" />
+        </>
+      ) : null}
       <FilterItem
         label="Assigned to me"
         checked={source === "jira" ? jiraFilter.assigned : filters.assignedToMe}
@@ -349,20 +391,23 @@ function FilterItem({
   checked,
   icon,
   onClick,
+  disabled = false,
 }: {
   label: string;
   checked: boolean;
   icon?: ReactNode;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       role="menuitemcheckbox"
       aria-checked={checked}
+      disabled={disabled}
       onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
-      className="flex h-7 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] leading-none text-content hover:bg-content/5"
+      className="flex h-7 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] leading-none text-content hover:bg-content/5 focus-visible:outline focus-visible:outline-1 focus-visible:outline-content/50 disabled:opacity-40 disabled:hover:bg-transparent"
     >
       {icon}
       <span className="min-w-0 flex-1 truncate">{label}</span>

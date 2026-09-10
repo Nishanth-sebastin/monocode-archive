@@ -73,6 +73,9 @@ import {
   inboxFetchState,
   loadInboxFilters,
   loadInboxSource,
+  loadVisibleInboxSources,
+  saveVisibleInboxSources,
+  INBOX_SOURCE_LABELS,
   pruneInboxFilters,
   saveInboxFilters,
   saveInboxSource,
@@ -248,8 +251,7 @@ function InboxSourceTab({
   selected: boolean;
   onSelect: (source: InboxSource) => void;
 }) {
-  const label =
-    source === "jira" ? "Jira" : source === "linear" ? "Linear" : source === "gitlab" ? "GitLab" : "GitHub";
+  const label = INBOX_SOURCE_LABELS[source];
   return (
     <button
       type="button"
@@ -361,6 +363,7 @@ export function InboxView({
   const [targetItem, setTargetItem] = useState<InboxItem | null>(null);
   const [filters, setFilters] = useState(loadInboxFilters);
   const [source, setSource] = useState(loadInboxSource);
+  const [visibleSources, setVisibleSources] = useState(loadVisibleInboxSources);
   const [filterMenu, setFilterMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -427,6 +430,7 @@ export function InboxView({
   useEffect(() => {
     if (!target) return;
     setSource("github");
+    setVisibleSources(previous => previous.includes("github") ? previous : ["github", ...previous]);
     setSearchInput("");
   }, [target]);
 
@@ -682,6 +686,13 @@ export function InboxView({
     saveInboxSource(next);
   };
 
+  const onVisibleSourcesChange = (next: InboxSource[]) => {
+    if (!next.length) return;
+    setVisibleSources(next);
+    saveVisibleInboxSources(next);
+    if (!next.includes(source)) onSourceChange(next[0]);
+  };
+
   const onFilterButtonClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
     if (filterMenu) {
       setFilterMenu(null);
@@ -704,22 +715,9 @@ export function InboxView({
         aria-label="Inbox source"
         className="flex h-9 shrink-0 items-center gap-px border-b border-content/10 px-2"
       >
-        <InboxSourceTab
-          source="github"
-          selected={source === "github"}
-          onSelect={onSourceChange}
-        />
-        <InboxSourceTab
-          source="linear"
-          selected={source === "linear"}
-          onSelect={onSourceChange}
-        />
-        <InboxSourceTab
-          source="gitlab"
-          selected={source === "gitlab"}
-          onSelect={onSourceChange}
-        />
-        <InboxSourceTab source="jira" selected={source === "jira"} onSelect={onSourceChange} />
+        {visibleSources.map(provider => (
+          <InboxSourceTab key={provider} source={provider} selected={source === provider} onSelect={onSourceChange} />
+        ))}
       </div>
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-content/10 px-2">
         <div className="relative flex h-7 min-w-0 flex-1 items-center">
@@ -736,7 +734,7 @@ export function InboxView({
         </div>
         <button
           type="button"
-          title="Filter inbox"
+          title="Filters and visible sources"
           aria-label="Filter inbox"
           aria-expanded={!!filterMenu}
           aria-haspopup="menu"
@@ -873,6 +871,8 @@ export function InboxView({
       linearTeams={linearTeams}
       hiddenLinearTeamIds={linearHiddenTeamIds}
       source={source}
+      visibleSources={visibleSources}
+      onVisibleSourcesChange={onVisibleSourcesChange}
       filters={activeFilters}
       onChange={onFiltersChange}
       onLinearTeamsChange={saveHiddenLinearTeamIds}

@@ -5,6 +5,7 @@ import { expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { InboxView } from "./InboxView";
 import { clearInboxCache } from "../lib/githubTasks";
+import { loadInboxSource, loadVisibleInboxSources } from "../lib/inboxFilters";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -116,6 +117,31 @@ it("retains the selected Jira ticket and explicit project through handoff and re
     await click(button("Retry"));
     expect(container.querySelector("h1")?.textContent).toBe("Ticket 41");
     expect(container.querySelector("textarea")).toBeNull();
+    await click(container.querySelector('button[aria-label="Filter inbox"]')!);
+    const sourceChoice = (name: string) =>
+      [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitemcheckbox"]',
+        ),
+      ].find((element) => element.textContent?.trim() === name)!;
+    await click(sourceChoice("GitLab"));
+    await click(sourceChoice("Linear"));
+    expect(
+      [...container.querySelectorAll('[role="tab"]')].map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["GitHub", "Jira"]);
+    expect(loadVisibleInboxSources()).toEqual(["github", "jira"]);
+    await click(sourceChoice("Jira"));
+    expect(loadInboxSource()).toBe("github");
+    expect(sourceChoice("GitHub").disabled).toBe(true);
+    await click(sourceChoice("Jira"));
+    expect(loadVisibleInboxSources()).toEqual(["github", "jira"]);
+    stored.set("monocode.inboxVisibleSources", "[]");
+    expect(loadVisibleInboxSources()).toHaveLength(4);
+    stored.set("monocode.inboxVisibleSources", '["jira", "unknown", "jira"]');
+    expect(loadVisibleInboxSources()).toEqual(["jira"]);
+    expect(loadInboxSource()).toBe("jira");
   } finally {
     await act(async () => root.unmount());
     container.remove();
