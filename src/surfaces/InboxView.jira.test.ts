@@ -99,7 +99,7 @@ it("retains the selected Jira ticket and explicit project through handoff and re
         }),
       );
     });
-    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(4);
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(5);
     await click(
       container.querySelector(
         '[aria-label="In review issue ENG-41: Ticket 41"]',
@@ -142,6 +142,7 @@ it("retains the selected Jira ticket and explicit project through handoff and re
       ].find((element) => element.textContent?.trim() === name)!;
     await click(sourceChoice("GitLab"));
     await click(sourceChoice("Linear"));
+    await click(sourceChoice("Azure"));
     expect(
       [...container.querySelectorAll('[role="tab"]')].map(
         (element) => element.textContent,
@@ -154,7 +155,7 @@ it("retains the selected Jira ticket and explicit project through handoff and re
     await click(sourceChoice("Jira"));
     expect(loadVisibleInboxSources()).toEqual(["github", "jira"]);
     stored.set("monocode.inboxVisibleSources", "[]");
-    expect(loadVisibleInboxSources()).toHaveLength(4);
+    expect(loadVisibleInboxSources()).toHaveLength(5);
     stored.set("monocode.inboxVisibleSources", '["jira", "unknown", "jira"]');
     expect(loadVisibleInboxSources()).toEqual(["jira"]);
     expect(loadInboxSource()).toBe("jira");

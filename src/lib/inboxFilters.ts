@@ -55,9 +55,9 @@ export const DEFAULT_INBOX_FILTERS: InboxFilters = {
 };
 
 export type InboxSource = InboxProvider;
-export const INBOX_SOURCES: InboxSource[] = ["github", "linear", "gitlab", "jira"];
+export const INBOX_SOURCES: InboxSource[] = ["github", "linear", "gitlab", "jira", "azure"];
 export const INBOX_SOURCE_LABELS: Record<InboxSource, string> = {
-  github: "GitHub", linear: "Linear", gitlab: "GitLab", jira: "Jira",
+  github: "GitHub", linear: "Linear", gitlab: "GitLab", jira: "Jira", azure: "Azure",
 };
 
 const FILTERS_KEY = "monocode.inboxFilters";
@@ -295,8 +295,8 @@ export function applyInboxFilters(
   source?: InboxSource,
 ): InboxItem[] {
   const scoped = source ? filterInboxByProvider(items, source) : [...items];
-  const hiddenProjects = source === "linear" || source === "jira" ? [] : filters.hiddenProjects;
-  const hiddenKinds = source === "linear" || source === "jira" ? [] : filters.hiddenKinds;
+  const hiddenProjects = source === "linear" || source === "jira" || source === "azure" ? [] : filters.hiddenProjects;
+  const hiddenKinds = source === "linear" || source === "jira" || source === "azure" ? [] : filters.hiddenKinds;
   return filterInboxItems(
     filterInboxByStatus(
       filterInboxByTime(
@@ -320,7 +320,7 @@ export function statusFilterForSource(
   status: InboxStatusFilter,
   source?: InboxSource,
 ): InboxStatusFilter {
-  if (source !== "linear" && source !== "jira") return status;
+  if (source !== "linear" && source !== "jira" && source !== "azure") return status;
   return {
     open: status.open,
     closed: status.closed,

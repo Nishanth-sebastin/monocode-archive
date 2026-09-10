@@ -190,7 +190,7 @@ it("passes the selected saved filter and preserves other providers on Jira failu
     assigned: false,
     state: "all",
   });
-  expect(result.errors).toEqual({ jira: "Jira denied access" });
+  expect(result.errors.jira).toBe("Jira denied access");
 });
 
 it("drops old detail results after disconnect instead of refilling the cache", async () => {

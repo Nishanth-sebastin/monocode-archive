@@ -141,6 +141,7 @@ import {
   saveGitlabConfig,
 } from "../lib/gitlab";
 import { jiraConnected, saveJiraConfig, type JiraStatus } from "../lib/jira";
+import { azureConnected, saveAzureConfig, type AzureStatus } from "../lib/azure";
 import {
   disconnectLinear,
   LINEAR_CHANGE_EVENT,
@@ -548,11 +549,58 @@ function GeneralPage({
 
       <Heading title={<span className="flex items-center gap-2"><InboxProviderMark provider="jira" className="size-4 shrink-0" />Jira Cloud</span>} />
       <JiraSettings />
+      <Heading title={<span className="flex items-center gap-2"><InboxProviderMark provider="azure" className="size-4 shrink-0" />Azure DevOps</span>} />
+      <AzureSettings />
 
       <Heading title="About" />
       <UpdateRow onOpenWhatsNew={onOpenWhatsNew} />
     </>
   );
+}
+
+function AzureSettings() {
+  const [status, setStatus] = useState<AzureStatus>({ connected: false, site: "", project: "", account: "", capabilities: [] });
+  const [site, setSite] = useState("");
+  const [project, setProject] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    void azureConnected().then(next => {
+      if (!cancelled) { setStatus(next); setSite(next.site); setProject(next.project); }
+    }).catch(e => { if (!cancelled) setError(String(e)); });
+    return () => { cancelled = true; };
+  }, []);
+  const save = async (disconnect = false) => {
+    if (busy) return;
+    setBusy(true); setError("");
+    try { setStatus(await saveAzureConfig(site, project, disconnect ? "" : token)); setToken(""); clearInboxCache(); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+  return <>
+    <Row stacked={!status.connected} label={status.connected ? "Connected account · Boards" : "Connect your account"} description="Read Azure Boards work items. Your token stays on this device. Git, pull requests and CI are chosen separately.">
+      {status.connected ? <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="max-w-56 truncate text-[12px] text-content/50" title={`${status.site} · ${status.account}`}>{status.site} · {status.account}</span>
+        <SecondaryButton disabled={busy} onClick={() => void save(true)}>Disconnect</SecondaryButton>
+      </div> : <form className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={e => { e.preventDefault(); if (site.trim() && project.trim() && token.trim()) void save(); }}>
+        {[
+          { label: "Azure organization URL", type: "url", value: site, change: setSite, placeholder: "https://dev.azure.com/your-organization" },
+          { label: "Default Boards project", type: "text", value: project, change: setProject, placeholder: "Project name" },
+          { label: "Personal access token", type: "password", value: token, change: setToken, placeholder: "PAT" },
+        ].map(f => <label key={f.label} className={`flex min-w-0 flex-col gap-1.5 ${f.type === "url" ? "sm:col-span-2" : ""}`}>
+          <span className="text-[12px] text-content/60">{f.label}</span>
+          <input type={f.type} value={f.value} onChange={e => f.change(e.target.value)} placeholder={f.placeholder} aria-label={f.label} autoComplete="off" spellCheck={false} disabled={busy} required className="h-8 w-full min-w-0 rounded-md border border-content/10 bg-transparent px-2.5 text-[12px] text-content outline-none placeholder:text-content/35 focus:border-content/30 disabled:opacity-50" />
+        </label>)}
+        <div className="flex items-start justify-between gap-4 sm:col-span-2">
+          <p className="max-w-sm text-[12px] leading-relaxed text-content/45">Use an organization-scoped PAT with Work Items (Read) and Project and Team (Read). Azure DevOps Services only.</p>
+          <SecondaryButton type="submit" disabled={busy || !site.trim() || !project.trim() || !token.trim()}>{busy ? "Connecting…" : "Connect"}</SecondaryButton>
+        </div>
+      </form>}
+    </Row>
+    {error ? <p role="alert" className="pb-2 text-[12px] text-red-400/90">{error}</p> : null}
+  </>;
 }
 
 function JiraSettings() {

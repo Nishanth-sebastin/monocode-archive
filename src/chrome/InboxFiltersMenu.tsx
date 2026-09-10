@@ -20,6 +20,8 @@ import {
 import { Popover } from "./Popover";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { InboxProviderMark } from "./InboxProviderMark";
+import { useEffect, useState } from "react";
+import { azureOptions, saveAzureFilter, type AzureFilter, type AzureOption } from "../lib/azure";
 
 export const INBOX_FILTER_MENU_WIDTH = 228;
 
@@ -49,6 +51,7 @@ type Props = {
   onJiraFilterChange?: (filter: JiraFilter) => void;
   visibleSources?: InboxSource[];
   onVisibleSourcesChange?: (sources: InboxSource[]) => void;
+  azure?: { site: string; filter: AzureFilter };
 };
 
 const TIME_OPTIONS: { id: InboxTimeFilter; label: string }[] = [
@@ -94,8 +97,9 @@ export function InboxFiltersMenu({
   onJiraFilterChange,
   visibleSources = INBOX_SOURCES,
   onVisibleSourcesChange,
+  azure,
 }: Props) {
-  const ticket = source === "linear" || source === "jira";
+  const ticket = source === "linear" || source === "jira" || source === "azure";
   const hiddenProjects = new Set(filters.hiddenProjects);
   const hiddenLinearProjects = new Set(filters.hiddenLinearProjects);
   const hiddenTeams = new Set(hiddenLinearTeamIds);
@@ -188,7 +192,7 @@ export function InboxFiltersMenu({
           <div role="separator" className="my-1 h-px bg-content/10" />
         </>
       ) : null}
-      <FilterItem
+      {source === "azure" && azure ? <AzureFilters site={azure.site} filter={azure.filter} /> : <FilterItem
         label="Assigned to me"
         checked={source === "jira" ? jiraFilter.assigned : filters.assignedToMe}
         onClick={
@@ -200,7 +204,7 @@ export function InboxFiltersMenu({
                 })
             : toggleAssigned
         }
-      />
+      />}
 
       <SectionLabel>Status</SectionLabel>
       <FilterItem
@@ -355,6 +359,7 @@ export function InboxFiltersMenu({
       ) : null}
 
       {hasActiveInboxFilters(filters, source, hiddenLinearTeamIds) ||
+      (source === "azure" && azure && (azure.filter.query || !azure.filter.assigned)) ||
       (source === "jira" &&
         (jiraFilter.project || jiraFilter.filter || !jiraFilter.assigned)) ? (
         <>
@@ -367,6 +372,7 @@ export function InboxFiltersMenu({
               onChange(DEFAULT_INBOX_FILTERS);
               if (teamsActive) onLinearTeamsChange([]);
               if (source === "jira") onJiraFilterChange?.(DEFAULT_JIRA_FILTER);
+              if (source === "azure" && azure) saveAzureFilter(azure.site, { ...azure.filter, query: "", assigned: true });
             }}
             className="flex h-7 w-full items-center rounded-lg px-2 text-left text-[13px] leading-none text-content/70 hover:bg-content/5 hover:text-content"
           >
@@ -376,6 +382,40 @@ export function InboxFiltersMenu({
       ) : null}
     </Popover>
   );
+}
+
+function AzureFilters({ site, filter }: { site: string; filter: AzureFilter }) {
+  const [projects, setProjects] = useState<AzureOption[]>([]);
+  const [queries, setQueries] = useState<AzureOption[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    if (!site) return;
+    let cancelled = false;
+    setLoading(true); setError(""); setQueries([]);
+    void Promise.allSettled([azureOptions(site, filter.project, false), azureOptions(site, filter.project, true)]).then(([p,q]) => {
+      if (cancelled) return;
+      if (p.status === "fulfilled") setProjects(p.value);
+      if (q.status === "fulfilled") setQueries(q.value);
+      setError([p,q].filter(r => r.status === "rejected").map(r => String(r.reason)).join(" "));
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [site, filter.project, retry]);
+  const change = (next: AzureFilter) => saveAzureFilter(site, next);
+  return <>
+    <div className="truncate px-2 py-1 text-[11px] text-content/50" title={site}>{site.replace("https://dev.azure.com/", "") || "Connect Azure DevOps in Settings"}</div>
+    <FilterItem label="Assigned to me" checked={filter.assigned && !filter.query} disabled={!site} onClick={() => change({ ...filter, query: "", assigned: !filter.assigned })} />
+    <SectionLabel>Project</SectionLabel>
+    {[{ id: filter.project, name: filter.project }, ...projects.filter(p => p.id !== filter.project)].filter(p => p.id).map(p => <FilterItem key={p.id} label={p.name} checked={p.id === filter.project} onClick={() => change({ project: p.id, query: "", assigned: true })} />)}
+    <SectionLabel>Saved query</SectionLabel>
+    <FilterItem label="No saved query" checked={!filter.query} onClick={() => change({ ...filter, query: "" })} />
+    {queries.map(q => <FilterItem key={q.id} label={q.name} checked={q.id === filter.query} onClick={() => change({ ...filter, query: q.id, assigned: false })} />)}
+    {loading ? <p role="status" className="px-2 py-1 text-[12px] text-content/50">Loading projects and queries…</p> : null}
+    <p className="px-2 py-1 text-[11px] text-content/40">Up to 100 projects and flat queries, two folder levels.</p>
+    {error ? <p role="alert" className="px-2 py-1 text-[12px] text-content/50">{error} <button className="underline" onClick={() => setRetry(v => v + 1)}>Retry</button></p> : null}
+  </>;
 }
 
 function SectionLabel({ children }: { children: string }) {

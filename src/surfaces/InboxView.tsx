@@ -133,7 +133,8 @@ import {
   resolveTabGroupMascot,
 } from "../lib/tabGroups";
 import { AgentMarkdown } from "./AgentMarkdown";
-import { JiraImages } from "./InboxMedia";
+import { TicketImages } from "./InboxMedia";
+import { AZURE_CHANGE_EVENT, azureConnected, azureDetails, azureThread, peekAzureDetails, peekAzureThread, loadAzureFilter, type AzureFilter } from "../lib/azure";
 import {
   InboxComments,
   InboxCommentForm,
@@ -261,6 +262,7 @@ function InboxSourceTab({
       role="tab"
       aria-selected={selected}
       onClick={() => onSelect(source)}
+      aria-label={source === "azure" ? "Azure Boards" : label}
       className={`flex h-6 min-w-0 flex-1 items-center justify-center rounded-md px-0.5 text-[11px] leading-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-content/50 ${
         selected
           ? "bg-content/10 text-content"
@@ -375,6 +377,9 @@ export function InboxView({
   );
   const [linearTeams, setLinearTeams] = useState<LinearTeam[]>([]);
   const [jiraSite, setJiraSite] = useState("");
+  const [azureSite, setAzureSite] = useState("");
+  const azureOwner = useRef("");
+  const [azureFilter, setAzureFilter] = useState<AzureFilter>({ project: "", query: "", assigned: true });
   const [jiraFilter, setJiraFilter] = useState<JiraFilter>(DEFAULT_JIRA_FILTER);
   const [jiraProjects, setJiraProjects] = useState<JiraOption[]>([]);
   const [jiraFavorites, setJiraFavorites] = useState<JiraOption[]>([]);
@@ -399,7 +404,7 @@ export function InboxView({
     [filters, projects],
   );
   const filtersActive =
-    source === "jira"
+    source === "azure" ? !!(azureFilter.query || !azureFilter.assigned || activeFilters.time !== "all" || activeFilters.status.open || activeFilters.status.closed) : source === "jira"
       ? !!(
           jiraFilter.project ||
           jiraFilter.filter ||
@@ -505,6 +510,26 @@ export function InboxView({
     return () => { cancelled = true; };
   }, [source, jiraSite, !!filterMenu, refresh]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const update = (changed = false) => {
+      if (changed) clearInboxCache();
+      void azureConnected().then(status => {
+        if (cancelled) return;
+        const owner = status.connected ? `${status.site}:${status.accountId}` : "";
+        if (changed && azureOwner.current !== owner) setItems(previous => previous.filter(item => item.provider !== "azure"));
+        azureOwner.current = owner;
+        setAzureSite(status.connected ? status.site : "");
+        setAzureFilter(loadAzureFilter(status.site, status.project));
+        if (changed) setRefresh(value => value + 1);
+      }).catch(() => { /* The list owns connection errors. */ });
+    };
+    update();
+    const onChange = () => update(true);
+    window.addEventListener(AZURE_CHANGE_EVENT, onChange);
+    return () => { cancelled = true; window.removeEventListener(AZURE_CHANGE_EVENT, onChange); };
+  }, []);
+
   // The roster has to come from Linear, not from the fetched issues: hiding a
   // team drops its issues, so a derived list could never offer it back.
   useEffect(() => {
@@ -527,14 +552,10 @@ export function InboxView({
     prevRefresh.current = refresh;
     const cached = peekInboxList(projects, fetchQuery);
     if (cached) {
-      setItems((previous) =>
-        cached.errors.jira && jiraSite
-          ? [
-              ...cached.items.filter((item) => item.provider !== "jira"),
-              ...previous.filter((item) => item.provider === "jira"),
-            ]
-          : cached.items,
-      );
+      setItems(previous => [...cached.items, ...previous.filter(item =>
+        (item.provider === "jira" && cached.errors.jira && jiraSite === item.site) ||
+        (item.provider === "azure" && cached.errors.azure && azureSite === item.site)
+      )]);
       setProviderErrors(cached.errors);
       setLoading(false);
     }
@@ -551,14 +572,10 @@ export function InboxView({
     void listInboxItems(projects, fetchQuery, { force })
       .then((next) => {
         if (cancelled) return;
-        setItems((previous) =>
-          next.errors.jira && jiraSite
-            ? [
-                ...next.items,
-                ...previous.filter((item) => item.provider === "jira"),
-              ]
-            : next.items,
-        );
+        setItems(previous => [...next.items, ...previous.filter(item =>
+          (item.provider === "jira" && next.errors.jira && jiraSite === item.site) ||
+          (item.provider === "azure" && next.errors.azure && azureSite === item.site)
+        )]);
         setProviderErrors(next.errors);
       })
       .catch((err: unknown) => {
@@ -571,6 +588,7 @@ export function InboxView({
           linear: message,
           gitlab: message,
           jira: message,
+          azure: message,
         });
       })
       .finally(() => {
@@ -716,7 +734,7 @@ export function InboxView({
       <div
         role="tablist"
         aria-label="Inbox source"
-        className="flex h-9 shrink-0 items-center gap-px border-b border-content/10 px-2"
+        className={`flex min-h-9 shrink-0 flex-wrap items-center gap-px border-b border-content/10 px-2 py-1 ${visibleSources.length > 4 ? "[&>button]:min-w-[72px]" : ""}`}
       >
         {visibleSources.map(provider => (
           <InboxSourceTab key={provider} source={provider} selected={source === provider} onSelect={onSourceChange} />
@@ -782,6 +800,10 @@ export function InboxView({
         {sourceError && visibleItems.length === 0 ? (
           <div className="px-3 py-2 text-[12px] text-content/50">
             <p>{sourceError}</p>
+            {source === "azure" ? <div className="mt-2 flex gap-3">
+              {onOpenSettings ? <button type="button" className="underline" onClick={onOpenSettings}>{azureSite ? "Connection settings" : "Connect Azure DevOps"}</button> : null}
+              {azureSite ? <button type="button" className="underline" onClick={() => setRefresh(value => value + 1)}>Retry</button> : null}
+            </div> : null}
             {source === "jira" ? <div className="mt-2 flex gap-3">
               {onOpenSettings ? <button type="button" className="underline" onClick={onOpenSettings}>{jiraSite ? "Connection settings" : "Connect Jira"}</button> : null}
               {jiraSite ? <button type="button" className="underline" onClick={() => setRefresh(value => value + 1)}>Retry</button> : null}
@@ -793,7 +815,7 @@ export function InboxView({
           </div>
         ) : visibleItems.length === 0 ? (
           <p className="px-3 py-2 text-[12px] text-content/50">
-            {source === "jira" ? "No Jira issues match these filters" : narrowedByUser
+            {source === "azure" ? "No Azure work items match these filters" : source === "jira" ? "No Jira issues match these filters" : narrowedByUser
               ? searchNarrowed
                 ? source === "linear"
                   ? "No matching Linear issues"
@@ -880,6 +902,7 @@ export function InboxView({
       onChange={onFiltersChange}
       onLinearTeamsChange={saveHiddenLinearTeamIds}
       jiraFilter={jiraFilter}
+      azure={{ site: azureSite, filter: azureFilter }}
       jiraProjects={jiraProjects}
       jiraFavorites={jiraFavorites}
       jiraOptionsError={jiraOptionsError}
@@ -1027,7 +1050,7 @@ function inboxStatusMark(item: InboxItem): InboxStatusMark {
   }
   return {
     Icon: pr ? GitPullRequest : CircleDot,
-    className: "text-emerald-400/90",
+    className: label === "Unknown" ? "text-content/50" : "text-emerald-400/90",
     label,
   };
 }
@@ -1061,7 +1084,8 @@ function InboxCard({
   const name = projectName(item.projectPath);
   const linear = item.provider === "linear";
   const jira = item.provider === "jira";
-  const source = jira ? item.projectName : linear ? item.teamName || item.repo : item.repo || name;
+  const azure = item.provider === "azure";
+  const source = azure ? `${item.site?.split("/").pop()} / ${item.projectName}` : jira ? item.projectName : linear ? item.teamName || item.repo : item.repo || name;
   const unseen = isInboxEntryUnseen({
     key: inboxItemKey(item),
     updatedAt: item.updatedAt,
@@ -1072,7 +1096,7 @@ function InboxCard({
       type="button"
       title={item.title}
       aria-current={active ? "true" : undefined}
-      aria-label={`${jira ? item.state : status.label} ${kindLabel.toLowerCase()} ${inboxItemRef(
+      aria-label={`${jira || azure ? item.state : status.label} ${kindLabel.toLowerCase()} ${inboxItemRef(
         item,
       )}: ${item.title}${unseen ? ", new" : ""}${relatedSessionCount > 0 ? `, ${relatedSessionCount} related ${relatedSessionCount === 1 ? "thread" : "threads"}` : ""}`}
       onClick={onSelect}
@@ -1093,7 +1117,7 @@ function InboxCard({
             strokeWidth={1.75}
           />
           <span className="min-w-0 truncate text-[11px] text-content/50">
-            {jira ? "" : `${kindLabel} · `}{inboxItemRef(item)}
+            {jira || azure ? "" : `${kindLabel} · `}{inboxItemRef(item)}
           </span>
         </span>
         {relatedSessionCount > 0 || time || unseen ? (
@@ -1123,7 +1147,7 @@ function InboxCard({
       </span>
       <span className="mt-1 flex min-w-0 items-center gap-2">
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] text-content/45">
-          {linear || jira ? null : logoPath ? (
+          {linear || jira || azure ? null : logoPath ? (
             <ProjectLogoIcon
               path={logoPath}
               className="size-3.5 shrink-0 rounded-sm"
@@ -1137,10 +1161,10 @@ function InboxCard({
               className="size-3 shrink-0"
             />
           )}
-          {jira ? <span className="max-w-[55%] truncate" title={item.state}>{item.state} ·</span> : null}
+          {jira || azure ? <span className="max-w-[55%] truncate" title={item.state}>{item.state} ·</span> : null}
           <span className="min-w-0 truncate">{source}</span>
         </span>
-        {item.labels.length > 0 ? (
+        {!azure && item.labels.length > 0 ? (
           <span className="flex min-w-0 shrink-0 items-center gap-1">
             {item.labels.slice(0, 2).map((label) => (
               <InboxLabel key={label.name} label={label} compact />
@@ -1173,7 +1197,8 @@ function InboxDetail({
 }) {
   const linear = item.provider === "linear";
   const jira = item.provider === "jira";
-  const ticket = linear || jira;
+  const azure = item.provider === "azure";
+  const ticket = linear || jira || azure;
   const gitlab = item.provider === "gitlab";
   const isPr = !linear && item.kind === "pr";
   const githubKind =
@@ -1182,7 +1207,7 @@ function InboxDetail({
       : null;
   const gitlabKind =
     gitlab && (item.kind === "issue" || item.kind === "pr") ? item.kind : null;
-  const cached = jira ? peekJiraDetails(item) : linear
+  const cached = azure ? peekAzureDetails(item) : jira ? peekJiraDetails(item) : linear
     ? peekLinearIssueDetails(item.id ?? "")
     : gitlabKind
       ? peekGitlabWorkItemDetails(item.projectPath, gitlabKind, item.number)
@@ -1194,7 +1219,7 @@ function InboxDetail({
       ? peekGitlabMrDiff(item.projectPath, item.number)
       : peekGithubPrDiff(item.projectPath, item.number)
     : null;
-  const cachedThread = jira ? peekJiraThread(item) : linear
+  const cachedThread = azure ? peekAzureThread(item) : jira ? peekJiraThread(item) : linear
     ? peekLinearIssueThread(item.id ?? "")
     : gitlabKind
       ? peekGitlabWorkItemThread(item.projectPath, gitlabKind, item.number)
@@ -1228,7 +1253,7 @@ function InboxDetail({
     : inboxItemStatus(item);
   const statusMark = inboxStatusMark(item);
 
-  const source = jira ? item.projectName : linear
+  const source = azure ? `${item.site?.split("/").pop()} / ${item.projectName}` : jira ? item.projectName : linear
     ? item.teamName || item.repo
     : item.repo || projectName(item.projectPath);
   const markdownCwd = ticket ? startProject || cwd : item.projectPath || cwd;
@@ -1256,7 +1281,7 @@ function InboxDetail({
 
   useEffect(() => {
     let cancelled = false;
-    const cachedDetails = jira ? peekJiraDetails(item) : linear
+    const cachedDetails = azure ? peekAzureDetails(item) : jira ? peekJiraDetails(item) : linear
       ? peekLinearIssueDetails(item.id ?? "")
       : gitlabKind
         ? peekGitlabWorkItemDetails(item.projectPath, gitlabKind, item.number)
@@ -1272,7 +1297,7 @@ function InboxDetail({
       setError(null);
       setDetails(null);
     }
-    const pending = jira ? jiraDetails(item) : linear
+    const pending = azure ? azureDetails(item) : jira ? jiraDetails(item) : linear
       ? item.id
         ? linearIssueDetails(item.id)
         : Promise.reject(new Error("Missing Linear issue"))
@@ -1289,7 +1314,7 @@ function InboxDetail({
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        if (cachedDetails && !jira) return;
+        if (cachedDetails && !jira && !azure) return;
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
@@ -1312,9 +1337,9 @@ function InboxDetail({
 
   useEffect(() => {
     let cancelled = false;
-    if (linear || jira) {
+    if (ticket) {
       const id = item.id ?? "";
-      const cachedThread = jira ? peekJiraThread(item) : peekLinearIssueThread(id);
+      const cachedThread = azure ? peekAzureThread(item) : jira ? peekJiraThread(item) : peekLinearIssueThread(id);
       if (cachedThread) {
         setThread(cachedThread);
         setThreadLoading(false);
@@ -1324,7 +1349,7 @@ function InboxDetail({
         setThreadError(null);
         setThread(null);
       }
-      void (jira ? jiraThread(item) : linearIssueThread(id))
+      void (azure ? azureThread(item) : jira ? jiraThread(item) : linearIssueThread(id))
         .then((next) => {
           if (cancelled) return;
           setThread(next);
@@ -1332,7 +1357,7 @@ function InboxDetail({
         })
         .catch((err: unknown) => {
           if (cancelled) return;
-          if (cachedThread && !jira) return;
+          if (cachedThread && !jira && !azure) return;
           setThreadError(err instanceof Error ? err.message : String(err));
         })
         .finally(() => {
@@ -1529,13 +1554,13 @@ function InboxDetail({
       <header className="flex flex-col gap-3">
         <div className="flex items-center gap-2 text-[12px] text-content/50">
           <InboxProviderMark provider={item.provider} className="size-3.5" />
-          <span>
+          {azure ? null : <span>
             {item.kind === "pr"
               ? gitlab
                 ? "Merge request"
                 : "Pull request"
               : "Issue"}
-          </span>
+          </span>}
           <span className="tabular-nums">{inboxItemRef(item)}</span>
           <span className={`flex items-center gap-1 ${statusMark.className}`}>
             <statusMark.Icon className="size-3.5" strokeWidth={1.75} />
@@ -1680,7 +1705,7 @@ function InboxDetail({
               ? gitlab
                 ? "Review on GitLab"
                 : "Review on GitHub"
-              : jira ? "Open in Jira" : linear
+              : azure ? "Open in Azure DevOps" : jira ? "Open in Jira" : linear
                 ? "Open in Linear"
                 : gitlab
                   ? "Open on GitLab"
@@ -1693,7 +1718,7 @@ function InboxDetail({
             if (action === "ask") await onDiscuss?.(card);
             else await onStart?.(ticket ? { ...item, projectPath: startProject } : item, undefined, card);
           }} />
-        {jira && error && details ? <p role="status" className="text-[12px] text-content/50">{error} <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry</button></p> : null}
+        {(jira || azure) && error && details ? <p role="status" className="text-[12px] text-content/50">{error} <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry</button></p> : null}
       </header>
       {isPr ? (
         <div
@@ -1737,7 +1762,7 @@ function InboxDetail({
           <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
         </div>
       ) : error && !details ? (
-        <div className="text-[13px] text-content/50">{error}{jira ? <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry</button> : null}</div>
+        <div className="text-[13px] text-content/50">{error}{jira || azure ? <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry</button> : null}</div>
       ) : (
         <>
           {details?.body.trim() ? (
@@ -1749,7 +1774,7 @@ function InboxDetail({
           ) : (
             <p className="text-[13px] text-content/45">No description</p>
           )}
-          {jira && details?.attachments?.length ? <JiraImages key={`${item.site}:${item.id}:${revision}`} item={item} attachments={details.attachments} /> : null}
+          {(jira || azure) && details?.attachments?.length ? <TicketImages key={`${item.site}:${item.id}:${revision}`} item={item} attachments={details.attachments} /> : null}
           <InboxComments
             thread={thread}
             loading={threadLoading}
@@ -1757,10 +1782,10 @@ function InboxDetail({
             cwd={markdownCwd}
             provider={item.provider}
             replyMode={linear ? "parent" : gitlab ? undefined : "thread"}
-            onReply={jira ? undefined : setReplyTo}
+            onReply={jira || azure ? undefined : setReplyTo}
           />
-          {jira && threadError ? <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry comments</button> : null}
-          {jira ? null : <InboxCommentForm
+          {(jira || azure) && threadError ? <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry comments</button> : null}
+          {jira || azure ? null : <InboxCommentForm
             replyTo={replyTo}
             posting={posting}
             error={postError}

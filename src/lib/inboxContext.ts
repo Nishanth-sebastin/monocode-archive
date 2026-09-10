@@ -10,6 +10,7 @@ import {
   type InboxItem,
 } from "./githubTasks";
 import { jiraMarkdown } from "./jira";
+import { azureMarkdown } from "./azure";
 
 export type ContextComment = {
   id: string;
@@ -65,16 +66,17 @@ export async function readContext(
   const raw = await invoke<
     Omit<ContextDocument, "description" | "comments"> & {
       adf: boolean;
+      html?: boolean;
       description: unknown;
-      comments: (Omit<ContextComment, "body"> & { body: unknown })[];
+      comments: (Omit<ContextComment, "body"> & { body: unknown; markdown?: boolean })[];
     }
   >("inbox_context_document", { ticket: contextTicket(item), pages });
   const body = (value: unknown) =>
-    raw.adf ? jiraMarkdown(value) : typeof value === "string" ? value : "";
+    raw.adf ? jiraMarkdown(value) : raw.html ? azureMarkdown(value) : typeof value === "string" ? value : "";
   return {
     ...raw,
     description: body(raw.description),
-    comments: raw.comments.map((c) => ({ ...c, body: body(c.body) })),
+    comments: raw.comments.map((c) => ({ ...c, body: c.markdown && typeof c.body === "string" ? c.body : body(c.body) })),
   };
 }
 
