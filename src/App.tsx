@@ -1,3 +1,5 @@
+import { AgentContextPicker } from "./chrome/AgentContextPicker";
+import { PREPARE_AGENT_CONTEXT, prepareSessionContext, contextFromTickets, type AgentContextRequest } from "./lib/agentContext";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -234,6 +236,7 @@ import {
   canReplaceSessionTitle,
   formatSessionTitle,
   sessionNeedsInput,
+  isBlankSession,
   newDefaultSession,
   newSession,
   sessionDisplayTitle,
@@ -332,6 +335,7 @@ import { inboxAskKey, inboxAskPrompt } from "./lib/inboxAsk";
 import { NotesView } from "./surfaces/NotesView";
 import { inboxComposerCard, type InboxItem } from "./lib/githubTasks";
 import {
+  parseGithubWorkItemUrl,
   linkedWorkItemFromInboxItem,
   resolveLinkedWorkItem,
 } from "./lib/sessionWorkItem";
@@ -1477,6 +1481,88 @@ export default function App({
     projectCwd,
   ]);
 
+  const [inboxMounted, setInboxMounted] = useState(inboxViewOpen);
+  useEffect(() => {
+    if (inboxViewOpen) setInboxMounted(true);
+  }, [inboxViewOpen]);
+  const [contextRequest, setContextRequest] = useState<AgentContextRequest>();
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const request = (event as CustomEvent<AgentContextRequest>).detail;
+      const source = sessionsRef.current.find(
+        (session) =>
+          session.id === (request.sourceSessionId ?? activeSessionIdRef.current),
+      );
+      if (
+        request.prepareInSource &&
+        source &&
+        (!request.cwd || sessionWorkCwd(source) === request.cwd)
+      ) {
+        try {
+          const next = prepareSessionContext(source, request.context, true);
+          const updated = sessionsRef.current.map((session) =>
+            session.id === next.id ? next : session,
+          );
+          sessionsRef.current = updated;
+          setSessions(updated);
+          return;
+        } catch {
+          /* Keep the selection available in the review sheet. */
+        }
+      }
+      setContextRequest(
+        (current) =>
+          current ?? {
+            ...request,
+            sourceSessionId:
+              request.sourceSessionId ??
+              (source && (!request.cwd || sessionWorkCwd(source) === request.cwd)
+                ? source.id
+                : undefined),
+          },
+      );
+    };
+    window.addEventListener(PREPARE_AGENT_CONTEXT, receive);
+    return () => window.removeEventListener(PREPARE_AGENT_CONTEXT, receive);
+  }, []);
+
+  const prepareContextDestination = (
+    request: AgentContextRequest,
+    destination: string | Session,
+  ): string => {
+    const existing = typeof destination === "string";
+    const target = existing
+      ? sessionsRef.current.find((session) => session.id === destination)
+      : destination;
+    if (!target)
+      throw new Error("Conversation closed. Choose another destination.");
+    const next = prepareSessionContext(target, request.context);
+    if (existing) {
+      const updated = sessionsRef.current.map((session) =>
+        session.id === next.id ? next : session,
+      );
+      sessionsRef.current = updated;
+      setSessions(updated);
+    } else {
+      const linked =
+        request.context.entries.length === 1
+          ? request.context.entries[0].ticket
+          : undefined;
+      const linkedWorkItem =
+        linked?.provider === "github" ? parseGithubWorkItemUrl(linked.url) : null;
+      const created = { ...next, ...(linkedWorkItem ? { linkedWorkItem } : {}) };
+      const updated = [...sessionsRef.current, created];
+      sessionsRef.current = updated;
+      setSessions(updated);
+      const tab = newTab(created.id);
+      appendTab(tab, created.cwd);
+      setActiveTabId(tab.id);
+      setInboxViewOpen(false);
+      setNotesViewOpen(false);
+      setComposerFocused(true);
+    }
+    return next.id;
+  };
   const onStartInboxItem = useCallback(
     async (item: InboxItem, body?: string, context?: import("./lib/githubTasks").InboxComposerCard) => {
       const start = (description?: string) => {
@@ -1504,8 +1590,7 @@ export default function App({
       };
 
       if (context) {
-        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
-        start();
+        setContextRequest({ context: contextFromTickets([item], context), cwd: item.projectPath || active?.cwd });
         return;
       }
       if (item.provider === "azure") {
@@ -1594,8 +1679,11 @@ export default function App({
   const onInboxCardDismiss = useCallback((sessionId: string, fileId?: string) => {
     setSessions((prev) =>
       prev.map((session) =>
-        session.id === sessionId && session.inboxCard
-          ? { ...session, inboxCard: fileId ? { ...session.inboxCard, attachments: session.inboxCard.attachments?.filter(file => file.id !== fileId) } : undefined }
+        session.id === sessionId && (session.inboxCard || session.contextDraft)
+          ? { ...session,
+              contextDraft: fileId === "__context__" ? undefined : fileId && session.contextDraft ? { ...session.contextDraft, attachments: session.contextDraft.attachments.filter(file => file.id !== fileId) } : session.contextDraft,
+              inboxCard: fileId === "__context__" ? session.inboxCard : fileId && session.inboxCard ? { ...session.inboxCard, attachments: session.inboxCard.attachments?.filter(file => file.id !== fileId) } : undefined,
+            }
           : session,
       ),
     );
@@ -3730,6 +3818,7 @@ export default function App({
                 ? {
                     ...s,
                     inboxCard: rawCommand ? s.inboxCard : undefined,
+                    contextDraft: rawCommand ? s.contextDraft : undefined,
                     noteCard: rawCommand ? s.noteCard : undefined,
                     handoffCard: rawCommand ? s.handoffCard : undefined,
                     queuedMessages: [
@@ -3772,6 +3861,7 @@ export default function App({
             let next: Session = {
               ...s,
               inboxCard: rawCommand ? s.inboxCard : undefined,
+              contextDraft: rawCommand ? s.contextDraft : undefined,
               noteCard: rawCommand ? s.noteCard : undefined,
               handoffCard: rawCommand ? s.handoffCard : undefined,
             };
@@ -3860,6 +3950,7 @@ export default function App({
           let next: Session = {
             ...selected,
             inboxCard: rawCommand ? s.inboxCard : undefined,
+            contextDraft: rawCommand ? s.contextDraft : undefined,
             noteCard: rawCommand ? s.noteCard : undefined,
             handoffCard: rawCommand ? s.handoffCard : undefined,
           };
@@ -5699,7 +5790,7 @@ export default function App({
               );
             })}
         </div>
-        {inboxViewOpen ? (
+        {inboxMounted || inboxViewOpen ? <div hidden={!inboxViewOpen} className={inboxViewOpen ? "flex min-h-0 min-w-0 flex-1" : "hidden"}>
           <InboxView
             cwd={sidebarCwd}
             recents={recents}
@@ -5714,8 +5805,11 @@ export default function App({
             sessions={inboxRelatedSessions}
             onOpenSession={onOpenInboxSession}
             target={inboxTarget}
+            visible={inboxViewOpen}
+            onSelectTickets={items => setContextRequest({ context: contextFromTickets(items), cwd: sidebarCwd })}
           />
-        ) : null}
+        </div> : null}
+        {contextRequest ? <AgentContextPicker request={contextRequest} sessions={sessions} recents={recents} onPrepare={prepareContextDestination} onOpen={id => { void onOpenInboxSession(id); }} onClose={() => setContextRequest(undefined)} /> : null}
         {notesViewOpen ? (
           <NotesView
             besideRail={projectRailOpen}
@@ -5790,11 +5884,6 @@ function lastUserBlockId(session: Session): string | undefined {
     if (session.blocks[i]?.role === "user") return session.blocks[i]?.id;
   }
   return undefined;
-}
-
-function isBlankSession(session: Session | undefined): boolean {
-  if (!session || session.busy) return false;
-  return !session.blocks.some((block) => block.role === "user");
 }
 
 function selectedChangePath(

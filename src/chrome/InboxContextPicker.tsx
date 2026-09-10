@@ -480,7 +480,7 @@ export function InboxContextPicker({
           </fieldset>
           <div className="sticky bottom-0 flex items-center justify-end gap-2 border-t border-content/10 bg-background-base p-3">
             <span className="mr-auto text-[11px] text-content/45">
-              Opens a draft · does not auto-send
+              Prepares context · does not auto-send
             </span>
             <button
               type="button"
@@ -515,7 +515,7 @@ export function InboxContextPicker({
                 ? "Preparing…"
                 : action === "ask"
                   ? "Open discussion"
-                  : "Open agent draft"}
+                  : "Choose conversation"}
             </button>
           </div>
         </Modal>

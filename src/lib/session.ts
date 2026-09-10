@@ -250,6 +250,8 @@ export type Session = {
   composerSeed?: string;
   /** Inbox issue/PR chip shown above the composer. In-memory, one-shot. */
   inboxCard?: InboxComposerCard;
+  /** Selected context prepared for the next message; never dispatched automatically. */
+  contextDraft?: import("./agentContext").AgentContext;
   /** GitHub issue or pull request shown on the persisted session card. */
   linkedWorkItem?: LinkedWorkItem;
   /** Note chip shown above the composer. In-memory, one-shot. */
@@ -391,4 +393,10 @@ export function sessionWorkCwd(session: {
   worktreeCwd?: string;
 }): string {
   return session.worktreeCwd || session.cwd;
+}
+
+/** Only replace an unused conversation; prepared context already belongs to it. */
+export function isBlankSession(session: Session | undefined): boolean {
+  if (!session || session.busy || session.contextDraft || session.inboxCard || session.noteCard || session.handoffCard || session.composerSeed?.trim()) return false;
+  return !session.blocks.some(block => block.role === "user");
 }

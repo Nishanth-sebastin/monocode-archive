@@ -1,3 +1,4 @@
+import { contextTicketKey } from "../lib/agentContext";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   CheckCheck,
@@ -322,6 +323,8 @@ type Props = {
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   /** Session-card destination to reveal after the Inbox list loads. */
   target?: LinkedWorkItem | null;
+  visible?: boolean;
+  onSelectTickets?: (items: InboxItem[]) => void;
 };
 
 export function InboxView({
@@ -338,7 +341,12 @@ export function InboxView({
   sessions = [],
   onOpenSession,
   target = null,
+  visible = true,
+  onSelectTickets,
 }: Props) {
+  const [selectingTickets, setSelectingTickets] = useState(false);
+  const [selectedTickets, setSelectedTickets] = useState<Map<string, InboxItem>>(new Map());
+  const [selectionError, setSelectionError] = useState("");
   const [discussionOpen, setDiscussionOpen] = useState(false);
   const listLock = useLockOverscroll<HTMLDivElement>();
   const detailLock = useLockOverscroll<HTMLDivElement>();
@@ -436,6 +444,7 @@ export function InboxView({
   });
 
   useEffect(() => {
+    if (!visible) return;
     if (!target) return;
     setSource("github");
     setVisibleSources(previous => previous.includes("github") ? previous : ["github", ...previous]);
@@ -443,6 +452,7 @@ export function InboxView({
   }, [target]);
 
   useEffect(() => {
+    if (!visible) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -455,24 +465,27 @@ export function InboxView({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [filterMenu]);
+  }, [visible, filterMenu]);
 
   useEffect(() => {
+    if (!visible) return;
     const onChange = () => {
       setLinearHiddenTeamIds(loadHiddenLinearTeamIds());
       setRefresh((value) => value + 1);
     };
     window.addEventListener(LINEAR_CHANGE_EVENT, onChange);
     return () => window.removeEventListener(LINEAR_CHANGE_EVENT, onChange);
-  }, []);
+  }, [visible]);
 
   useEffect(() => {
+    if (!visible) return;
     const onChange = () => setRefresh((value) => value + 1);
     window.addEventListener(GITLAB_CHANGE_EVENT, onChange);
     return () => window.removeEventListener(GITLAB_CHANGE_EVENT, onChange);
-  }, []);
+  }, [visible]);
 
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     const update = (changed = false) => {
       if (changed) clearInboxCache();
@@ -489,9 +502,10 @@ export function InboxView({
     const onChange = () => update(true);
     window.addEventListener(JIRA_CHANGE_EVENT, onChange);
     return () => { cancelled = true; window.removeEventListener(JIRA_CHANGE_EVENT, onChange); };
-  }, []);
+  }, [visible]);
 
   useEffect(() => {
+    if (!visible) return;
     if (source !== "jira" || !jiraSite || !filterMenu) return;
     let cancelled = false;
     setJiraOptionsError("");
@@ -508,9 +522,10 @@ export function InboxView({
         if (!cancelled) setJiraOptionsError(String(error));
       });
     return () => { cancelled = true; };
-  }, [source, jiraSite, !!filterMenu, refresh]);
+  }, [visible, source, jiraSite, !!filterMenu, refresh]);
 
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     const update = (changed = false) => {
       if (changed) clearInboxCache();
@@ -528,11 +543,12 @@ export function InboxView({
     const onChange = () => update(true);
     window.addEventListener(AZURE_CHANGE_EVENT, onChange);
     return () => { cancelled = true; window.removeEventListener(AZURE_CHANGE_EVENT, onChange); };
-  }, []);
+  }, [visible]);
 
   // The roster has to come from Linear, not from the fetched issues: hiding a
   // team drops its issues, so a derived list could never offer it back.
   useEffect(() => {
+    if (!visible) return;
     if (source !== "linear") return;
     let cancelled = false;
     void listLinearTeams()
@@ -545,9 +561,10 @@ export function InboxView({
     return () => {
       cancelled = true;
     };
-  }, [source, linearHiddenTeamIds]);
+  }, [visible, source, linearHiddenTeamIds]);
 
   useEffect(() => {
+    if (!visible) return;
     const force = refresh !== prevRefresh.current;
     prevRefresh.current = refresh;
     const cached = peekInboxList(projects, fetchQuery);
@@ -600,9 +617,10 @@ export function InboxView({
     return () => {
       cancelled = true;
     };
-  }, [fetchQuery, projects, refresh]);
+  }, [visible, fetchQuery, projects, refresh]);
 
   useEffect(() => {
+    if (!visible) return;
     if (
       !target ||
       items.some((item) => inboxItemMatchesLinkedWorkItem(item, target))
@@ -625,7 +643,7 @@ export function InboxView({
     return () => {
       cancelled = true;
     };
-  }, [cwd, items, target, targetSelectionKey]);
+  }, [visible, cwd, items, target, targetSelectionKey]);
 
   const visibleItems = useMemo(() => {
     const visible = applyInboxFilters(
@@ -766,6 +784,7 @@ export function InboxView({
         >
           <ListFilter className="size-3" strokeWidth={1.75} />
         </button>
+        {onSelectTickets ? <button type="button" aria-pressed={selectingTickets} onClick={() => { setSelectingTickets(value => !value); setSelectionError(""); }} className="rounded px-2 py-1 text-[11px] text-content/60 hover:bg-content/10">Select tickets</button> : null}
         <button
           type="button"
           title="Mark all as read"
@@ -792,6 +811,10 @@ export function InboxView({
           )}
         </button>
       </div>
+      {selectedTickets.size || selectingTickets ? <div className="flex flex-wrap items-center gap-2 border-b border-content/10 px-3 py-1.5 text-[12px]">
+        <span>{selectedTickets.size} selected</span><button type="button" disabled={!selectedTickets.size} className="text-content/70 underline disabled:opacity-40" onClick={() => { try { onSelectTickets?.([...selectedTickets.values()]); } catch (error) { setSelectionError(String(error)); } }}>Send to agent…</button><button type="button" className="ml-auto text-content/50" onClick={() => { setSelectedTickets(new Map()); setSelectingTickets(false); setSelectionError(""); }}>Cancel selection</button>
+        {selectionError ? <p role="alert">{selectionError}</p> : null}
+      </div> : null}
       <div
         ref={listLock}
         className="min-h-0 flex-1 overflow-y-auto overscroll-none"
@@ -847,8 +870,12 @@ export function InboxView({
                 sessions,
               );
               return (
-                <li key={key}>
-                  <InboxCard
+                <li key={key} className={selectingTickets ? "flex items-center gap-1" : undefined}>
+                  {selectingTickets ? <input type="checkbox" aria-label={`Select ${item.provider} ${item.identifier || item.number} ${item.title}`} checked={selectedTickets.has(contextTicketKey(item))} onChange={() => {
+                    const identity = contextTicketKey(item);
+                    setSelectedTickets(previous => { const next = new Map(previous); if (next.has(identity)) next.delete(identity); else if (next.size < 20) next.set(identity, { ...item }); else setSelectionError("Select at most 20 tickets."); return next; });
+                  }} /> : null}
+                  <div className="min-w-0 flex-1"><InboxCard
                     item={item}
                     active={selected != null && key === inboxItemKey(selected)}
                     logoPath={resolveTabGroupLogo(projectId, logos)}
@@ -867,7 +894,7 @@ export function InboxView({
                       });
                       setSelectedKey(key);
                     }}
-                  />
+                  /></div>
                 </li>
               );
             })}

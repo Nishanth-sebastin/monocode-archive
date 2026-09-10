@@ -42,6 +42,7 @@ pub struct LinearAssignee {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearIssue {
+    pub account: String,
     pub provider: String,
     pub kind: String,
     pub id: String,
@@ -239,6 +240,7 @@ query {
 "#;
 const ISSUES_QUERY: &str = r#"
 query InboxIssues($first: Int!, $filter: IssueFilter) {
+  viewer { id }
   issues(first: $first, filter: $filter, orderBy: updatedAt) {
     nodes {
       id
@@ -422,7 +424,18 @@ fn parse_linear_issues(data: &Value) -> Result<Vec<LinearIssue>, String> {
         .pointer("/issues/nodes")
         .and_then(Value::as_array)
         .ok_or_else(|| "Linear did not return issues".to_string())?;
-    Ok(nodes.iter().filter_map(parse_linear_issue).collect())
+    let account = data
+        .pointer("/viewer/id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Ok(nodes
+        .iter()
+        .filter_map(parse_linear_issue)
+        .map(|mut item| {
+            item.account = account.to_owned();
+            item
+        })
+        .collect())
 }
 
 fn parse_linear_issue(node: &Value) -> Option<LinearIssue> {
@@ -451,6 +464,7 @@ fn parse_linear_issue(node: &Value) -> Option<LinearIssue> {
         .unwrap_or_default();
     let state = node.get("state");
     Some(LinearIssue {
+        account: String::new(),
         provider: "linear".into(),
         kind: "linear".into(),
         id,
@@ -793,6 +807,7 @@ mod tests {
     #[test]
     fn parse_linear_issues_maps_fields() {
         let data = json!({
+            "viewer": { "id": "account-1" },
             "issues": {
                 "nodes": [{
                     "id": "issue-1",
@@ -812,6 +827,7 @@ mod tests {
         let items = parse_linear_issues(&data).unwrap();
         assert_eq!(items.len(), 1);
         let item = &items[0];
+        assert_eq!(item.account, "account-1");
         assert_eq!(item.provider, "linear");
         assert_eq!(item.kind, "linear");
         assert_eq!(item.identifier, "ENG-9");

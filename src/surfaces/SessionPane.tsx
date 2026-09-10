@@ -1,3 +1,4 @@
+import { requestAgentContext, contextFromText } from "../lib/agentContext";
 import { ChevronDown, GripVertical, X } from "../chrome/icons";
 import {
   memo,
@@ -311,6 +312,8 @@ export const SessionPane = memo(function SessionPane({
       onDraftChange={(text) => {
         draftRef.current = text;
       }}
+      contextDraft={session.contextDraft}
+      onContextDismiss={() => onInboxCardDismiss?.(session.id, "__context__")}
       inboxCard={session.inboxCard}
       noteCard={session.noteCard}
       handoffCard={session.handoffCard}
@@ -448,6 +451,7 @@ export const SessionPane = memo(function SessionPane({
               pendingQuestion={!!session.pendingQuestion}
               onApproval={approve}
               onAddToChat={addSelectionToChat}
+              onSendToAgent={(text, responseId) => requestAgentContext({ context: contextFromText("Selected agent response", text, `${session.title} · session ${session.id} · response ${responseId ?? "unknown"} · ${session.harness} · ${sessionWorkCwd(session)}`), sourceSessionId: session.id, cwd: sessionWorkCwd(session) })}
               onSaveNote={notesEnabled ? saveNote : undefined}
               onOpenFile={onOpenFile}
               onOpenDiff={onOpenDiff}

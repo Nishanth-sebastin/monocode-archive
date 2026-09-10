@@ -43,6 +43,7 @@ pub struct GitlabAssignee {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitlabWorkItem {
+    pub account: String,
     pub kind: String,
     pub number: i64,
     pub title: String,
@@ -279,7 +280,18 @@ fn gitlab_list_work_items_for(
         encode_path_component(repo)
     );
     let response = gitlab_get(config, &path)?;
-    parse_work_items(&response.value, kind, repo)
+    let mut items = parse_work_items(&response.value, kind, repo)?;
+    if !items.is_empty() {
+        let account = gitlab_get(config, "/user")
+            .ok()
+            .and_then(|response| response.value["id"].as_i64())
+            .map(|id| format!("{}:{id}", config.url))
+            .unwrap_or_default();
+        for item in &mut items {
+            item.account.clone_from(&account);
+        }
+    }
+    Ok(items)
 }
 
 fn gitlab_work_item_details_for(
@@ -410,6 +422,7 @@ fn parse_work_item(row: &Value, kind: &str, repo: &str) -> Option<GitlabWorkItem
             || title_lower.starts_with("draft:")
             || title_lower.starts_with("wip:"));
     Some(GitlabWorkItem {
+        account: String::new(),
         kind: kind.into(),
         number,
         title,

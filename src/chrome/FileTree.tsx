@@ -1,3 +1,4 @@
+import { contextFromFiles, requestAgentContext } from "../lib/agentContext";
 import {
   ChevronDown,
   ChevronRight,
@@ -181,6 +182,8 @@ function explorerItems(
       disabled: target.isRoot,
     },
     { kind: "sep" },
+    { kind: "item", id: "add-to-chat", label: "Add to chat", disabled: target.isDir },
+    { kind: "item", id: "send-to-agent", label: "Send to agent…", disabled: target.isDir },
     { kind: "item", id: "copy-path", label: "Copy Path" },
     { kind: "item", id: "copy-relative-path", label: "Copy Relative Path" },
     { kind: "sep" },
@@ -458,6 +461,10 @@ export const FileTree = memo(function FileTree({
         return;
       case "duplicate":
         await run(() => duplicateAt(target.path));
+        return;
+      case "add-to-chat":
+      case "send-to-agent":
+        await run(async () => requestAgentContext({ context: await contextFromFiles([target.path], cwd), cwd, prepareInSource: id === "add-to-chat" }));
         return;
       case "copy-path":
         await copyText(target.path);

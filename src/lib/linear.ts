@@ -7,6 +7,7 @@ export type LinearTeam = {
 };
 
 export type LinearIssue = {
+  account?: string;
   provider: "linear";
   kind: "linear";
   id: string;

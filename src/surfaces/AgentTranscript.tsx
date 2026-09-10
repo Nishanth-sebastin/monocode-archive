@@ -109,6 +109,7 @@ type Props = {
   pendingQuestion?: boolean;
   onApproval?: (requestId: number, decision: ApprovalDecision) => void;
   onAddToChat?: (text: string) => void;
+  onSendToAgent?: (text: string, responseId?: string) => void;
   onSaveNote?: (text: string) => void;
   onOpenFile?: (path: string) => void;
   onOpenDiff?: (path: string) => void;
@@ -135,6 +136,7 @@ function AgentTranscriptComponent({
   pendingQuestion = false,
   onApproval,
   onAddToChat,
+  onSendToAgent,
   onSaveNote,
   onOpenFile,
   onOpenDiff,
@@ -567,6 +569,7 @@ function AgentTranscriptComponent({
         <TranscriptSelectionMenu
           selection={selection}
           onAddToChat={onAddToChat}
+          onSendToAgent={onSendToAgent}
           onDismiss={dismissSelection}
         />
       ) : null}

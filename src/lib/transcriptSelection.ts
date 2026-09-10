@@ -3,6 +3,7 @@ export const SELECTABLE_AGENT_RESPONSE_ATTR = "data-selectable-agent-response";
 export type TranscriptSelection = {
   text: string;
   rect: DOMRect;
+  responseId?: string;
 };
 
 export type TranscriptSelectionCandidate = {

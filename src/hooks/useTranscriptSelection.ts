@@ -66,7 +66,7 @@ export function useTranscriptSelection(
         focusResponseId: responseIdForNode(nativeSelection.focusNode, root),
       });
       const rect = text ? firstRangeRect(nativeSelection.getRangeAt(0)) : null;
-      setSelection(text && rect ? { text, rect } : null);
+      setSelection(text && rect ? { text, rect, responseId: responseIdForNode(nativeSelection.anchorNode, root) ?? undefined } : null);
     };
     const scheduleReport = () => {
       cancelFrame();

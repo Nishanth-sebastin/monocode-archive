@@ -1,3 +1,4 @@
+import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -243,6 +244,32 @@ function ChangedFiles({
   onOpenAllChanges: () => void;
   onMutated: (paths?: string[]) => void;
 }) {
+  const [selectingContext, setSelectingContext] = useState(false);
+  const [contextSelected, setContextSelected] = useState<Set<string>>(new Set());
+  const [contextBusy, setContextBusy] = useState(false);
+  const [contextError, setContextError] = useState("");
+  const contextGeneration = useRef(0);
+  useEffect(() => {
+    setContextSelected(new Set());
+    return () => {
+      contextGeneration.current++;
+    };
+  }, [cwd]);
+  const contextSelection = selectingContext
+    ? {
+        selected: contextSelected,
+        toggle: (relative: string, kind: GitFileDiffKind) => {
+          if (contextBusy) return;
+          const key = JSON.stringify([relative, kind]);
+          setContextSelected((previous) => {
+            const next = new Set(previous);
+            if (next.has(key)) next.delete(key);
+            else if (next.size < 20) next.add(key);
+            return next;
+          });
+        },
+      }
+    : undefined;
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const menuRef = useRef<HTMLDivElement>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
@@ -467,10 +494,101 @@ function ChangedFiles({
     }
   };
 
+  const contextLoading = useRef(false);
+  const prepareSelected = async (prepareInSource: boolean) => {
+    if (contextLoading.current) return;
+    contextLoading.current = true;
+    const generation = contextGeneration.current;
+    setContextBusy(true);
+    setContextError("");
+    try {
+      const selections = [...contextSelected].map((key) => {
+        const [relative, kind] = JSON.parse(key) as [string, GitFileDiffKind];
+        return { relative, kind };
+      });
+      if (
+        selections.some(
+          (selection) =>
+            !files.some(
+              (file) =>
+                file.relative === selection.relative &&
+                (selection.kind === "staged" ? file.staged : file.unstaged),
+            ),
+        )
+      )
+        throw new Error(
+          "A selected change is no longer available. Select changes again.",
+        );
+      const context = await contextFromChanges(cwd, selections);
+      if (generation === contextGeneration.current)
+        requestAgentContext({ context, cwd, prepareInSource });
+    } catch (reason) {
+      if (generation === contextGeneration.current)
+        setContextError(String(reason));
+    } finally {
+      contextLoading.current = false;
+      if (generation === contextGeneration.current) setContextBusy(false);
+    }
+  };
   return (
     <aside
       className={`flex min-h-0 min-w-0 flex-col ${fill ? "flex-1" : "shrink-0"}`}
     >
+      <div className="flex flex-wrap items-center gap-2 border-b border-content/10 px-3 py-1.5 text-[12px]">
+        <button
+          type="button"
+          aria-pressed={selectingContext}
+          onClick={() => setSelectingContext((value) => !value)}
+        >
+          Select changes
+        </button>
+        {contextSelected.size ? (
+          <>
+            <span>{contextSelected.size} selected</span>
+            <button
+              type="button"
+              disabled={contextBusy}
+              className="underline disabled:opacity-40"
+              onClick={() => void prepareSelected(true)}
+            >
+              {contextBusy ? "Preparing…" : "Add to chat"}
+            </button>
+            <details>
+              <summary
+                aria-label="More selected change actions"
+                className="cursor-pointer"
+              >
+                …
+              </summary>
+              <button
+                type="button"
+                disabled={contextBusy}
+                className="underline"
+                onClick={() => void prepareSelected(false)}
+              >
+                Send to agent…
+              </button>
+            </details>
+            <button
+              type="button"
+              onClick={() => {
+                contextGeneration.current++;
+                setContextSelected(new Set());
+                setSelectingContext(false);
+                setContextBusy(false);
+                setContextError("");
+              }}
+            >
+              Cancel selection
+            </button>
+          </>
+        ) : null}
+        {contextError ? (
+          <p role="alert" className="w-full text-red-400">
+            {contextError}
+          </p>
+        ) : null}
+      </div>
       <div className="shrink-0 border-b border-content/10 p-2">
         <div className="relative">
           <textarea
@@ -608,6 +726,7 @@ function ChangedFiles({
                 ]}
               >
                 <ChangeList
+                  contextSelection={contextSelection}
                   files={staged}
                   view={view}
                   kind="staged"
@@ -649,6 +768,7 @@ function ChangedFiles({
                 ]}
               >
                 <ChangeList
+                  contextSelection={contextSelection}
                   files={unstaged}
                   view={view}
                   kind="unstaged"
@@ -950,7 +1070,12 @@ type ChangeDir = {
   status: string | null;
 };
 
+type ContextSelection = {
+  selected: ReadonlySet<string>;
+  toggle: (relative: string, kind: GitFileDiffKind) => void;
+};
 type ChangeRowProps = {
+  contextSelection?: ContextSelection;
   files: GitChangedFile[];
   view: ChangesView;
   kind: GitFileDiffKind;
@@ -980,6 +1105,7 @@ function ChangeList({ files, view, ...rest }: ChangeRowProps) {
           kind={rest.kind}
           onOpenFile={rest.onOpenFile}
           onAction={rest.onAction}
+          contextSelection={rest.contextSelection}
         />
       ))}
     </>
@@ -995,6 +1121,7 @@ function ChangeDirChildren({
   busy,
   onOpenFile,
   onAction,
+  contextSelection,
 }: Omit<ChangeRowProps, "files" | "view"> & {
   dir: ChangeDir;
   depth: number;
@@ -1012,6 +1139,7 @@ function ChangeDirChildren({
           busy={busy}
           onOpenFile={onOpenFile}
           onAction={onAction}
+          contextSelection={contextSelection}
         />
       ))}
       {dir.files.map((file) => (
@@ -1024,6 +1152,7 @@ function ChangeDirChildren({
           depth={depth}
           onOpenFile={onOpenFile}
           onAction={onAction}
+          contextSelection={contextSelection}
         />
       ))}
     </>
@@ -1153,7 +1282,9 @@ function ChangeRow({
   depth,
   onOpenFile,
   onAction,
+  contextSelection,
 }: {
+  contextSelection?: ContextSelection;
   file: GitChangedFile;
   active: boolean;
   busy: boolean;
@@ -1182,6 +1313,7 @@ function ChangeRow({
             : "text-content hover:bg-content/5"
         }`}
       >
+        {contextSelection ? <input type="checkbox" aria-label={`Select ${kind} ${file.relative}`} checked={contextSelection.selected.has(JSON.stringify([file.relative, kind]))} onChange={() => contextSelection.toggle(file.relative, kind)} /> : null}
         <button
           type="button"
           title={file.relative}

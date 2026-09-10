@@ -1,3 +1,4 @@
+import { contextFromText, requestAgentContext } from "../lib/agentContext";
 import { useEffect, useRef } from "react";
 import { MessageSquarePlus } from "../chrome/icons";
 import { Popover } from "../chrome/Popover";
@@ -9,6 +10,8 @@ import { requestAddToChat } from "../lib/quoteDraft";
 
 export type EditorSelectionTarget = EditorCodeSelection & {
   anchor: DOMRect;
+  text?: string;
+  sourcePath?: string;
 };
 
 export function EditorSelectionMenu({
@@ -51,7 +54,7 @@ export function EditorSelectionMenu({
         type="button"
         onMouseDown={(event) => event.preventDefault()}
         onClick={() => {
-          requestAddToChat(formatEditorSelectionReference(selection), "plain");
+          requestAddToChat(formatEditorSelectionReference({ ...selection, path: selection.sourcePath ?? selection.path }), "plain");
           onDismiss();
         }}
         className="flex h-7 items-center gap-1.5 rounded-lg px-2 font-sans text-[13px] leading-none text-content outline-none ring-accent/40 hover:bg-content/5 focus-visible:ring-2"
@@ -63,6 +66,7 @@ export function EditorSelectionMenu({
         />
         Add to chat
       </button>
+      <button type="button" className="rounded px-2 py-1 text-[12px] text-content/60 hover:bg-content/5" onMouseDown={event => event.preventDefault()} onClick={() => requestAgentContext({ context: contextFromText("Selected file lines", `${formatEditorSelectionReference(selection)}\n${selection.text ?? ""}`, selection.sourcePath ?? selection.path) })}>Send to agent…</button>
     </Popover>
   );
 }

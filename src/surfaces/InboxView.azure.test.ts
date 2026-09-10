@@ -73,6 +73,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
   document.body.append(container);
   const root = createRoot(container);
   const onStart = vi.fn().mockRejectedValue(new Error("Handoff failed"));
+  const onSelectTickets = vi.fn();
   const onAsk = vi.fn().mockResolvedValue("ask-session");
   const button = (text: string) =>
     [...document.querySelectorAll("button")].find(
@@ -91,6 +92,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
           onAskRestart: async () => "",
           onAskMount: () => {},
           onStart,
+          onSelectTickets,
         }),
       ),
     );
@@ -106,7 +108,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
     );
     await click(button("Send to agent"));
     expect(onStart).not.toHaveBeenCalled();
-    await click(button("Open agent draft"));
+    await click(button("Choose conversation"));
     expect(onStart).toHaveBeenCalledWith(
       expect.objectContaining({
         provider: "azure",
@@ -125,6 +127,17 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
     await click(button("GitHub"));
     await click(button("Azure"));
     expect(container.querySelector("h1")?.textContent).toBe("Ticket 141");
+    await click(button("Select tickets"));
+    await click(container.querySelector('input[aria-label="Select azure Bug 141 Ticket 141"]')!);
+    await click(button("GitHub"));
+    expect(container.textContent).toContain("1 selected");
+    await click(button("Azure"));
+    expect((container.querySelector('input[aria-label="Select azure Bug 141 Ticket 141"]') as HTMLInputElement).checked).toBe(true);
+    await click(button("Send to agent…"));
+    expect(onSelectTickets).toHaveBeenCalledWith([expect.objectContaining({ provider: "azure", account: "ada", id: "141" })]);
+    expect(container.textContent).toContain("1 selected");
+    await click(button("Cancel selection"));
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
     fail = true;
     await click(container.querySelector('[aria-label="Refresh"]')!);
     expect(container.querySelector("h1")?.textContent).toBe("Ticket 141");

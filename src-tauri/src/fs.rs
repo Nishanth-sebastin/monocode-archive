@@ -546,6 +546,7 @@ pub struct GitHubAssignee {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubWorkItem {
+    pub account: String,
     pub kind: String,
     pub number: i64,
     pub title: String,
@@ -1738,7 +1739,23 @@ fn git_github_work_items_for(
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let json = gh_checked(root, &refs)?;
     let repo = git_github_repo_for(root).unwrap_or_default();
-    parse_github_work_items(&json, kind, &repo)
+    let mut items = parse_github_work_items(&json, kind, &repo)?;
+    if let Some(host) = items
+        .first()
+        .and_then(|item| tauri::Url::parse(&item.url).ok())
+        .and_then(|url| url.host_str().map(str::to_owned))
+    {
+        let account = gh_checked(
+            root,
+            &["api", "--hostname", &host, "user", "--jq", ".id | tostring"],
+        )
+        .map(|id| format!("{host}:{}", id.trim()))
+        .unwrap_or_default();
+        for item in &mut items {
+            item.account.clone_from(&account);
+        }
+    }
+    Ok(items)
 }
 
 fn git_github_work_item_for(
@@ -2512,6 +2529,7 @@ fn parse_github_work_items(
     Ok(rows
         .into_iter()
         .map(|row| GitHubWorkItem {
+            account: String::new(),
             kind: kind.to_string(),
             number: row.number,
             title: row.title,

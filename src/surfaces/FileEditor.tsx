@@ -689,7 +689,8 @@ function CodeMirrorEditor({
         ),
         EditorView.updateListener.of((update) => {
           if (update.selectionSet) {
-            setSelectionTarget(editorSelectionTarget(update.view, commentPath));
+            const selected = editorSelectionTarget(update.view, commentPath);
+            setSelectionTarget(selected ? { ...selected, sourcePath: path } : null);
           } else if (update.docChanged) {
             setSelectionTarget(null);
           }
@@ -852,6 +853,7 @@ function CodeMirrorEditor({
       {commentTarget ? (
         <DiffCommentComposer
           path={commentPath}
+          sourcePath={path}
           target={commentTarget}
           onDismiss={() => setCommentTarget(null)}
         />
@@ -893,6 +895,7 @@ function editorSelectionTarget(
   const lastSelectedPosition = Math.max(selection.from, selection.to - 1);
   return {
     path,
+    text: text.slice(0, 32_000) + (text.length > 32_000 ? "\n[Selected context truncated]" : ""),
     startLine: view.state.doc.lineAt(selection.from).number,
     endLine: view.state.doc.lineAt(lastSelectedPosition).number,
     anchor: new DOMRect(

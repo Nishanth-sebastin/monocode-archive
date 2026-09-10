@@ -1,3 +1,4 @@
+import { contextFromText, requestAgentContext } from "../lib/agentContext";
 import { useState } from "react";
 import { MessageSquarePlus, X } from "../chrome/icons";
 import { Popover, type PopoverAnchor } from "../chrome/Popover";
@@ -13,17 +14,19 @@ export type DiffCommentComposerTarget = {
 
 export function DiffCommentComposer({
   path,
+  sourcePath = path,
   target,
   onDismiss,
 }: {
   path: string;
+  sourcePath?: string;
   target: DiffCommentComposerTarget;
   onDismiss: () => void;
 }) {
   const [comment, setComment] = useState("");
   const location = diffCommentLocation({ path, line: target.line });
   const addToChat = () => {
-    const text = formatDiffComment({ path, line: target.line }, comment);
+    const text = formatDiffComment({ path: sourcePath, line: target.line }, comment);
     if (!text) return;
     requestAddToChat(text, "plain");
     onDismiss();
@@ -84,6 +87,7 @@ export function DiffCommentComposer({
         />
         <div className="mt-2 flex items-center justify-between gap-3">
           <span className="text-[10px] text-content/35">{MOD}↩ to add</span>
+          <button type="button" disabled={!comment.trim()} className="text-[11px] text-content/60 underline disabled:opacity-40" onClick={() => requestAgentContext({ context: contextFromText(`Diff comment ${location}`, formatDiffComment({ path, line: target.line }, comment), sourcePath) })}>Send to agent…</button>
           <button
             type="submit"
             disabled={!comment.trim()}

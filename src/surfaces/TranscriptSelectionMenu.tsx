@@ -1,5 +1,5 @@
-import { MessageSquarePlus } from "../chrome/icons";
-import { useEffect, useRef } from "react";
+import { MessageSquarePlus, MoreHorizontal } from "../chrome/icons";
+import { useEffect, useRef, useState } from "react";
 import { Popover } from "../chrome/Popover";
 import { type TranscriptSelection } from "../lib/transcriptSelection";
 
@@ -7,13 +7,16 @@ type Props = {
   selection: TranscriptSelection | null;
   onAddToChat: (text: string) => void;
   onDismiss: () => void;
+  onSendToAgent?: (text: string, responseId?: string) => void;
 };
 
 export function TranscriptSelectionMenu({
   selection,
   onAddToChat,
   onDismiss,
+  onSendToAgent,
 }: Props) {
+  const [more, setMore] = useState(false);
   const onDismissRef = useRef(onDismiss);
   onDismissRef.current = onDismiss;
 
@@ -43,7 +46,7 @@ export function TranscriptSelectionMenu({
       }}
       role="toolbar"
       aria-label="Selected text actions"
-      className="p-1"
+      className="flex p-1"
     >
       <button
         type="button"
@@ -62,6 +65,31 @@ export function TranscriptSelectionMenu({
         />
         Add to chat
       </button>
+      {onSendToAgent ? (
+        <>
+          <button
+            type="button"
+            aria-label="More selected text actions"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => setMore((value) => !value)}
+            className="rounded px-1 hover:bg-content/5"
+          >
+            <MoreHorizontal className="size-4" />
+          </button>
+          {more ? (
+            <button
+              type="button"
+              className="rounded px-2 text-[12px] hover:bg-content/5"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() =>
+                onSendToAgent(selection.text, selection.responseId)
+              }
+            >
+              Send to another agent…
+            </button>
+          ) : null}
+        </>
+      ) : null}
     </Popover>
   );
 }

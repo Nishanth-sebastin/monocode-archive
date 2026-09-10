@@ -40,7 +40,12 @@ export function isMarkdownBlockquotePosition(
 }
 
 export function appendSelectionQuote(draft: string, text: string): string {
-  const selected = text.replace(/\r\n?/g, "\n").trim();
+  const normalized = text.replace(/\r\n?/g, "\n").trim();
+  const selected =
+    normalized.slice(0, 32_000) +
+    (normalized.length > 32_000
+      ? "\n[Selected context truncated at 32,000 characters]"
+      : "");
   if (!selected) return draft;
 
   const quote = selected
@@ -51,7 +56,12 @@ export function appendSelectionQuote(draft: string, text: string): string {
 }
 
 export function appendComposerInsert(draft: string, text: string): string {
-  const selected = text.replace(/\r\n?/g, "\n").trim();
+  const normalized = text.replace(/\r\n?/g, "\n").trim();
+  const selected =
+    normalized.slice(0, 32_000) +
+    (normalized.length > 32_000
+      ? "\n[Selected context truncated at 32,000 characters]"
+      : "");
   if (!selected) return draft;
   return joinComposerInsert(draft, selected);
 }

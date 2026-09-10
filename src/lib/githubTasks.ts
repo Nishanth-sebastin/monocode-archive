@@ -37,6 +37,7 @@ export type GithubAssignee = {
 };
 
 export type GithubWorkItem = {
+  account?: string;
   kind: GithubTaskKind;
   number: number;
   title: string;
@@ -565,7 +566,7 @@ async function fetchInboxItems(
   let jiraItems: InboxItem[] = [];
   try {
     const status = await jiraConnected();
-    if (status.connected) jiraItems = await listJiraIssues(status.site, query.state);
+    if (status.connected) jiraItems = (await listJiraIssues(status.site, query.state)).map(item => ({ ...item, account: status.account }));
     else errors.jira = "Connect Jira Cloud in Settings to see assigned issues.";
   } catch (error) {
     errors.jira = inboxErrorMessage(error);
@@ -574,7 +575,7 @@ async function fetchInboxItems(
   let azureItems: InboxItem[] = [];
   try {
     const status = await azureConnected();
-    if (status.connected) azureItems = await listAzureItems(status);
+    if (status.connected) azureItems = (await listAzureItems(status)).map(item => ({ ...item, account: status.accountId || status.account }));
     else errors.azure = "Connect Azure DevOps in Settings to see work items.";
   } catch (error) {
     errors.azure = inboxErrorMessage(error);
@@ -645,6 +646,7 @@ async function fetchLinearInboxItems(query: InboxQuery): Promise<InboxItem[]> {
 
 function linearIssueToInboxItem(issue: LinearIssue): InboxItem {
   return {
+    account: issue.account,
     provider: "linear",
     kind: "linear",
     id: issue.id,

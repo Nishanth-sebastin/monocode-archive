@@ -107,7 +107,7 @@ it("retains the selected Jira ticket and explicit project through handoff and re
     );
     await click(button("Send to agent"));
     expect(onStart).not.toHaveBeenCalled();
-    await click(button("Open agent draft"));
+    await click(button("Choose conversation"));
     expect(onStart).toHaveBeenCalledWith(
       expect.objectContaining({
         identifier: "ENG-41",

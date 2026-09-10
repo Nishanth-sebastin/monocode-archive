@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   acknowledgeQuoteRequest,
+  appendComposerInsert,
   appendSelectionQuote,
   consumeQuoteRequest,
   isMarkdownBlockquotePosition,
@@ -24,6 +25,15 @@ describe("appendSelectionQuote", () => {
     ["draft\n\n", "draft\n\n> quote\n\n"],
   ])("separates an existing draft %#", (draft, expected) => {
     expect(appendSelectionQuote(draft, "quote")).toBe(expected);
+  });
+
+  it("bounds both quote and plain selections without replacing the draft", () => {
+    for (const insert of [appendSelectionQuote, appendComposerInsert]) {
+      const draft = insert("existing", "x".repeat(32_001));
+      expect(draft).toContain("existing");
+      expect(draft).toContain("truncated at 32,000 characters");
+      expect(draft).not.toContain("x".repeat(32_001));
+    }
   });
 
   it("ignores whitespace-only selections", () => {
