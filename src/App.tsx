@@ -336,6 +336,7 @@ import {
   resolveLinkedWorkItem,
 } from "./lib/sessionWorkItem";
 import { linearIssueDetails, peekLinearIssueDetails } from "./lib/linear";
+import { gitlabWorkItemDetails, peekGitlabWorkItemDetails } from "./lib/gitlab";
 import {
   loadLiveAgentsEnabled,
   loadNotesEnabled,
@@ -2636,7 +2637,21 @@ export default function App({
                   peekLinearIssueDetails(item.id) ??
                   (await linearIssueDetails(item.id))
                 ).body
-              : undefined;
+              : item.provider === "gitlab" &&
+                  (item.kind === "issue" || item.kind === "pr")
+                ? (
+                    peekGitlabWorkItemDetails(
+                      item.projectPath,
+                      item.kind,
+                      item.number,
+                    ) ??
+                    (await gitlabWorkItemDetails(
+                      item.projectPath,
+                      item.kind,
+                      item.number,
+                    ))
+                  ).body
+                : undefined;
           session = {
             ...newDefaultSession(cwd),
             title: `Ask · ${item.title}`,

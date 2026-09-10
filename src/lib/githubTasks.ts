@@ -8,6 +8,13 @@ import {
   type LinearIssue,
 } from "./linear";
 import {
+  clearGitlabCache,
+  gitlabConnected,
+  gitlabRepo,
+  listGitlabWorkItems,
+  type GitlabWorkItem,
+} from "./gitlab";
+import {
   collectRailProjects,
   normalizeProjectPath,
   sameProjectPath,
@@ -40,7 +47,7 @@ export type GithubWorkItem = {
   repo: string;
 };
 
-export type InboxProvider = "github" | "linear";
+export type InboxProvider = "github" | "linear" | "gitlab";
 
 export type InboxItem = Omit<GithubWorkItem, "kind"> & {
   kind: InboxKind;
@@ -153,6 +160,7 @@ export function clearInboxCache() {
   threadInflight.clear();
   prDiffByKey.clear();
   prDiffInflight.clear();
+  clearGitlabCache();
 }
 
 export function inboxListCacheKey(
@@ -535,10 +543,56 @@ async function fetchInboxItems(
     }
   }
 
+  let gitlabItems: InboxItem[] = [];
+  if ((await gitlabConnected()).connected) {
+    const gitlab = await fetchGitlabInboxItems(unique, query, preferredPaths);
+    gitlabItems = gitlab.items;
+    if (gitlab.error) errors.gitlab = gitlab.error;
+  }
+
   return {
-    items: dedupeInboxItems([...github.items, ...linearItems], preferredPaths),
+    items: dedupeInboxItems(
+      [...github.items, ...linearItems, ...gitlabItems],
+      preferredPaths,
+    ),
     errors,
   };
+}
+
+async function fetchGitlabInboxItems(
+  projects: readonly { path: string }[],
+  query: InboxQuery,
+  preferredPaths: readonly string[],
+): Promise<{ items: InboxItem[]; error?: string }> {
+  const resolved = await Promise.all(
+    projects.map(async (project) => {
+      try {
+        return {
+          path: project.path,
+          repo: (await gitlabRepo(project.path)).trim(),
+        };
+      } catch {
+        return { path: project.path, repo: "" };
+      }
+    }),
+  );
+  const grouped = groupProjectsByRepo(
+    resolved.filter((project) => project.repo.length > 0),
+  );
+  const jobs = grouped.flatMap((project) =>
+    (["issue", "pr"] as const).map(async (kind) => {
+      const items = await listGitlabWorkItems(project.path, {
+        kind,
+        assignedToMe: query.assignedToMe,
+        state: query.state,
+        limit: query.state === "all" ? INBOX_ALL_LIMIT : undefined,
+      });
+      return items.map((item) =>
+        gitlabWorkItemToInboxItem(item, project.path, project.repo),
+      );
+    }),
+  );
+  return collectInboxResults(await Promise.allSettled(jobs), preferredPaths);
 }
 
 async function fetchLinearInboxItems(query: InboxQuery): Promise<InboxItem[]> {
@@ -581,6 +635,19 @@ function linearIssueToInboxItem(issue: LinearIssue): InboxItem {
     projectId: issue.projectId || "",
     projectName: issue.projectName || "",
     projectPath: issue.projectPath || "",
+  };
+}
+
+function gitlabWorkItemToInboxItem(
+  item: GitlabWorkItem,
+  projectPath: string,
+  repo: string,
+): InboxItem {
+  return {
+    ...item,
+    provider: "gitlab",
+    repo: item.repo || repo,
+    projectPath,
   };
 }
 
@@ -743,7 +810,9 @@ export function matchesInboxQuery(item: InboxItem, query: string): boolean {
   if (!needle) return true;
   const kind =
     item.kind === "pr"
-      ? "pull request pr"
+      ? item.provider === "gitlab"
+        ? "merge request mr"
+        : "pull request pr"
       : item.kind === "linear"
         ? "linear issue"
         : "issue";
@@ -797,9 +866,13 @@ export function inboxStartDraft(item: InboxItem, body?: string): string {
     return `${lines.join("\n")}\n`;
   }
   const kind = item.kind === "pr" ? "pull request" : "issue";
-  const title = item.title.trim() || `GitHub ${kind} #${item.number}`;
+  const provider = item.provider === "gitlab" ? "GitLab" : "GitHub";
+  const providerKind =
+    item.provider === "gitlab" && item.kind === "pr" ? "merge request" : kind;
+  const title =
+    item.title.trim() || `${provider} ${providerKind} #${item.number}`;
   const lines = [
-    `Work on this GitHub ${kind}:`,
+    `Work on this ${provider} ${providerKind}:`,
     "",
     `#${item.number} ${title}`,
   ];

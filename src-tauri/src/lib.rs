@@ -6,6 +6,7 @@ mod chat_background;
 mod checkpoint;
 mod cursor_store;
 mod fs;
+mod gitlab;
 mod harness;
 mod inbox_media;
 mod linear;
@@ -242,6 +243,14 @@ pub fn run() {
             fs::git_github_work_item_comment,
             fs::git_github_pr_diff,
             inbox_media::fetch_inbox_media,
+            gitlab::gitlab_status,
+            gitlab::gitlab_set_config,
+            gitlab::gitlab_repo,
+            gitlab::gitlab_list_work_items,
+            gitlab::gitlab_work_item_details,
+            gitlab::gitlab_work_item_thread,
+            gitlab::gitlab_work_item_comment,
+            gitlab::gitlab_mr_diff,
             linear::linear_status,
             linear::linear_set_token,
             linear::linear_list_teams,
