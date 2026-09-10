@@ -33,6 +33,8 @@ import {
   attachmentsFromPaths,
   filesFromClipboard,
   mergeAttachments,
+  MAX_ATTACHMENTS,
+  MAX_EMBED_BYTES,
   pickAttachments,
   revokeAttachment,
 } from "../lib/attachments";
@@ -160,7 +162,7 @@ type Props = {
   onModelSettingsChange?: (settings: Record<string, string>) => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onQuoteRequestConsumed?: (id: number) => void;
-  onInboxCardDismiss?: () => void;
+  onInboxCardDismiss?: (fileId?: string) => void;
   onNoteCardDismiss?: () => void;
   onHandoffCardDismiss?: () => void;
   onQuestionReply?: (requestId: number, reply: UserQuestionReply) => void;
@@ -447,6 +449,9 @@ export function Composer({
       !!handoffCard,
   );
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState("");
+  const contextFiles = inboxCard?.attachments ?? [];
+  const allAttachments = [...contextFiles, ...attachments];
   const [fileDrag, setFileDrag] = useState(false);
   const [plusOpen, setPlusOpen] = useState(false);
   const [planSelected, setPlanSelected] = useState(false);
@@ -587,16 +592,6 @@ export function Composer({
       for (const file of attachmentsRef.current) revokeAttachment(file);
     };
   }, []);
-
-  useEffect(() => {
-    if (harnessSupportsAttachments(harness)) return;
-    setAttachments((prev) => {
-      if (prev.length === 0) return prev;
-      for (const file of prev) revokeAttachment(file);
-      syncHasValue(ref.current?.value ?? "", []);
-      return [];
-    });
-  }, [harness, syncHasValue]);
 
   useEffect(() => {
     const refresh = () => setRunnerEnabled(loadComposerRunner());
@@ -923,7 +918,25 @@ export function Composer({
     const text = isNativeCommandPrompt(command.text, harness)
       ? command.text
       : composeInboxMessage(inboxCard, command.text);
-    const files = attachments;
+    const nativeCommand = isNativeCommandPrompt(command.text, harness);
+    const files = nativeCommand ? attachments : allAttachments;
+    if (files.length && !attachmentsSupported) {
+      setAttachmentError(
+        `${HARNESS_TITLE[harness]} does not support attachments. Choose another agent or remove the files.`,
+      );
+      return;
+    }
+    if (
+      files.length > MAX_ATTACHMENTS ||
+      (contextFiles.length > 0 &&
+        files.reduce((sum, file) => sum + file.size, 0) > MAX_EMBED_BYTES)
+    ) {
+      setAttachmentError(
+        "Keep at most 20 files and 20 MiB total. Remove a file before sending.",
+      );
+      return;
+    }
+    setAttachmentError("");
     if (!text && files.length === 0 && !noteCard && !handoffCard) return;
     onSubmit(text, files, {
       intent: planSelected || command.planning ? "plan" : "default",
@@ -1196,20 +1209,39 @@ export function Composer({
             </div>
           )}
 
-          {attachments.length > 0 ? (
+          {allAttachments.length > 0 ? (
             <div className="flex flex-wrap gap-1.5 px-3 pt-2">
-              {attachments.map((file) => (
+              {allAttachments.map((file) => (
                 <AttachmentChip
                   key={file.id}
                   attachment={file}
-                  onRemove={() => removeAttachment(file.id)}
+                  onRemove={() => {
+                    if (
+                      contextFiles.some(
+                        (contextFile) => contextFile.id === file.id,
+                      )
+                    )
+                      onInboxCardDismiss?.(file.id);
+                    else removeAttachment(file.id);
+                    setAttachmentError("");
+                  }}
                 />
               ))}
             </div>
           ) : null}
 
+          {attachmentError ||
+          (allAttachments.length > 0 && !attachmentsSupported) ? (
+            <p role="alert" className="px-3 pt-2 text-xs text-red-400">
+              {attachmentError ||
+                `${HARNESS_TITLE[harness]} does not support attachments. Choose another agent or remove the files.`}
+            </p>
+          ) : null}
           {inboxCard ? (
-            <InboxMiniCard card={inboxCard} onDismiss={onInboxCardDismiss} />
+            <InboxMiniCard
+              card={inboxCard}
+              onDismiss={() => onInboxCardDismiss?.()}
+            />
           ) : null}
 
           {noteCard ? (

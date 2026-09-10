@@ -906,6 +906,10 @@ export function inboxStartDraft(item: InboxItem, body?: string): string {
 
 /** Compact chip shown above the composer when starting from Inbox. */
 export type InboxComposerCard = {
+  contextId?: string;
+  contextSummary?: string;
+  contextPreview?: { description?: string; comments: { id: string; author: string; createdAt: string; body: string }[] };
+  attachments?: import("./session").Attachment[];
   provider: InboxProvider;
   kind: InboxKind;
   identifier: string;

@@ -31,6 +31,8 @@ import {
   INBOX_FILTER_MENU_WIDTH,
 } from "../chrome/InboxFiltersMenu";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
+import { InboxContextPicker, useInboxContext } from "../chrome/InboxContextPicker";
+import type { InboxComposerCard } from "../lib/githubTasks";
 import { ProjectLogoIcon } from "../chrome/ProjectLogoIcon";
 import { ProjectMascot } from "../chrome/ProjectMascot";
 import { OverlayNav } from "../chrome/TitleBar";
@@ -303,7 +305,7 @@ function InboxDetailTab({
 }
 
 type Props = {
-  onAsk: (item: InboxItem) => Promise<string>;
+  onAsk: (item: InboxItem, context?: InboxComposerCard) => Promise<string>;
   onAskRestart: (item: InboxItem) => Promise<string>;
   onAskMount: (portal: InboxSessionPortal | null) => void;
   cwd: string;
@@ -312,7 +314,7 @@ type Props = {
   onClose?: () => void;
   onToggleSidebar?: () => void;
   onOpenSettings?: () => void;
-  onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
+  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   sessions?: readonly SessionSummary[];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   /** Session-card destination to reveal after the Inbox list loads. */
@@ -925,7 +927,11 @@ export function InboxView({
               relatedSessions={
                 selected ? relatedSessionsForInboxItem(selected, sessions) : []
               }
-              onDiscuss={() => setDiscussionOpen(true)}
+              onDiscuss={async context => {
+                if (!selected) return;
+                await onAsk(selected, context);
+                setDiscussionOpen(true);
+              }}
               onStart={onStart}
               onOpenSession={onOpenSession}
             />
@@ -962,8 +968,8 @@ function InboxDetailBody({
   projects: InboxProjectOption[];
   revision?: number;
   relatedSessions: readonly SessionSummary[];
-  onDiscuss?: () => void;
-  onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
+  onDiscuss?: (context: InboxComposerCard) => void | Promise<void>;
+  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
 }) {
   if (!item) {
@@ -1160,8 +1166,8 @@ function InboxDetail({
   projects: InboxProjectOption[];
   revision: number;
   relatedSessions: readonly SessionSummary[];
-  onDiscuss?: () => void;
-  onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
+  onDiscuss?: (context: InboxComposerCard) => void | Promise<void>;
+  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
 }) {
   const linear = item.provider === "linear";
@@ -1214,8 +1220,7 @@ function InboxDetail({
     projects[0]?.path ??
     cwd;
   const [startProject, setStartProject] = useState(defaultProject);
-  const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
+  const context = useInboxContext(item);
   const [retry, setRetry] = useState(0);
   const status = ticket
     ? item.state || inboxItemStatus(item)
@@ -1643,41 +1648,23 @@ function InboxDetail({
               <button
                 type="button"
                 disabled={
-                  starting || (ticket && (!startProject || loading || !!error))
+                  context.busy
                 }
                 onClick={() => {
-                  if (starting) return;
-                  setStarting(true);
-                  setStartError(null);
-                  const next = ticket
-                    ? { ...item, projectPath: startProject }
-                    : item;
-                  void Promise.resolve(
-                    onStart(next, ticket ? (details?.body ?? "") : undefined),
-                  )
-                    .catch((err: unknown) => {
-                      setStartError(
-                        err instanceof Error ? err.message : String(err),
-                      );
-                    })
-                    .finally(() => setStarting(false));
+                  context.open("send");
                 }}
                 className={`${ACTION_FILLED} disabled:cursor-default disabled:opacity-40`}
               >
-                {starting ? "Sending..." : "Send to agent"}
+                Send to agent
               </button>
-              {ticket ? (
-                <InboxProjectPicker
-                  projects={projects}
-                  value={startProject}
-                  onChange={setStartProject}
-                />
-              ) : null}
             </>
           ) : null}
           <button
             type="button"
-            onClick={onDiscuss}
+            disabled={context.busy}
+            onClick={() => {
+              context.open("ask");
+            }}
             className={item.kind === "pr" ? ACTION_FILLED : ACTION_OUTLINE}
           >
             <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask
@@ -1699,9 +1686,12 @@ function InboxDetail({
                   : "Open on GitHub"}
           </button>
         </div>
-        {startError ? (
-          <p className="text-[12px] text-red-400/90">{startError}</p>
-        ) : null}
+        <InboxContextPicker context={context}
+          destination={ticket ? <InboxProjectPicker projects={projects} value={startProject} onChange={setStartProject} /> : <span className="truncate" title={item.projectPath}>{projectName(item.projectPath)}</span>}
+          onConfirm={async (card, action) => {
+            if (action === "ask") await onDiscuss?.(card);
+            else await onStart?.(ticket ? { ...item, projectPath: startProject } : item, undefined, card);
+          }} />
         {jira && error && details ? <p role="status" className="text-[12px] text-content/50">{error} <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry</button></p> : null}
       </header>
       {isPr ? (

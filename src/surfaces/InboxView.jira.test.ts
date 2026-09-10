@@ -25,6 +25,15 @@ it("retains the selected Jira ticket and explicit project through handoff and re
   });
   let failRefresh = false;
   vi.mocked(invoke).mockImplementation(async (cmd) => {
+    if (cmd === "inbox_context_document")
+      return {
+        owner: "jira:team:Ada",
+        description: "Loaded description",
+        comments: [],
+        files: [],
+        more: false,
+        adf: false,
+      };
     if (cmd === "jira_status")
       return {
         connected: true,
@@ -69,7 +78,7 @@ it("retains the selected Jira ticket and explicit project through handoff and re
   const root = createRoot(container);
   const onStart = vi.fn().mockRejectedValue(new Error("Handoff failed"));
   const button = (text: string) =>
-    [...container.querySelectorAll("button")].find(
+    [...document.querySelectorAll("button")].find(
       (button) => button.textContent?.trim() === text,
     )!;
   const click = async (element: HTMLElement) => {
@@ -97,6 +106,8 @@ it("retains the selected Jira ticket and explicit project through handoff and re
       )!,
     );
     await click(button("Send to agent"));
+    expect(onStart).not.toHaveBeenCalled();
+    await click(button("Open agent draft"));
     expect(onStart).toHaveBeenCalledWith(
       expect.objectContaining({
         identifier: "ENG-41",
@@ -104,9 +115,14 @@ it("retains the selected Jira ticket and explicit project through handoff and re
         projectPath: "/local/project",
         repo: "",
       }),
-      "Loaded description",
+      undefined,
+      expect.objectContaining({
+        prompt: expect.stringContaining("Loaded description"),
+        attachments: [],
+      }),
     );
-    expect(container.textContent).toContain("Handoff failed");
+    expect(document.body.textContent).toContain("Handoff failed");
+    await click(button("Cancel"));
     await click(button("GitHub"));
     await click(button("Jira"));
     expect(container.querySelector("h1")?.textContent).toBe("Ticket 41");

@@ -13,10 +13,10 @@ const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
 static BACKOFF: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
 #[derive(Deserialize, Serialize)]
-struct JiraConfig {
-    site: String,
-    email: String,
-    token: String,
+pub(crate) struct JiraConfig {
+    pub(crate) site: String,
+    pub(crate) email: String,
+    pub(crate) token: String,
     account: String,
 }
 
@@ -78,7 +78,7 @@ fn read_config(app: &AppHandle) -> Result<Option<JiraConfig>, String> {
     }
 }
 
-fn require_config(app: &AppHandle, site: &str) -> Result<JiraConfig, String> {
+pub(crate) fn require_config(app: &AppHandle, site: &str) -> Result<JiraConfig, String> {
     let config = read_config(app)?.ok_or("Connect Jira Cloud in Settings")?;
     if config.site != normalize_site(site)? {
         return Err("The Jira connection changed. Refresh the Inbox before retrying.".into());
@@ -153,7 +153,11 @@ fn http_error(status: u16) -> String {
     }
 }
 
-fn request(config: &JiraConfig, path: &str, query: &[(&str, String)]) -> Result<Value, String> {
+pub(crate) fn request(
+    config: &JiraConfig,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Value, String> {
     if BACKOFF
         .lock()
         .map_err(|_| "Jira request state unavailable")?

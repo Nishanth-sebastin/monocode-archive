@@ -1477,7 +1477,7 @@ export default function App({
   ]);
 
   const onStartInboxItem = useCallback(
-    async (item: InboxItem, body?: string) => {
+    async (item: InboxItem, body?: string, context?: import("./lib/githubTasks").InboxComposerCard) => {
       const start = (description?: string) => {
         setInboxViewOpen(false);
         setNotesViewOpen(false);
@@ -1492,7 +1492,7 @@ export default function App({
         const session = {
           ...newDefaultSession(cwd, sessionDefaults?.runtimeMode),
           title: `${ref} ${item.title}`,
-          inboxCard: inboxComposerCard(item, description),
+          inboxCard: context ?? inboxComposerCard(item, description),
           ...(linkedWorkItem ? { linkedWorkItem } : {}),
         };
         const tab = newTab(session.id);
@@ -1502,6 +1502,11 @@ export default function App({
         setComposerFocused(true);
       };
 
+      if (context) {
+        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
+        start();
+        return;
+      }
       if (item.provider === "jira") {
         if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
         start(body ?? (peekJiraDetails(item) ?? await jiraDetails(item)).body);
@@ -1580,11 +1585,11 @@ export default function App({
     return () => window.removeEventListener(ADD_NOTE_TO_CHAT_EVENT, onAdd);
   }, [onAddNoteToChat]);
 
-  const onInboxCardDismiss = useCallback((sessionId: string) => {
+  const onInboxCardDismiss = useCallback((sessionId: string, fileId?: string) => {
     setSessions((prev) =>
       prev.map((session) =>
         session.id === sessionId && session.inboxCard
-          ? { ...session, inboxCard: undefined }
+          ? { ...session, inboxCard: fileId ? { ...session.inboxCard, attachments: session.inboxCard.attachments?.filter(file => file.id !== fileId) } : undefined }
           : session,
       ),
     );
@@ -2623,10 +2628,10 @@ export default function App({
   );
 
   const onAskInboxItem = useCallback(
-    (item: InboxItem): Promise<string> => {
+    (item: InboxItem, context?: import("./lib/githubTasks").InboxComposerCard): Promise<string> => {
       const key = inboxAskKey(item);
       const pending = openingInboxSessions.current.get(key);
-      if (pending) return pending;
+      if (pending) return context ? Promise.reject(new Error("This conversation is opening. Try again when it is ready.")) : pending;
       const opening = (async () => {
         let session = sessionsRef.current.find(
           (entry) => entry.inboxAsk?.key === key,
@@ -2637,7 +2642,7 @@ export default function App({
             candidate && candidate !== "~"
               ? candidate
               : await invoke<string>("default_cwd");
-          const description =
+          const description = context ? undefined :
             item.provider === "jira"
               ? (peekJiraDetails(item) ?? (await jiraDetails(item))).body
               : item.provider === "linear" && item.id
@@ -2663,6 +2668,7 @@ export default function App({
           session = {
             ...newDefaultSession(cwd),
             title: `Ask · ${item.title}`,
+            inboxCard: context,
             inboxAsk: {
               key,
               title: item.title,
@@ -2679,6 +2685,12 @@ export default function App({
             },
           };
           sessionsRef.current = [...sessionsRef.current, session];
+          setSessions(sessionsRef.current);
+        }
+        if (context && session.inboxCard?.contextId !== context.contextId) {
+          if (session.inboxCard) throw new Error("This conversation already has staged context. Send or remove that card first, then try again.");
+          const updated = { ...session, inboxCard: context, inboxAsk: session.inboxAsk ? { ...session.inboxAsk, description: undefined } : undefined };
+          sessionsRef.current = sessionsRef.current.map(entry => entry.id === session.id ? updated : entry);
           setSessions(sessionsRef.current);
         }
         return session.id;

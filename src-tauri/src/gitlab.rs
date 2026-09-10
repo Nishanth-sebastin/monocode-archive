@@ -21,9 +21,9 @@ pub struct GitlabStatus {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct GitlabConfig {
-    url: String,
-    token: String,
+pub(crate) struct GitlabConfig {
+    pub(crate) url: String,
+    pub(crate) token: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -720,12 +720,12 @@ fn string_field_preserve(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-struct GitlabResponse {
-    value: Value,
-    has_next_page: bool,
+pub(crate) struct GitlabResponse {
+    pub(crate) value: Value,
+    pub(crate) has_next_page: bool,
 }
 
-fn gitlab_get(config: &GitlabConfig, path: &str) -> Result<GitlabResponse, String> {
+pub(crate) fn gitlab_get(config: &GitlabConfig, path: &str) -> Result<GitlabResponse, String> {
     let url = format!("{}/api/v4{}", config.url.trim_end_matches('/'), path);
     let agent = gitlab_agent();
     read_gitlab_response(
@@ -989,7 +989,7 @@ fn read_config(app: &AppHandle) -> Result<Option<GitlabConfig>, String> {
     }
 }
 
-fn require_config(app: &AppHandle) -> Result<GitlabConfig, String> {
+pub(crate) fn require_config(app: &AppHandle) -> Result<GitlabConfig, String> {
     read_config(app)?.ok_or_else(|| "Connect GitLab in Settings".to_string())
 }
 

@@ -313,7 +313,7 @@ fn issue_filter(assigned_to_me: bool, state: &str, team_ids: &[String]) -> Value
     Value::Object(filter)
 }
 
-fn linear_authorization(token: &str) -> String {
+pub(crate) fn linear_authorization(token: &str) -> String {
     let trimmed = token.trim();
     trimmed
         .strip_prefix("Bearer ")
@@ -323,7 +323,11 @@ fn linear_authorization(token: &str) -> String {
         .to_string()
 }
 
-fn graphql_with_token(token: &str, query: &str, variables: Value) -> Result<Value, String> {
+pub(crate) fn graphql_with_token(
+    token: &str,
+    query: &str,
+    variables: Value,
+) -> Result<Value, String> {
     let authorization = linear_authorization(token);
     let agent = ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build();
     let payload = serde_json::to_string(&json!({ "query": query, "variables": variables }))
@@ -689,7 +693,7 @@ fn read_token(app: &AppHandle) -> Result<Option<String>, String> {
     }
 }
 
-fn require_token(app: &AppHandle) -> Result<String, String> {
+pub(crate) fn require_token(app: &AppHandle) -> Result<String, String> {
     read_token(app)?.ok_or_else(|| "Connect Linear in Settings".to_string())
 }
 
