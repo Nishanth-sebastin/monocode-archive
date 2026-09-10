@@ -222,33 +222,6 @@ function AzurePrDialog({
       cancelled = true;
     };
   }, [cwd, branch, status, linkedWorkItem, discoveryVersion]);
-  // Match the existing agent-context dialog's keyboard containment.
-  useEffect(() => {
-    const trap = (event: KeyboardEvent) => {
-      if (event.key !== "Tab") return;
-      const controls = [
-        ...(body.current
-          ?.closest('[role="dialog"]')
-          ?.querySelectorAll<HTMLElement>(
-            "button:not(:disabled), input:not(:disabled), select, summary",
-          ) ?? []),
-      ].filter((el) => el.getClientRects().length);
-      const first = controls[0],
-        last = controls[controls.length - 1];
-      if (!controls.includes(document.activeElement as HTMLElement)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first)?.focus();
-      } else if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
-    };
-    window.addEventListener("keydown", trap);
-    return () => window.removeEventListener("keydown", trap);
-  }, []);
   const run = async (action: (current: () => boolean) => Promise<void>) => {
     if (pending.current) return;
     pending.current = true;
@@ -338,7 +311,12 @@ function AzurePrDialog({
     status?.site === association.target.site &&
     status?.accountId === association.target.accountId;
   return (
-    <Modal title="Azure PR review" onClose={onClose} className="max-h-[80vh]">
+    <Modal
+      trapFocus
+      title="Azure PR review"
+      onClose={onClose}
+      className="max-h-[80vh]"
+    >
       <div ref={body} className="space-y-3 p-4 text-[12px]">
         <p className="break-words text-content/60">
           {status

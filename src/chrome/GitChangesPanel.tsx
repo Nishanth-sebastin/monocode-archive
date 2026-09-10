@@ -1,3 +1,4 @@
+import { AzureCiReview } from "./AzureCiReview";
 import type { LinkedWorkItem } from "../lib/session";
 import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
 import { ContextCheckbox } from "./InboxContextPicker";
@@ -169,6 +170,7 @@ export function GitChangesPanel({
         )}
       </header>
       <AzurePrReview linkedWorkItem={linkedWorkItem} key={JSON.stringify([cwd, index?.branch, sourceSessionId])} cwd={cwd} branch={index?.branch ?? ""} sourceSessionId={sourceSessionId} enabled={enabled} />
+      <AzureCiReview key={JSON.stringify(["ci",cwd,index?.branch,sourceSessionId])} cwd={cwd} branch={index?.branch ?? ""} sourceSessionId={sourceSessionId} enabled={enabled} />
       <ChangedFiles
         cwd={cwd}
         textHarness={textHarness}

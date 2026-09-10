@@ -581,7 +581,7 @@ function AzureSettings() {
     finally { setBusy(false); }
   };
   return <>
-    <Row stacked={!status.connected || editing} label={status.connected ? `Connected account · ${status.capabilities.join(", ") || "Read access"}` : "Connect your account"} description="One connection for Azure Boards and Repos. Credentials stay on this device; tickets, PRs, Git and CI remain independently selected.">
+    <Row stacked={!status.connected || editing} label={status.connected ? `Connected account · ${status.capabilities.join(", ") || "Read access"}` : "Connect your account"} description="One connection for Azure Boards, Repos and Pipelines. Credentials stay on this device; tickets, PRs, Git and CI remain independently selected.">
       {status.connected && !editing ? <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="max-w-56 truncate text-[12px] text-content/50" title={`${status.site} · ${status.account}`}>{status.site} · {status.account}</span>
         <SecondaryButton disabled={busy} onClick={() => setEditing(true)}>Reconnect</SecondaryButton>
@@ -596,7 +596,7 @@ function AzureSettings() {
           <input type={f.type} value={f.value} onChange={e => f.change(e.target.value)} placeholder={f.placeholder} aria-label={f.label} autoComplete="off" spellCheck={false} disabled={busy} required className="h-8 w-full min-w-0 rounded-md border border-content/10 bg-transparent px-2.5 text-[12px] text-content outline-none placeholder:text-content/35 focus:border-content/30 disabled:opacity-50" />
         </label>)}
         <div className="flex items-start justify-between gap-4 sm:col-span-2">
-          <p className="max-w-sm text-[12px] leading-relaxed text-content/45">Use an organization-scoped PAT: Code (Read) for PRs; Work Items (Read) and Project and Team (Read) for Boards. Grant only needed capabilities. Azure DevOps Services only.</p>
+          <p className="max-w-sm text-[12px] leading-relaxed text-content/45">Use an organization-scoped PAT: Build (Read) for Pipelines; Code (Read) for PRs; Work Items (Read) and Project and Team (Read) for Boards. Grant only needed capabilities. Azure DevOps Services only.</p>
           {editing ? <SecondaryButton disabled={busy} onClick={() => { setEditing(false); setToken(""); }}>Cancel</SecondaryButton> : null}
           <SecondaryButton type="submit" disabled={busy || !site.trim() || !project.trim() || !token.trim()}>{busy ? "Connecting…" : "Connect"}</SecondaryButton>
         </div>

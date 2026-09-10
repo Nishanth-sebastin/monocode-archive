@@ -21,6 +21,7 @@ type Props = {
   title: string;
   description?: string;
   size?: ModalSize;
+  trapFocus?: boolean;
   /** Extra classes on the panel (fixed height, etc). */
   className?: string;
   children: ReactNode;
@@ -31,6 +32,7 @@ export function ModalPanel({
   title,
   description,
   size = "md",
+  trapFocus = false,
   className,
   children,
 }: Props) {
@@ -43,6 +45,32 @@ export function ModalPanel({
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    if (!trapFocus) return;
+    const contain = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const controls = [
+        ...(closeRef.current
+          ?.closest('[role="dialog"]')
+          ?.querySelectorAll<HTMLElement>(
+            "button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, a[href]",
+          ) ?? []),
+      ].filter((el) => el.getClientRects().length);
+      const first = controls[0],
+        last = controls[controls.length - 1];
+      if (
+        !controls.includes(document.activeElement as HTMLElement) ||
+        (event.shiftKey && document.activeElement === first) ||
+        (!event.shiftKey && document.activeElement === last)
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? last : first)?.focus();
+      }
+    };
+    window.addEventListener("keydown", contain);
+    return () => window.removeEventListener("keydown", contain);
+  }, [trapFocus]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
