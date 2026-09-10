@@ -66,6 +66,7 @@ const GIT_STATUS_COLOR: Record<string, string> = {
 };
 
 type Props = {
+  sourceSessionId?: string;
   cwd: string;
   onOpenFile: (path: string) => void;
   onOpenTerminal?: (cwd: string) => void;
@@ -219,6 +220,7 @@ function explorerItems(
 // Chat updates rerender the sidebar even when Files is hidden. Keep its tree
 // intact unless file-tree props, local state, or subscriptions actually change.
 export const FileTree = memo(function FileTree({
+  sourceSessionId,
   cwd,
   onOpenFile,
   onOpenTerminal,
@@ -464,7 +466,7 @@ export const FileTree = memo(function FileTree({
         return;
       case "add-to-chat":
       case "send-to-agent":
-        await run(async () => requestAgentContext({ context: await contextFromFiles([target.path], cwd), cwd, prepareInSource: id === "add-to-chat" }));
+        await run(async () => requestAgentContext({ context: await contextFromFiles([target.path], cwd), cwd, sourceSessionId, prepareInSource: id === "add-to-chat" }));
         return;
       case "copy-path":
         await copyText(target.path);

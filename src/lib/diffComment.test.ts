@@ -18,7 +18,9 @@ describe("diff comments", () => {
       [
         "Diff comment on `src/auth.ts:42`:",
         "",
-        "> +const token = readCookie();",
+        "```diff",
+        "+const token = readCookie();",
+        "```",
         "",
         "Please handle a missing cookie.",
       ].join("\n"),

@@ -1356,3 +1356,17 @@ html.theme-light .popover-backdrop {
     var(--color-background-base)
   );
 }
+
+/* Interactive controls use a pointer; disabled controls retain the default cursor. */
+button:not(:disabled):not([aria-disabled="true"]),
+a[href],
+summary,
+[role="button"]:not([aria-disabled="true"]),
+[role="menuitem"]:not([aria-disabled="true"]),
+input:is([type="checkbox"], [type="radio"]):not(:disabled) {
+  cursor: pointer;
+}
+
+header[data-tauri-drag-region] button:not(:disabled):not([aria-disabled="true"]) {
+  cursor: pointer !important;
+}

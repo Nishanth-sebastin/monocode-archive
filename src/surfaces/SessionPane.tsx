@@ -1,3 +1,4 @@
+import { SessionIssues } from "../chrome/SessionIssues";
 import { requestAgentContext, contextFromText } from "../lib/agentContext";
 import { ChevronDown, GripVertical, X } from "../chrome/icons";
 import {
@@ -94,6 +95,7 @@ type Props = {
   onQueuedMessageEditingChange: (sessionId: string, messageId?: string) => void;
   onSteerQueuedMessage: (sessionId: string, messageId: string) => void;
   onResumeQueue: (sessionId: string) => void;
+  onAddIssues?: (sessionId: string) => void;
   onInboxCardDismiss?: (sessionId: string, fileId?: string) => void;
   onNoteCardDismiss?: (sessionId: string) => void;
   onHandoffCardDismiss?: (sessionId: string) => void;
@@ -159,6 +161,7 @@ export const SessionPane = memo(function SessionPane({
   onQueuedMessageEditingChange,
   onSteerQueuedMessage,
   onResumeQueue,
+  onAddIssues,
   onInboxCardDismiss,
   onNoteCardDismiss,
   onHandoffCardDismiss,
@@ -235,9 +238,9 @@ export const SessionPane = memo(function SessionPane({
     [],
   );
   const addSelectionToChat = useCallback(
-    (text: string, mode?: QuoteRequest["mode"]) => {
+    (text: string, mode?: QuoteRequest["mode"], origin?: string) => {
       quoteRequestId.current += 1;
-      setQuoteRequest({ id: quoteRequestId.current, text, mode });
+      setQuoteRequest({ id: quoteRequestId.current, text, mode, origin });
     },
     [],
   );
@@ -313,7 +316,8 @@ export const SessionPane = memo(function SessionPane({
         draftRef.current = text;
       }}
       contextDraft={session.contextDraft}
-      onContextDismiss={() => onInboxCardDismiss?.(session.id, "__context__")}
+      hideTicketCards={!!session.linkedWorkItem}
+      onContextDismiss={entryId => onInboxCardDismiss?.(session.id, entryId ?? "__context__")}
       inboxCard={session.inboxCard}
       noteCard={session.noteCard}
       handoffCard={session.handoffCard}
@@ -424,6 +428,7 @@ export const SessionPane = memo(function SessionPane({
           </button>
         </div>
       ) : null}
+      <SessionIssues session={session} onAdd={onAddIssues ? () => onAddIssues(session.id) : undefined} />
       <div ref={transcriptScope} className="@container relative min-h-0 flex-1">
         {isEmpty ? (
           session.inboxAsk ? (
@@ -450,7 +455,7 @@ export const SessionPane = memo(function SessionPane({
               model={session.model}
               pendingQuestion={!!session.pendingQuestion}
               onApproval={approve}
-              onAddToChat={addSelectionToChat}
+              onAddToChat={(text, responseId) => addSelectionToChat(text, "quote", `${session.title} · session ${session.id} · response ${responseId ?? "unknown"} · ${session.harness} · ${sessionWorkCwd(session)}`)}
               onSendToAgent={(text, responseId) => requestAgentContext({ context: contextFromText("Selected agent response", text, `${session.title} · session ${session.id} · response ${responseId ?? "unknown"} · ${session.harness} · ${sessionWorkCwd(session)}`), sourceSessionId: session.id, cwd: sessionWorkCwd(session) })}
               onSaveNote={notesEnabled ? saveNote : undefined}
               onOpenFile={onOpenFile}

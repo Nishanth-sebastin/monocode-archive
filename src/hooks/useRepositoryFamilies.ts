@@ -42,6 +42,27 @@ export async function discoverRepositoryFamilies(
     try {
       const family = await probe(path);
       if (cancelled()) return;
+      // Recent subfolders are aliases, not worktree roots. Revalidate them
+      // before publishing so a refresh cannot briefly split the rail group.
+      const aliases = paths.filter(
+        (candidate) =>
+          pathKey(candidate) !== pathKey(path) &&
+          getVerifiedFamilies().get(pathKey(candidate))?.commonDir ===
+            family.commonDir &&
+          !family.worktrees.some(
+            (child) => pathKey(child.path) === pathKey(candidate),
+          ),
+      );
+      const refreshedAliases = await Promise.all(
+        aliases.map(async (alias) => {
+          try {
+            return [pathKey(alias), await probe(alias)] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      if (cancelled()) return;
       // Merge with the latest state: Git refresh may have updated another family.
       const verified = new Map(getVerifiedFamilies());
       const old = verified.get(pathKey(path));
@@ -56,6 +77,9 @@ export async function discoverRepositoryFamilies(
       for (const child of family.worktrees) {
         if (!child.missing && !child.prunable)
           verified.set(pathKey(child.path), family);
+      }
+      for (const alias of refreshedAliases) {
+        if (alias) verified.set(...alias);
       }
       publishRepositoryFamilies(verified);
     } catch {
@@ -116,33 +140,21 @@ export function useRepositoryFamilies(recents: RecentProject[], cwd: string) {
       const unsubscribe = subscribeGitChanged(() => {
         if (pending) return;
         pending = true;
-        void invoke<RepositoryFamily>("git_repository_family", { cwd })
-          .then((family) => {
-            if (cancelled) return;
-            {
-              const next = new Map(getVerifiedFamilies());
-              for (const [key, value] of next) {
-                if (pathKey(value.commonDir) === pathKey(family.commonDir))
-                  next.delete(key);
-              }
-              next.set(pathKey(cwd), family);
-              for (const child of family.worktrees) {
-                if (!child.missing && !child.prunable)
-                  next.set(pathKey(child.path), family);
-              }
-              publishRepositoryFamilies(next);
-            }
-          })
-          .catch(() => {})
-          .finally(() => {
-            pending = false;
-          });
+        void discoverRepositoryFamilies(
+          JSON.parse(familyPaths),
+          (path) =>
+            invoke<RepositoryFamily>("git_repository_family", { cwd: path }),
+          () => cancelled,
+          cwd,
+        ).finally(() => {
+          pending = false;
+        });
       });
       return () => {
         cancelled = true;
         unsubscribe();
       };
     })();
-  }, [cwd]);
+  }, [cwd, familyPaths]);
   return families;
 }

@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { ChevronRight, CircleDot, GitPullRequest, X } from "./icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openInboxCard } from "../lib/sessionWorkItem";
 import type { GithubLabel, InboxComposerCard } from "../lib/githubTasks";
 import { InboxProviderMark } from "./InboxProviderMark";
 import { AgentMarkdown } from "../surfaces/AgentMarkdown";
@@ -10,6 +11,7 @@ type Props = {
 };
 
 export function InboxMiniCard({ card, onDismiss }: Props) {
+  const [previewOpen, setPreviewOpen] = useState(false);
   const KindIcon = card.kind === "pr" ? GitPullRequest : CircleDot;
   const kindLabel =
     card.kind === "pr"
@@ -17,25 +19,17 @@ export function InboxMiniCard({ card, onDismiss }: Props) {
         ? "Merge request"
         : "Pull request"
       : "Issue";
-  const providerLabel =
-    card.provider === "azure" ? "Azure DevOps" : card.provider === "jira"
-      ? "Jira"
-      : card.provider === "linear"
-        ? "Linear"
-        : card.provider === "gitlab"
-          ? "GitLab"
-          : "GitHub";
 
   return (
     <div className="px-3 pt-2">
       <div className="relative rounded-md border border-content/10 bg-content/6 px-2.5 py-2 pr-8">
         <button
           type="button"
-          title={`Open in ${providerLabel}`}
-          aria-label={`Open ${kindLabel} ${card.identifier} in ${providerLabel}`}
+          title="Open in Inbox"
+          aria-label={`Open ${kindLabel} ${card.identifier} in Inbox`}
           disabled={!card.url}
           onClick={() => {
-            if (card.url) void openUrl(card.url);
+            if (card.url) openInboxCard(card);
           }}
           className="flex w-full flex-col text-left disabled:cursor-default"
         >
@@ -82,42 +76,49 @@ export function InboxMiniCard({ card, onDismiss }: Props) {
           </p>
         ) : null}
         {card.contextPreview ? (
-          <details className="group/context-preview mt-2 text-[12px] text-content/55">
+          <details
+            onToggle={(event) => setPreviewOpen(event.currentTarget.open)}
+            className="group/context-preview mt-2 text-[12px] text-content/55"
+          >
             <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md px-1 py-1.5 hover:bg-content/5 hover:text-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
               <ChevronRight className="size-3.5 shrink-0 group-open/context-preview:rotate-90" />
               Preview selected context
             </summary>
-            <div className="mt-3 max-h-80 space-y-4 overflow-auto pr-2">
-              {card.contextPreview.description !== undefined ? (
-                <section>
-                  <h4 className="mb-2 font-medium text-content">Description</h4>
-                  <AgentMarkdown
-                    text={card.contextPreview.description || "No description"}
-                    textOnly
-                  />
-                </section>
-              ) : (
-                <p>Ticket title and link only; description excluded.</p>
-              )}
-              {card.contextPreview.comments.map((comment) => (
-                <section
-                  key={comment.id}
-                  className="border-t border-content/10 pt-3"
-                >
-                  <h4 className="mb-2 font-medium text-content">
-                    {comment.author}{" "}
-                    <span className="font-normal text-content/45">
-                      · {comment.createdAt?.slice(0, 10)}
-                    </span>
-                  </h4>
-                  <AgentMarkdown text={comment.body} textOnly />
-                </section>
-              ))}
-              <p className="text-[11px] text-content/40">
-                Only files shown in the attachment chips are included. Nothing
-                else is fetched automatically.
-              </p>
-            </div>
+            {previewOpen ? (
+              <div className="mt-3 max-h-80 space-y-4 overflow-auto pr-2">
+                {card.contextPreview.description !== undefined ? (
+                  <section>
+                    <h4 className="mb-2 font-medium text-content">
+                      Description
+                    </h4>
+                    <AgentMarkdown
+                      text={card.contextPreview.description || "No description"}
+                      textOnly
+                    />
+                  </section>
+                ) : (
+                  <p>Ticket title and link only; description excluded.</p>
+                )}
+                {card.contextPreview.comments.map((comment) => (
+                  <section
+                    key={comment.id}
+                    className="border-t border-content/10 pt-3"
+                  >
+                    <h4 className="mb-2 font-medium text-content">
+                      {comment.author}{" "}
+                      <span className="font-normal text-content/45">
+                        · {comment.createdAt?.slice(0, 10)}
+                      </span>
+                    </h4>
+                    <AgentMarkdown text={comment.body} textOnly />
+                  </section>
+                ))}
+                <p className="text-[11px] text-content/40">
+                  Only files shown in the attachment chips are included. Nothing
+                  else is fetched automatically.
+                </p>
+              </div>
+            ) : null}
           </details>
         ) : null}
         {onDismiss ? (

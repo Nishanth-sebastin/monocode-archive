@@ -14,7 +14,7 @@ import {
   type ContextSelection,
 } from "../lib/inboxContext";
 
-function ContextCheckbox({
+export function ContextCheckbox({
   label,
   checked,
   disabled,

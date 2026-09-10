@@ -1,3 +1,4 @@
+import { boundLinkedContexts } from "./sessionWorkItem";
 import { invoke } from "@tauri-apps/api/core";
 import { persistableAttachment } from "./attachments";
 import type { ContextUsage } from "./contextUsage";
@@ -76,7 +77,7 @@ export function shouldPersistSession(session: Session): boolean {
   return (
     !session.inboxAsk &&
     session.cwd !== "~" &&
-    session.blocks.some((block) => block.role === "user")
+    (!!session.linkedWorkItem || session.blocks.some((block) => block.role === "user"))
   );
 }
 
@@ -120,21 +121,32 @@ export function sanitizeLinkedWorkItem(
   const kind = item.kind;
   const repo = typeof item.repo === "string" ? item.repo.trim() : "";
   const number = item.number;
-  if (
-    (kind !== "issue" && kind !== "pr") ||
-    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
-    typeof number !== "number" ||
-    !Number.isSafeInteger(number) ||
-    number <= 0
-  ) {
-    return undefined;
+  if ((kind !== "issue" && kind !== "pr") || typeof number !== "number" || !Number.isSafeInteger(number) || number <= 0) return undefined;
+  let linked: LinkedWorkItem;
+  if (!item.provider || item.provider === "github") {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return undefined;
+    linked = { kind, repo, number, url: `https://github.com/${repo}/${kind === "pr" ? "pull" : "issues"}/${number}`, ...(typeof item.account === "string" ? { account: item.account.slice(0, 256) } : {}) };
+  } else {
+    if (!["jira", "azure", "linear", "gitlab"].includes(item.provider)) return undefined;
+    try {
+      const url = new URL(String(item.url));
+      if (url.protocol !== "https:" || url.username || url.password) return undefined;
+      linked = { kind, repo, number, url: url.href, provider: item.provider,
+        ...(typeof item.account === "string" ? { account: item.account.slice(0, 256) } : {}),
+        ...(typeof item.identifier === "string" ? { identifier: item.identifier.slice(0, 100) } : {}),
+        ...(typeof item.title === "string" ? { title: item.title.slice(0, 240) } : {}) };
+    } catch { return undefined; }
   }
-  return {
-    kind,
-    repo,
-    number,
-    url: `https://github.com/${repo}/${kind === "pr" ? "pull" : "issues"}/${number}`,
-  };
+  if (typeof item.title === "string") linked.title = item.title.slice(0, 240);
+  if (typeof item.identifier === "string") linked.identifier = item.identifier.slice(0, 100);
+  if (typeof item.context === "string") linked.context = item.context.slice(0, 32_000);
+  const additionalItems = Array.isArray(item.additionalItems) ? item.additionalItems.slice(0, 19).map(value => {
+    if (!value || typeof value !== "object") return undefined;
+    return sanitizeLinkedWorkItem({ ...value, additionalItems: undefined });
+  }).filter((value): value is LinkedWorkItem => !!value) : [];
+  const [first, ...rest] = boundLinkedContexts([linked, ...additionalItems]);
+  return { ...first, ...(rest.length ? { additionalItems: rest } : {}) };
+
 }
 
 export function sanitizeSessionForPersist(
@@ -178,8 +190,9 @@ function enqueueSessionWrite<T>(
 
 export async function upsertSession(
   session: Session,
+  options?: { allowEmpty?: boolean },
 ): Promise<SessionSummary | null> {
-  if (!shouldPersistSession(session) || deletedSessionIds.has(session.id)) {
+  if ((!options?.allowEmpty && !shouldPersistSession(session)) || deletedSessionIds.has(session.id)) {
     return null;
   }
   const payload = sanitizeSessionForPersist(session);

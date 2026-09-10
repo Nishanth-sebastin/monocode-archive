@@ -2,7 +2,7 @@ import { X } from "./icons";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
-import { LAYER } from "../lib/layers";
+import { LAYER, PopoverLayerOffset } from "../lib/layers";
 
 export type ModalSize = "sm" | "md";
 
@@ -46,13 +46,13 @@ export function ModalPanel({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
       event.preventDefault();
       event.stopPropagation();
       onClose();
     };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   return (
@@ -98,7 +98,9 @@ export function ModalPanel({
           ref={lockOverscroll}
           className="min-h-0 flex-1 overflow-y-auto overscroll-none"
         >
-          {children}
+          <PopoverLayerOffset value={LAYER.dialog + 1 - LAYER.popover}>
+            {children}
+          </PopoverLayerOffset>
         </div>
       </div>
     </div>

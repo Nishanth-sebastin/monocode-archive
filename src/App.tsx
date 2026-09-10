@@ -1,5 +1,5 @@
 import { AgentContextPicker } from "./chrome/AgentContextPicker";
-import { PREPARE_AGENT_CONTEXT, prepareSessionContext, contextFromTickets, type AgentContextRequest } from "./lib/agentContext";
+import { PREPARE_AGENT_CONTEXT, removeContextItem, contextFromTicketDescriptions, linkTicketContext, prepareSessionContext, contextFromTickets, type AgentContextRequest } from "./lib/agentContext";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -335,8 +335,9 @@ import { inboxAskKey, inboxAskPrompt } from "./lib/inboxAsk";
 import { NotesView } from "./surfaces/NotesView";
 import { inboxComposerCard, type InboxItem } from "./lib/githubTasks";
 import {
-  parseGithubWorkItemUrl,
   linkedWorkItemFromInboxItem,
+  OPEN_INBOX_WORK_ITEM,
+  removeSessionWorkItem,
   resolveLinkedWorkItem,
 } from "./lib/sessionWorkItem";
 import { linearIssueDetails, peekLinearIssueDetails } from "./lib/linear";
@@ -639,6 +640,12 @@ export default function App({
   const [searchViewOpen, setSearchViewOpen] = useState(false);
   const [searchViewFocusToken, setSearchViewFocusToken] = useState(0);
   const [inboxViewOpen, setInboxViewOpen] = useState(false);
+  const [inboxConversationId, setInboxConversationId] = useState<string>();
+  const [inboxConversationRevision, setInboxConversationRevision] = useState(0);
+  const [inboxSelectionRevision, setInboxSelectionRevision] = useState(0);
+  useEffect(() => {
+    if (!inboxViewOpen) setInboxConversationId(undefined);
+  }, [inboxViewOpen]);
   const [inboxTarget, setInboxTarget] = useState<LinkedWorkItem | null>(null);
   const [inboxAskPortal, setInboxAskPortal] =
     useState<InboxSessionPortal | null>(null);
@@ -1364,7 +1371,7 @@ export default function App({
     // Inbox owns these panes independently of project tabs. Keep their drafts
     // and attachments mounted when the panel closes or switches items.
     for (const session of sessions) {
-      if (session.inboxAsk) visibleIds.add(session.id);
+      if (session.inboxAsk || session.contextDraft) visibleIds.add(session.id);
     }
     const keepUnseen = liveAgentsEnabled;
     const idleDetached = sessions.filter(
@@ -1505,6 +1512,7 @@ export default function App({
           );
           sessionsRef.current = updated;
           setSessions(updated);
+          request.onPrepared?.();
           return;
         } catch {
           /* Keep the selection available in the review sheet. */
@@ -1526,17 +1534,25 @@ export default function App({
     return () => window.removeEventListener(PREPARE_AGENT_CONTEXT, receive);
   }, []);
 
-  const prepareContextDestination = (
+  const prepareContextDestination = async (
     request: AgentContextRequest,
     destination: string | Session,
-  ): string => {
+    signal?: AbortSignal,
+  ): Promise<string> => {
+    const context = request.tickets ? await contextFromTicketDescriptions(request.tickets, signal) : request.context;
+    if (typeof destination === "string" && !sessionsRef.current.some(session => session.id === destination)) {
+      await ensureOpenSession(destination);
+      signal?.throwIfAborted();
+    }
+    signal?.throwIfAborted();
     const existing = typeof destination === "string";
     const target = existing
       ? sessionsRef.current.find((session) => session.id === destination)
       : destination;
     if (!target)
       throw new Error("Conversation closed. Choose another destination.");
-    const next = prepareSessionContext(target, request.context);
+    const tickets = request.context.entries.every(entry => !!entry.ticket);
+    let next = tickets ? linkTicketContext(target, context) : prepareSessionContext(target, context, true);
     if (existing) {
       const updated = sessionsRef.current.map((session) =>
         session.id === next.id ? next : session,
@@ -1544,24 +1560,47 @@ export default function App({
       sessionsRef.current = updated;
       setSessions(updated);
     } else {
-      const linked =
-        request.context.entries.length === 1
-          ? request.context.entries[0].ticket
-          : undefined;
-      const linkedWorkItem =
-        linked?.provider === "github" ? parseGithubWorkItemUrl(linked.url) : null;
-      const created = { ...next, ...(linkedWorkItem ? { linkedWorkItem } : {}) };
+      const created = next = { ...next, ...(tickets ? { title: request.context.entries.map(entry => entry.ticket!.identifier).join(", ") } : {}) };
       const updated = [...sessionsRef.current, created];
       sessionsRef.current = updated;
       setSessions(updated);
       const tab = newTab(created.id);
       appendTab(tab, created.cwd);
       setActiveTabId(tab.id);
-      setInboxViewOpen(false);
+      if (tickets) { setInboxViewOpen(true); setInboxConversationId(created.id); }
+      else setInboxViewOpen(false);
       setNotesViewOpen(false);
       setComposerFocused(true);
     }
+    if (tickets) persistSession(next);
+    request.onPrepared?.();
     return next.id;
+  };
+  const onToggleConversationTicket = async (sessionId: string, item: InboxItem, selected: boolean) => {
+    const session = sessionsRef.current.find(session => session.id === sessionId);
+    const link = linkedWorkItemFromInboxItem(item);
+    if (!session || !link) throw new Error("Conversation or ticket is unavailable.");
+    const context = selected ? await contextFromTicketDescriptions([item]) : undefined;
+    const current = sessionsRef.current.find(entry => entry.id === sessionId);
+    if (!current) throw new Error("Conversation closed.");
+    const next = context ? linkTicketContext(current, context) : removeSessionWorkItem(current, link);
+    if (!selected && next.contextDraft) {
+      const entries = next.contextDraft.entries.filter(entry => entry.workItem?.url !== link.url || entry.workItem?.account !== link.account);
+      next.contextDraft = entries.length || next.contextDraft.attachments.length ? { ...next.contextDraft, entries } : undefined;
+    }
+    const updated = sessionsRef.current.map(session => session.id === sessionId ? next : session);
+    sessionsRef.current = updated;
+    setSessions(updated);
+    // Normal edits use the existing debounced session save, avoiding a full
+    // transcript serialization for every checkbox. Empty sessions need an
+    // explicit write because the autosave intentionally skips them.
+    if (!shouldPersistSession(next)) {
+      pendingPersist.current.delete(sessionId);
+      const summary = await upsertSession(next, { allowEmpty: true });
+      if (summary && summary.cwd === sidebarCwdRef.current) setHistory(current => mergeProjectHistorySummary(current, summary));
+    } else {
+      pendingPersist.current.set(sessionId, next);
+    }
   };
   const onStartInboxItem = useCallback(
     async (item: InboxItem, body?: string, context?: import("./lib/githubTasks").InboxComposerCard) => {
@@ -1590,7 +1629,7 @@ export default function App({
       };
 
       if (context) {
-        setContextRequest({ context: contextFromTickets([item], context), cwd: item.projectPath || active?.cwd });
+        setContextRequest({ context: contextFromTickets([item], context), tickets: [item], cwd: item.projectPath || active?.cwd });
         return;
       }
       if (item.provider === "azure") {
@@ -1681,7 +1720,7 @@ export default function App({
       prev.map((session) =>
         session.id === sessionId && (session.inboxCard || session.contextDraft)
           ? { ...session,
-              contextDraft: fileId === "__context__" ? undefined : fileId && session.contextDraft ? { ...session.contextDraft, attachments: session.contextDraft.attachments.filter(file => file.id !== fileId) } : session.contextDraft,
+              contextDraft: fileId === "__context__" ? undefined : fileId && session.contextDraft ? removeContextItem(session.contextDraft, fileId) : session.contextDraft,
               inboxCard: fileId === "__context__" ? session.inboxCard : fileId && session.inboxCard ? { ...session.inboxCard, attachments: session.inboxCard.attachments?.filter(file => file.id !== fileId) } : undefined,
             }
           : session,
@@ -4937,9 +4976,15 @@ export default function App({
     setSettingsOpen(false);
     setSearchViewOpen(false);
     setNotesViewOpen(false);
-    setInboxTarget(item);
+    setInboxTarget({ ...item });
     setInboxViewOpen(true);
   }, []);
+
+  useEffect(() => {
+    const open = (event: Event) => onOpenLinkedWorkItem((event as CustomEvent<LinkedWorkItem>).detail);
+    window.addEventListener(OPEN_INBOX_WORK_ITEM, open);
+    return () => window.removeEventListener(OPEN_INBOX_WORK_ITEM, open);
+  }, [onOpenLinkedWorkItem]);
 
   const onLeaveInbox = useCallback(() => {
     setInboxViewOpen(false);
@@ -4947,11 +4992,12 @@ export default function App({
   }, []);
 
   const onOpenInboxSession = useCallback(
-    (sessionId: string) => {
-      setInboxViewOpen(false);
-      setInboxTarget(null);
-      setSidebarTab("sessions");
-      void onSelectHistorySession(sessionId);
+    async (sessionId: string) => {
+      await onSelectHistorySession(sessionId);
+      setInboxViewOpen(true);
+      setInboxConversationId(sessionId);
+      setInboxConversationRevision(value => value + 1);
+      setComposerFocused(true);
     },
     [onSelectHistorySession],
   );
@@ -5463,6 +5509,7 @@ export default function App({
     onQueuedMessageEditingChange,
     onSteerQueuedMessage,
     onResumeQueue,
+    onAddIssues: async (sessionId: string) => { await onOpenInboxSession(sessionId); setInboxSelectionRevision(value => value + 1); },
     onInboxCardDismiss,
     onNoteCardDismiss,
     onHandoffCardDismiss,
@@ -5708,6 +5755,7 @@ export default function App({
                         <PaneTree
                           {...sessionPaneProps}
                           visible={tab.id === activeTabId && !inboxViewOpen}
+                          sessionPortal={inboxViewOpen && tab.id === activeTabId ? inboxAskPortal ?? undefined : undefined}
                           layout={tab.layout}
                           sessions={sessions}
                           editorPanes={[
@@ -5806,10 +5854,15 @@ export default function App({
             onOpenSession={onOpenInboxSession}
             target={inboxTarget}
             visible={inboxViewOpen}
-            onSelectTickets={items => setContextRequest({ context: contextFromTickets(items), cwd: sidebarCwd })}
+            conversationId={inboxConversationId}
+            conversationRevision={inboxConversationRevision}
+            selectionRevision={inboxSelectionRevision}
+            onCloseConversation={() => setInboxConversationId(undefined)}
+            onToggleConversationTicket={onToggleConversationTicket}
+            onSelectTickets={items => setContextRequest({ context: contextFromTickets(items), tickets: items, cwd: sidebarCwd })}
           />
         </div> : null}
-        {contextRequest ? <AgentContextPicker request={contextRequest} sessions={sessions} recents={recents} onPrepare={prepareContextDestination} onOpen={id => { void onOpenInboxSession(id); }} onClose={() => setContextRequest(undefined)} /> : null}
+        {contextRequest ? <AgentContextPicker request={contextRequest} history={sidebarHistory} sessions={sessions} recents={recents} onPrepare={prepareContextDestination} onOpen={id => { if (contextRequest.context.entries.every(entry => !!entry.ticket)) void onOpenInboxSession(id); else { setInboxViewOpen(false); void onSelectHistorySession(id); } }} onClose={() => setContextRequest(undefined)} /> : null}
         {notesViewOpen ? (
           <NotesView
             besideRail={projectRailOpen}

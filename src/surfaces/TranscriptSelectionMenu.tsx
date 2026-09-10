@@ -1,11 +1,10 @@
-import { MessageSquarePlus, MoreHorizontal } from "../chrome/icons";
-import { useEffect, useRef, useState } from "react";
-import { Popover } from "../chrome/Popover";
+import { useEffect, useRef } from "react";
+import { ExplorerMenu } from "../chrome/ExplorerMenu";
 import { type TranscriptSelection } from "../lib/transcriptSelection";
 
 type Props = {
   selection: TranscriptSelection | null;
-  onAddToChat: (text: string) => void;
+  onAddToChat: (text: string, responseId?: string) => void;
   onDismiss: () => void;
   onSendToAgent?: (text: string, responseId?: string) => void;
 };
@@ -16,7 +15,6 @@ export function TranscriptSelectionMenu({
   onDismiss,
   onSendToAgent,
 }: Props) {
-  const [more, setMore] = useState(false);
   const onDismissRef = useRef(onDismiss);
   onDismissRef.current = onDismiss;
 
@@ -36,60 +34,22 @@ export function TranscriptSelectionMenu({
   if (!selection) return null;
 
   return (
-    <Popover
-      anchor={selection.rect}
-      side="top"
-      align="center"
-      onDismiss={(reason) => {
-        if (reason === "escape") window.getSelection()?.removeAllRanges();
+    <ExplorerMenu
+      x={selection.rect.left}
+      y={selection.rect.bottom + 6}
+      width={180}
+      ariaLabel="Selected text actions"
+      items={[
+        { kind: "item", id: "add", label: "Add to chat" },
+        ...(onSendToAgent ? [{ kind: "item" as const, id: "send", label: "Send to agent…" }] : []),
+      ]}
+      onPick={(id) => {
+        if (id === "add") onAddToChat(selection.text, selection.responseId);
+        else onSendToAgent?.(selection.text, selection.responseId);
+        window.getSelection()?.removeAllRanges();
         onDismiss();
       }}
-      role="toolbar"
-      aria-label="Selected text actions"
-      className="flex p-1"
-    >
-      <button
-        type="button"
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={() => {
-          onAddToChat(selection.text);
-          window.getSelection()?.removeAllRanges();
-          onDismiss();
-        }}
-        className="flex h-7 items-center gap-1.5 rounded-lg px-2 font-sans text-[13px] leading-none text-content outline-none ring-accent/40 hover:bg-content/5 focus-visible:ring-2"
-      >
-        <MessageSquarePlus
-          aria-hidden="true"
-          className="size-3.5"
-          strokeWidth={1.75}
-        />
-        Add to chat
-      </button>
-      {onSendToAgent ? (
-        <>
-          <button
-            type="button"
-            aria-label="More selected text actions"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => setMore((value) => !value)}
-            className="rounded px-1 hover:bg-content/5"
-          >
-            <MoreHorizontal className="size-4" />
-          </button>
-          {more ? (
-            <button
-              type="button"
-              className="rounded px-2 text-[12px] hover:bg-content/5"
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() =>
-                onSendToAgent(selection.text, selection.responseId)
-              }
-            >
-              Send to another agent…
-            </button>
-          ) : null}
-        </>
-      ) : null}
-    </Popover>
+      onClose={onDismiss}
+    />
   );
 }

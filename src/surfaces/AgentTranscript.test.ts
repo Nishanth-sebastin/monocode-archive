@@ -85,3 +85,11 @@ describe("AgentTranscript collapsed work", () => {
     );
   });
 });
+
+
+it("renders a selected-code user message with the existing Markdown code renderer", () => {
+  const markup = render([{ id: "code", role: "user", text: "src/example.ts\n\n```typescript\nconst value = 1;\n```" }]);
+  expect(markup).toContain("agent-markdown");
+  expect(markup).toContain("typescript");
+  expect(markup).not.toContain("```typescript");
+});

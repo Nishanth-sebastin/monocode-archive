@@ -927,6 +927,7 @@ export function inboxStartDraft(item: InboxItem, body?: string): string {
 
 /** Compact chip shown above the composer when starting from Inbox. */
 export type InboxComposerCard = {
+  account?: string;
   contextId?: string;
   contextSummary?: string;
   contextPreview?: { description?: string; comments: { id: string; author: string; createdAt: string; body: string }[] };
@@ -948,6 +949,7 @@ export function inboxComposerCard(
   const linear = item.provider === "linear";
   return {
     provider: item.provider,
+    ...(item.account ? { account: item.account } : {}),
     kind: item.kind,
     identifier: inboxItemRef(item),
     title: item.title.trim() || inboxItemRef(item),

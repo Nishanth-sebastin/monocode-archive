@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -9,7 +10,7 @@ import {
   type Ref,
 } from "react";
 import { createPortal } from "react-dom";
-import { LAYER } from "../lib/layers";
+import { LAYER, PopoverLayerOffset } from "../lib/layers";
 import {
   placePopover,
   type AnchorRect,
@@ -147,6 +148,7 @@ export function Popover({
   children,
   ...rest
 }: Props) {
+  const layerOffset = useContext(PopoverLayerOffset);
   const frame = useRef<HTMLDivElement | null>(null);
   const surface = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState<PopoverPosition | null>(null);
@@ -251,7 +253,7 @@ export function Popover({
     <div
       ref={frame}
       data-popover-side={position?.side ?? side}
-      style={{ ...placed, zIndex: layer }}
+      style={{ ...placed, zIndex: layer + layerOffset }}
       className={bare ? undefined : FRAME}
     >
       {bare ? null : <div aria-hidden="true" className={BACKDROP} />}

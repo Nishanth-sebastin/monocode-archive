@@ -1,10 +1,14 @@
+// @vitest-environment happy-dom
 import { describe, expect, it, vi } from "vitest";
 import {
+  linkTicketContext,
+  removeContextItem,
   boundAgentContext,
   composeAgentContext,
   contextFromChanges,
   contextFromText,
   contextFromTickets,
+  contextFromTicketDescriptions,
   MAX_CONTEXT_TEXT,
   prepareSessionContext,
 } from "./agentContext";
@@ -66,7 +70,7 @@ describe("selected context preparation", () => {
         text: "x".repeat(MAX_CONTEXT_TEXT),
       })),
     });
-    expect(bounded.entries.map((entry) => entry.text).join("")).toHaveLength(
+    expect(bounded.entries.map((entry) => entry.text).join("").length).toBeLessThanOrEqual(
       MAX_CONTEXT_TEXT,
     );
     expect(bounded.entries[1].truncated).toBe(true);
@@ -75,7 +79,7 @@ describe("selected context preparation", () => {
       "untrusted context",
     );
     expect(composeAgentContext(bounded, "Review")).toContain(
-      "Selected context truncated",
+      "Context truncated to the selected-context limit",
     );
   });
 
@@ -182,4 +186,107 @@ describe("selected context preparation", () => {
       contextFromChanges("/source", [{ relative: "a.bin", kind: "unstaged" }]),
     ).rejects.toThrow("binary or oversized");
   });
+});
+
+it("links multiple tickets and stages their context without sending a prompt", () => {
+  const context = contextFromTickets([
+    ticket,
+    {
+      ...ticket,
+      id: "2",
+      number: 2,
+      url: "https://team.atlassian.net/browse/ENG-2",
+      identifier: "ENG-2",
+    },
+  ]);
+  const linked = linkTicketContext(session, context);
+  expect(linked.linkedWorkItem?.url).toBe(ticket.url);
+  expect(linked.linkedWorkItem?.additionalItems).toHaveLength(1);
+  expect(
+    linkTicketContext(linked, context).linkedWorkItem?.additionalItems,
+  ).toHaveLength(1);
+  expect(linked.contextDraft?.entries).toHaveLength(2);
+  expect(composeAgentContext(linked.contextDraft, "Implement both")).toContain("ENG-2");
+  expect(linked.inboxCard).toBeUndefined();
+  expect(linked.composerSeed).toBeUndefined();
+});
+
+
+it("includes every selected issue description in the next agent message", async () => {
+  const items = [1, 2].map(number => ({ ...ticket, provider: "github", kind: "issue", projectPath: "/source", number, title: `Issue ${number}`, url: `https://github.com/team/repo/issues/${number}` }) as InboxItem);
+  vi.mocked(invoke).mockImplementation(async (_command, args) => ({ body: `Acceptance for issue ${(args as { number: number }).number}`, author: "author" }));
+  const context = await contextFromTicketDescriptions(items);
+  const prepared = linkTicketContext(session, context);
+  const message = composeAgentContext(prepared.contextDraft, "Implement both");
+  for (const number of [1, 2]) {
+    expect(message).toContain(`Issue ${number}`);
+    expect(message).toContain(`https://github.com/team/repo/issues/${number}`);
+    expect(message).toContain(`Acceptance for issue ${number}`);
+    expect(invoke).toHaveBeenCalledWith("git_github_work_item_details", { cwd: "/source", kind: "issue", number });
+  }
+  expect(message).toContain("untrusted context");
+  const remaining = removeContextItem(context, context.entries[0].id)!;
+  expect(remaining.entries).toHaveLength(1);
+  expect(composeAgentContext(remaining, "Implement")).not.toContain("Acceptance for issue 1");
+  expect(removeContextItem(remaining, remaining.entries[0].id)).toBeUndefined();
+  expect(prepared.queuedMessages).toBeUndefined();
+  expect(session.contextDraft).toBeUndefined();
+  vi.mocked(invoke).mockClear();
+  await contextFromTicketDescriptions(items);
+  expect(invoke).not.toHaveBeenCalled();
+  vi.mocked(invoke).mockRejectedValueOnce(new Error("Access denied"));
+  await expect(contextFromTicketDescriptions([{ ...items[0], number: 3 }])).rejects.toThrow("Access denied");
+});
+
+
+it("combines five issue providers with their descriptions and keeps their identities", async () => {
+  const providers = ["github", "linear", "gitlab", "jira", "azure"] as const;
+  const items = providers.map((provider, index) => ({ ...ticket, provider, kind: provider === "github" || provider === "gitlab" ? "issue" : provider, projectPath: "/mixed", id: String(100 + index), number: 100 + index, repo: "team/repo", title: `${provider} task`, url: `https://${provider}.example.com/issues/${100 + index}` }) as InboxItem);
+  vi.mocked(invoke).mockImplementation(async command => {
+    if (command === "jira_issue_content") return { fields: { description: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Jira acceptance" }] }] } } };
+    if (command === "azure_item_content") return { fields: { "System.Description": "Azure acceptance" } };
+    return { body: `${command} acceptance`, author: "Author" };
+  });
+  const context = await contextFromTicketDescriptions(items);
+  const linked = linkTicketContext(session, context);
+  const message = composeAgentContext(linked.contextDraft, "Implement");
+  for (const item of items) {
+    expect(message).toContain(item.title);
+    expect(message).toContain(item.url);
+  }
+  expect(message).toContain("Jira acceptance");
+  expect(message).toContain("Azure acceptance");
+  expect(new Set(context.entries.map(entry => entry.id)).size).toBe(5);
+  expect(linked.linkedWorkItem?.additionalItems).toHaveLength(4);
+  expect(linked.linkedWorkItem?.context).toContain("acceptance");
+});
+
+it("limits description requests and stops queued work after cancellation", async () => {
+  const pending: (() => void)[] = [];
+  vi.mocked(invoke).mockClear();
+  vi.mocked(invoke).mockImplementation(() => new Promise(resolve => pending.push(() => resolve({ body: "description" }))));
+  const controller = new AbortController();
+  const items = Array.from({ length: 20 }, (_, index) => ({ ...ticket, provider: "github", kind: "issue", projectPath: "/bounded-fetch", repo: "a/b", number: 200 + index, url: `https://github.com/a/b/issues/${200 + index}` }) as InboxItem);
+  const result = contextFromTicketDescriptions(items, controller.signal);
+  const rejected = expect(result).rejects.toThrow();
+  expect(pending).toHaveLength(4);
+  controller.abort();
+  pending.forEach(resolve => resolve());
+  await rejected;
+  expect(invoke).toHaveBeenCalledTimes(4);
+});
+
+it("retains description text for every long issue in batches and incremental additions", async () => {
+  vi.mocked(invoke).mockImplementation(async (_command, args) => ({ body: `Acceptance ${(args as { number: number }).number}\n${"x".repeat(32_000)}` }));
+  const items = Array.from({ length: 20 }, (_, index) => ({ ...ticket, provider: "github", kind: "issue", projectPath: "/fair-context", repo: "a/b", number: 600 + index, url: `https://github.com/a/b/issues/${600 + index}` }) as InboxItem);
+  const batch = linkTicketContext(session, await contextFromTicketDescriptions(items));
+  let incremental = session;
+  for (const item of items) incremental = linkTicketContext(incremental, await contextFromTicketDescriptions([item]));
+  for (const result of [batch, incremental]) {
+    expect(result.contextDraft!.entries.reduce((sum, entry) => sum + entry.text.length, 0)).toBeLessThanOrEqual(MAX_CONTEXT_TEXT);
+    for (const item of items) expect(composeAgentContext(result.contextDraft, "")).toContain(`Acceptance ${item.number}`);
+    const links = [result.linkedWorkItem!, ...result.linkedWorkItem!.additionalItems!];
+    expect(links.every(link => link.context?.includes("Acceptance"))).toBe(true);
+    expect(links.reduce((sum, link) => sum + link.context!.length, 0)).toBeLessThanOrEqual(MAX_CONTEXT_TEXT);
+  }
 });

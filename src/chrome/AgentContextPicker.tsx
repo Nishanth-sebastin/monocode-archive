@@ -1,8 +1,10 @@
-import { getVerifiedFamilies } from "../lib/repositoryFamilies";
+import { searchSessions, type SessionSummary } from "../lib/sessionStore";
 import { useEffect, useRef, useState } from "react";
-import { type AgentContextRequest } from "../lib/agentContext";
+import { getVerifiedFamilies } from "../lib/repositoryFamilies";
+import type { AgentContextRequest } from "../lib/agentContext";
 import {
   HARNESS_TITLE,
+  HARNESSES,
   harnessSupportsAttachments,
   newDefaultSession,
   newSession,
@@ -12,14 +14,14 @@ import {
 import type { RecentProject } from "../lib/recents";
 import { wslLocation } from "../lib/paths";
 import { Modal } from "./Modal";
-import { AgentContextChips } from "./AgentContextChips";
-import { AttachmentChip } from "./AttachmentChip";
 import { CwdPicker } from "./CwdPicker";
 import { SecondOpinionButton } from "./SecondOpinionButton";
+import { Check, Plus } from "./icons";
 
 export function AgentContextPicker({
   request,
   sessions,
+  history = [],
   recents,
   onPrepare,
   onOpen,
@@ -27,35 +29,41 @@ export function AgentContextPicker({
 }: {
   request: AgentContextRequest;
   sessions: readonly Session[];
+  history?: readonly SessionSummary[];
   recents: RecentProject[];
   onPrepare: (
     request: AgentContextRequest,
     destination: string | Session,
-  ) => string;
+    signal?: AbortSignal,
+  ) => string | Promise<string>;
   onOpen: (id: string) => void;
   onClose: () => void;
 }) {
-  const knownProjects = [
-    ...new Map(
-      [
-        ...recents,
-        ...[...getVerifiedFamilies().values()].flatMap((family) =>
-          family.worktrees
-            .filter((tree) => !tree.missing && !tree.prunable)
-            .map((tree) => ({ path: tree.path, openedAt: 0 })),
-        ),
-      ].map((project) => [project.path, project]),
-    ).values(),
-  ];
+  const tickets =
+    request.context.entries.length > 0 &&
+    request.context.entries.every((entry) => !!entry.ticket);
   const [destination, setDestination] = useState(
     request.sourceSessionId ?? "new",
   );
   const [fresh, setFresh] = useState(() => newDefaultSession(request.cwd));
   const [search, setSearch] = useState("");
-  const [instruction, setInstruction] = useState("");
   const [error, setError] = useState("");
-  const [prepared, setPrepared] = useState<string>();
+  const [savedMatches, setSavedMatches] = useState<Pick<SessionSummary, "id" | "title" | "cwd" | "harness">[]>([]);
+  useEffect(() => {
+    setSavedMatches([]);
+    if (!search.trim()) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void searchSessions({ query: search, includeArchived: false }).then(result => {
+        if (!cancelled) setSavedMatches(result.hits.flatMap(hit => { const harness = HARNESSES.find(harness => harness === hit.harness); return harness ? [{ id: hit.sessionId, title: hit.title, cwd: hit.cwd, harness }] : []; }));
+      }).catch(() => { if (!cancelled) setError("Could not search saved conversations. Try again."); });
+    }, 250);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [search]);
   const submitting = useRef(false);
+  const [pending, setPending] = useState(false);
+  const preparation = useRef<AbortController | null>(null);
+  useEffect(() => () => preparation.current?.abort(), []);
   const body = useRef<HTMLDivElement>(null);
   const trigger = useRef(document.activeElement as HTMLElement | null);
   useEffect(() => {
@@ -81,25 +89,39 @@ export function AgentContextPicker({
     window.addEventListener("keydown", trap);
     return () => {
       window.removeEventListener("keydown", trap);
-      trigger.current?.focus();
+      if (!submitting.current) trigger.current?.focus();
     };
   }, []);
+  const available = [...new Map([...savedMatches, ...history, ...sessions].map(session => [session.id, session])).values()];
   const target =
     destination === "new"
       ? fresh
-      : sessions.find((session) => session.id === destination);
+      : available.find((session) => session.id === destination);
   const unsupported = !target
-    ? "Conversation closed. Choose another destination."
-    : request.context.attachments.length &&
+    ? "Conversation closed. Choose another."
+    : !tickets &&
+        request.context.attachments.length &&
         !harnessSupportsAttachments(target.harness)
-      ? "This agent cannot receive attachments. Choose another agent."
+      ? "This agent does not support attachments."
       : destination === "new" && (!fresh.cwd || fresh.cwd === "~")
-        ? "Choose a project or worktree."
+        ? "Choose a project."
         : "";
-  const matches = sessions
+  const knownProjects = [
+    ...new Map(
+      [
+        ...recents,
+        ...[...getVerifiedFamilies().values()].flatMap((family) =>
+          family.worktrees
+            .filter((tree) => !tree.missing && !tree.prunable)
+            .map((tree) => ({ path: tree.path, openedAt: 0 })),
+        ),
+      ].map((project) => [project.path, project]),
+    ).values(),
+  ];
+  const matches = available
     .filter(
       (session) =>
-        !session.inboxAsk &&
+        !("inboxAsk" in session && session.inboxAsk) &&
         `${session.title} ${sessionWorkCwd(session)} ${HARNESS_TITLE[session.harness]}`
           .toLowerCase()
           .includes(search.toLowerCase()),
@@ -114,175 +136,150 @@ export function AgentContextPicker({
     .slice(0, 30);
   return (
     <Modal
-      title="Send to agent"
-      description="Prepare selected context · does not auto-send"
+      title={tickets ? "Open conversation" : "Send to agent"}
+      description={
+        tickets
+          ? `${request.context.entries.length} selected · titles and descriptions · send when ready`
+          : "Selected context · does not auto-send"
+      }
       onClose={onClose}
-      className="max-h-[80vh] [&_header_h2]:text-lg"
+      className="max-h-[85vh] [&_header_h2]:text-base"
     >
-      <div ref={body} className="space-y-3 p-3 text-[13px] text-content">
-        <AgentContextChips context={request.context} />
-        <div className="flex flex-wrap gap-1">
-          {request.context.attachments.map((file) => (
-            <AttachmentChip key={file.id} attachment={file} />
-          ))}
-        </div>
-        {prepared ? (
-          <div role="status" className="space-y-2">
-            <p>
-              Prepared in {target?.title || "conversation"} ·{" "}
-              {target ? HARNESS_TITLE[target.harness] : ""}.
-            </p>
+      <div ref={body} className="p-2 text-[12px] text-content">
+        <input
+          autoFocus
+          aria-label="Search conversations"
+          placeholder="Find a conversation…"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          className="mb-1 h-8 w-full rounded-md border border-content/10 bg-transparent px-2 outline-accent"
+        />
+        <div
+          className="max-h-[min(30vh,240px)] overflow-y-auto"
+          aria-label="Conversations"
+        >
+          {matches.map((session) => (
             <button
               type="button"
-              className="rounded bg-content/10 px-3 py-1.5"
-              onClick={() => {
-                onOpen(prepared);
-                onClose();
-              }}
+              key={session.id}
+              data-destination={session.id}
+              aria-pressed={destination === session.id}
+              onClick={() => setDestination(session.id)}
+              className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-content/5 ${destination === session.id ? "bg-content/5" : ""}`}
             >
-              Open conversation
-            </button>
-          </div>
-        ) : (
-          <>
-            <label className="block">
-              Instruction <span className="text-content/45">(optional)</span>
-              <textarea
-                rows={2}
-                maxLength={4000}
-                value={instruction}
-                onChange={(event) => setInstruction(event.target.value)}
-                className="mt-1 w-full rounded border border-content/10 bg-transparent p-2 outline-accent"
+              <Check
+                aria-hidden
+                className={`size-3.5 shrink-0 ${destination === session.id ? "text-content" : "invisible"}`}
               />
-            </label>
-            <fieldset className="space-y-2">
-              <legend className="mb-1">Destination</legend>
-              <input
-                aria-label="Search conversations"
-                placeholder="Search conversations"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                className="w-full rounded border border-content/10 bg-transparent px-2 py-1.5 outline-accent"
-              />
-              <div className="max-h-40 overflow-auto">
-                {matches.map((session) => (
-                  <label
-                    key={session.id}
-                    className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 hover:bg-content/5"
-                  >
-                    <input
-                      type="radio"
-                      name="context-destination"
-                      value={session.id}
-                      checked={destination === session.id}
-                      onChange={() => setDestination(session.id)}
-                    />
-                    <span className="min-w-0">
-                      <span className="block truncate">
-                        {session.title || "New session"} ·{" "}
-                        {HARNESS_TITLE[session.harness]} ·{" "}
-                        {session.busy ? "Working" : "Unknown"}
-                      </span>
-                      <span className="block break-all text-[11px] text-content/50">
-                        {sessionWorkCwd(session)} ·{" "}
-                        {wslLocation(sessionWorkCwd(session)) ? "WSL" : "Local"}
-                      </span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-              <label className="flex items-center gap-2 px-2">
-                <input
-                  type="radio"
-                  name="context-destination"
-                  checked={destination === "new"}
-                  onChange={() => setDestination("new")}
-                />
-                New session…
-              </label>
-              {destination === "new" ? (
-                <div className="space-y-2 rounded border border-content/10 p-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <CwdPicker
-                      cwd={fresh.cwd}
-                      recents={knownProjects}
-                      placement="below"
-                      onCwdChange={(cwd) => setFresh(newDefaultSession(cwd))}
-                    />
-                    <span className="flex items-center gap-1">
-                      {HARNESS_TITLE[fresh.harness]}
-                      <SecondOpinionButton
-                        cwd={fresh.cwd}
-                        from={fresh.harness}
-                        fromModel={fresh.model}
-                        includeCurrent
-                        title="Choose agent"
-                        onPick={(harness, model) =>
-                          setFresh(
-                            newSession(
-                              harness,
-                              fresh.cwd,
-                              model,
-                              fresh.runtimeMode,
-                            ),
-                          )
-                        }
-                      />
-                    </span>
-                  </div>
-                  <p className="break-all text-[11px] text-content/50">
-                    {fresh.cwd} · {wslLocation(fresh.cwd) ? "WSL" : "Local"}
-                  </p>
-                </div>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">
+                  {session.title || "New conversation"}
+                </span>
+                <span
+                  className="block truncate text-[11px] text-content/45"
+                  title={sessionWorkCwd(session)}
+                >
+                  {HARNESS_TITLE[session.harness]} · {sessionWorkCwd(session)}
+                  {wslLocation(sessionWorkCwd(session)) ? " · WSL" : ""}
+                </span>
+              </span>
+              {"busy" in session && session.busy ? (
+                <span className="shrink-0 text-[11px] text-content/50">
+                  Working
+                </span>
               ) : null}
-            </fieldset>
-            <p className="text-[11px] text-content/50">
-              Prepare a draft even while an agent works. Queue and send remain
-              available in its composer according to provider capabilities.
+            </button>
+          ))}
+          {!matches.length ? (
+            <p className="px-2 py-3 text-content/45">
+              No matching conversations
             </p>
-            {error || unsupported ? (
-              <p role="alert" className="text-red-400">
-                {error || unsupported}
-              </p>
-            ) : null}
-            <div className="sticky bottom-0 flex justify-end gap-2 border-t border-content/10 bg-background-base py-2">
-              <button
-                type="button"
-                onClick={onClose}
-                className="rounded px-3 py-1.5 hover:bg-content/5"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!!unsupported}
-                className="rounded bg-content/10 px-3 py-1.5 disabled:opacity-40"
-                onClick={() => {
-                  if (submitting.current || unsupported) return;
-                  submitting.current = true;
-                  try {
-                    const id = onPrepare(
-                      {
-                        ...request,
-                        context: { ...request.context, instruction },
-                      },
-                      destination === "new" ? fresh : destination,
-                    );
-                    if (destination === "new") onClose();
-                    else setPrepared(id);
-                  } catch (reason) {
-                    setError(String(reason));
-                    submitting.current = false;
-                  }
-                }}
-              >
-                {destination === "new"
-                  ? "Start session and prepare"
-                  : "Prepare in chat"}
-              </button>
-            </div>
-          </>
-        )}
+          ) : null}
+        </div>
+        <button
+          type="button"
+          aria-pressed={destination === "new"}
+          onClick={() => setDestination("new")}
+          className={`mt-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-content/5 ${destination === "new" ? "bg-content/5" : ""}`}
+        >
+          <Plus className="size-3.5" />
+          New conversation
+        </button>
+        {destination === "new" ? (
+          <div className="flex min-w-0 items-center justify-between gap-2 px-2 py-1">
+            <CwdPicker
+              cwd={fresh.cwd}
+              recents={knownProjects}
+              placement="above"
+              onCwdChange={(cwd) => setFresh({ ...fresh, cwd })}
+            />
+            <span className="flex shrink-0 items-center gap-1 text-content/60">
+              {HARNESS_TITLE[fresh.harness]}
+              <SecondOpinionButton
+                cwd={fresh.cwd}
+                from={fresh.harness}
+                fromModel={fresh.model}
+                includeCurrent
+                title="Choose agent"
+                onPick={(harness, model) =>
+                  setFresh(
+                    newSession(harness, fresh.cwd, model, fresh.runtimeMode),
+                  )
+                }
+              />
+            </span>
+          </div>
+        ) : null}
+        {error || unsupported ? (
+          <p role="alert" className="px-2 py-1 text-red-400">
+            {error || unsupported}
+          </p>
+        ) : null}
+        <div className="sticky bottom-0 mt-2 flex justify-end gap-2 border-t border-content/10 bg-background-base pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1.5 text-content/60 hover:bg-content/5"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={!!unsupported || pending}
+            className="rounded-md bg-content/10 px-2.5 py-1.5 disabled:opacity-40"
+            onClick={async () => {
+              if (submitting.current || unsupported) return;
+              submitting.current = true;
+              setPending(true);
+              const controller = new AbortController();
+              preparation.current = controller;
+              try {
+                const id = await onPrepare(
+                  {
+                    ...request,
+                    context: request.context,
+                  },
+                  destination === "new" ? fresh : destination,
+                  controller.signal,
+                );
+                if (controller.signal.aborted) return;
+                if (destination !== "new") onOpen(id);
+                onClose();
+              } catch (reason) {
+                setError(String(reason));
+                submitting.current = false;
+              } finally {
+                setPending(false);
+              }
+            }}
+          >
+            {pending
+              ? "Loading context…"
+              : tickets
+                ? "Open conversation"
+                : "Add to chat"}
+          </button>
+        </div>
       </div>
     </Modal>
   );

@@ -1,3 +1,4 @@
+import { addSessionWorkItems, removeSessionWorkItem, linkedWorkItemFromInboxItem } from "../lib/sessionWorkItem";
 // @vitest-environment happy-dom
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -93,6 +94,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
           onAskMount: () => {},
           onStart,
           onSelectTickets,
+          conversationId: "existing",
         }),
       ),
     );
@@ -106,9 +108,14 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
         '[aria-label="Custom review issue Bug 141: Ticket 141"]',
       )!,
     );
+    expect(container.querySelector('[aria-label="Conversation"]')).toBeNull();
+    expect(button("Back to conversation")).toBeTruthy();
+    await click(button("Back to conversation"));
+    expect(container.querySelectorAll('[aria-label="Conversation"]')).toHaveLength(1);
+    await click(container.querySelector('[aria-label="Custom review issue Bug 141: Ticket 141"]')!);
+    expect(container.querySelector('[aria-label="Conversation"]')).toBeNull();
     await click(button("Send to agent"));
-    expect(onStart).not.toHaveBeenCalled();
-    await click(button("Choose conversation"));
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(onStart).toHaveBeenCalledWith(
       expect.objectContaining({
         provider: "azure",
@@ -119,24 +126,23 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
       }),
       undefined,
       expect.objectContaining({
-        prompt: expect.stringContaining("Loaded description"),
+        prompt: expect.stringContaining("Ticket"),
       }),
     );
     expect(document.body.textContent).toContain("Handoff failed");
-    await click(button("Cancel"));
     await click(button("GitHub"));
     await click(button("Azure"));
     expect(container.querySelector("h1")?.textContent).toBe("Ticket 141");
-    await click(button("Select tickets"));
+    await click(container.querySelector('[aria-label="Select tickets"]')!);
     await click(container.querySelector('input[aria-label="Select azure Bug 141 Ticket 141"]')!);
     await click(button("GitHub"));
     expect(container.textContent).toContain("1 selected");
     await click(button("Azure"));
     expect((container.querySelector('input[aria-label="Select azure Bug 141 Ticket 141"]') as HTMLInputElement).checked).toBe(true);
-    await click(button("Send to agent…"));
+    await click(button("Open conversation"));
     expect(onSelectTickets).toHaveBeenCalledWith([expect.objectContaining({ provider: "azure", account: "ada", id: "141" })]);
     expect(container.textContent).toContain("1 selected");
-    await click(button("Cancel selection"));
+    await click(container.querySelector('[aria-label="Done selecting tickets"]')!);
     expect(container.querySelector('input[type="checkbox"]')).toBeNull();
     fail = true;
     await click(container.querySelector('[aria-label="Refresh"]')!);
@@ -149,6 +155,93 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
       expect.objectContaining({ provider: "azure", id: "141" }),
       expect.objectContaining({ contextSummary: expect.any(String) }),
     );
+    let linked = { id: "existing", title: "Existing", linkedWorkItem: linkedWorkItemFromInboxItem(onSelectTickets.mock.calls[0][0][0])! };
+    let finishToggle: (() => void) | undefined;
+    let holdToggle = false;
+    const onToggle = vi.fn(async (_id, item, selected) => {
+      if (holdToggle) await new Promise<void>(resolve => { finishToggle = resolve; });
+      const link = linkedWorkItemFromInboxItem(item)!;
+      linked = selected ? addSessionWorkItems(linked, [link]) : removeSessionWorkItem(linked, link);
+      renderLinked();
+    });
+    const onCloseConversation = vi.fn();
+    const renderLinked = () => root.render(createElement(InboxView, {
+      cwd: "/local/project", recents: [], onAsk, onAskRestart: async () => "", onAskMount: () => {}, onStart, onSelectTickets,
+      conversationId: "existing", sessions: [linked as import("../lib/sessionStore").SessionSummary], onToggleConversationTicket: onToggle, onCloseConversation,
+    }));
+    await act(async () => renderLinked());
+    await click(container.querySelector('[aria-label="Select tickets"]')!);
+    expect(container.querySelector('input[aria-label="Filter inbox"]')).toBeNull();
+    const selection = () => container.querySelector('input[aria-label="Select azure Bug 141 Ticket 141"]') as HTMLInputElement;
+    expect(selection().checked).toBe(true);
+    holdToggle = true;
+    await click(selection());
+    expect(selection().checked).toBe(false);
+    expect(selection().disabled).toBe(true);
+    await act(async () => finishToggle?.());
+    holdToggle = false;
+    expect(selection().disabled).toBe(false);
+    expect(onToggle).toHaveBeenLastCalledWith("existing", expect.objectContaining({ id: "141" }), false);
+    expect(selection().checked).toBe(false);
+    expect(container.textContent).toContain("0 linked");
+    await click(selection());
+    expect(selection().checked).toBe(true);
+    expect(container.textContent).toContain("1 linked");
+    await click(button("Done"));
+    expect(onCloseConversation).not.toHaveBeenCalled();
+    expect(container.querySelector('input[aria-label="Filter inbox"]')).not.toBeNull();
+    await click(button("Back to conversation"));
+    expect(container.querySelector('[aria-label="Conversation"]')).not.toBeNull();
+    const conversationPanel = container.querySelector('[aria-label="Conversation"]');
+    await click(container.querySelector('[aria-label="Select tickets"]')!);
+    await click(button("Done"));
+    expect(onCloseConversation).not.toHaveBeenCalled();
+    expect(container.querySelector('[aria-label="Conversation"]')).toBe(conversationPanel);
+    await click(button("Hide issues"));
+    expect((container.querySelector("#inbox-ticket-list") as HTMLElement).hidden).toBe(true);
+    expect(container.querySelector('[aria-label="Conversation"]')).toBe(conversationPanel);
+    await click(button("Show issues"));
+    expect((container.querySelector("#inbox-ticket-list") as HTMLElement).hidden).toBe(false);
+    await click(container.querySelector('[aria-label="Select tickets"]')!);
+    expect(button("Open conversation")).toBeUndefined();
+    await click(button("Done"));
+
+    await act(async () => root.render(createElement(InboxView, {
+      cwd: "/local/project", recents: [], onAsk, onAskRestart: async () => "", onAskMount: () => {}, onStart,
+      conversationId: "existing", target: { ...linked.linkedWorkItem },
+    })));
+    expect(container.querySelector('[aria-label="Conversation"]')).toBeNull();
+    expect(container.querySelector("h1")?.textContent).toBe("Ticket 141");
+    const renderVisible = (visible: boolean) => root.render(createElement(InboxView, {
+      cwd: "/local/project", recents: [], onAsk, onAskRestart: async () => "", onAskMount: () => {}, onStart, onSelectTickets, visible,
+    }));
+    await act(async () => renderVisible(true));
+    await click(container.querySelector('[aria-label="Select tickets"]')!);
+    await click(container.querySelector('input[aria-label="Select azure Bug 141 Ticket 141"]')!);
+    expect(container.textContent).toContain("1 selected");
+    await act(async () => renderVisible(false));
+    await act(async () => renderVisible(true));
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    await click(container.querySelector('[aria-label="Select tickets"]')!);
+    expect(container.textContent).toContain("0 selected");
+    expect(container.querySelector('[aria-label="Conversation"]')).toBeNull();
+    await click(button("Done"));
+    await act(async () => root.render(createElement(InboxView, {
+      cwd: "/local/project", recents: [], onAsk, onAskRestart: async () => "", onAskMount: () => {}, onStart, onSelectTickets,
+      conversationId: "existing", selectionRevision: 1,
+    })));
+    expect(container.querySelector('input[type="checkbox"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Conversation"]')).not.toBeNull();
+
+    await click(button("GitHub"));
+    const target = { ...linked.linkedWorkItem, number: 142, identifier: "Bug 142", url: linked.linkedWorkItem.url.replace("141", "142") };
+    const renderTarget = (visible: boolean) => root.render(createElement(InboxView, {
+      cwd: "/local/project", recents: [], onAsk, onAskRestart: async () => "", onAskMount: () => {}, onStart, visible, target,
+    }));
+    await act(async () => renderTarget(false));
+    await act(async () => renderTarget(true));
+    expect(container.querySelector('[aria-label="Azure Boards"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector("h1")?.textContent).toBe("Ticket 142");
   } finally {
     await act(async () => root.unmount());
     container.remove();

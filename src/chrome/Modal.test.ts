@@ -1,7 +1,11 @@
-import { createElement } from "react";
+// @vitest-environment happy-dom
+import { act, createElement, useRef, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { ModalPanel } from "./Modal";
+import { createRoot } from "react-dom/client";
+import { Popover } from "./Popover";
+import { LAYER } from "../lib/layers";
+import { Modal, ModalPanel } from "./Modal";
 
 describe("ModalPanel", () => {
   it("names the dialog and close action", () => {
@@ -21,4 +25,36 @@ describe("ModalPanel", () => {
     expect(markup).toContain("Body");
     expect(markup).toContain('aria-label="Close"');
   });
+});
+
+
+it("keeps dialog menus and flyouts above the dialog and dismisses the menu first", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const onClose = vi.fn();
+  function Menu() {
+    const anchor = useRef<HTMLButtonElement>(null);
+    const [open, setOpen] = useState(true);
+    return createElement("div", null,
+      createElement("button", { ref: anchor }, "Project"),
+      open && createElement(Popover, { anchor, onDismiss: () => setOpen(false), "aria-label": "Projects" }, "Projects"),
+      open && createElement(Popover, { anchor, layer: LAYER.submenu, "aria-label": "Flyout" }, "Flyout"),
+    );
+  }
+  try {
+    await act(async () => root.render(createElement(Modal, { title: "Choose", onClose, children: createElement(Menu) })));
+    expect(document.querySelector('[aria-label="Projects"]')?.parentElement?.style.zIndex).toBe("91");
+    expect(document.querySelector('[aria-label="Flyout"]')?.parentElement?.style.zIndex).toBe("92");
+    await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+    expect(document.querySelector('[aria-label="Projects"]')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+    expect(onClose).toHaveBeenCalledOnce();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  }
 });

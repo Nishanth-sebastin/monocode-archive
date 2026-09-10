@@ -1,4 +1,5 @@
 import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
+import { ContextCheckbox } from "./InboxContextPicker";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -91,6 +92,7 @@ const indexByCwd = new Map<string, GitDiffIndex>();
 const prByCwd = new Map<string, GitPr | null>();
 
 type Props = {
+  sourceSessionId?: string;
   cwd: string;
   enabled: boolean;
   textHarness?: HarnessId;
@@ -103,6 +105,7 @@ type Props = {
 };
 
 export function GitChangesPanel({
+  sourceSessionId,
   cwd,
   enabled,
   textHarness,
@@ -164,6 +167,7 @@ export function GitChangesPanel({
       <ChangedFiles
         cwd={cwd}
         textHarness={textHarness}
+        sourceSessionId={sourceSessionId}
         index={index}
         files={files}
         selected={selectedPath}
@@ -222,6 +226,7 @@ export function GitChangesPanel({
 function ChangedFiles({
   cwd,
   textHarness,
+  sourceSessionId,
   index,
   files,
   selected,
@@ -234,6 +239,7 @@ function ChangedFiles({
 }: {
   cwd: string;
   textHarness?: HarnessId;
+  sourceSessionId?: string;
   index: GitDiffIndex | null;
   files: GitChangedFile[];
   selected?: string;
@@ -520,8 +526,13 @@ function ChangedFiles({
           "A selected change is no longer available. Select changes again.",
         );
       const context = await contextFromChanges(cwd, selections);
-      if (generation === contextGeneration.current)
-        requestAgentContext({ context, cwd, prepareInSource });
+      if (generation === contextGeneration.current) {
+        requestAgentContext({ context, cwd, sourceSessionId, prepareInSource, onPrepared: () => {
+          if (generation !== contextGeneration.current) return;
+          setContextSelected(new Set());
+          setSelectingContext(false);
+        } });
+      }
     } catch (reason) {
       if (generation === contextGeneration.current)
         setContextError(String(reason));
@@ -534,60 +545,22 @@ function ChangedFiles({
     <aside
       className={`flex min-h-0 min-w-0 flex-col ${fill ? "flex-1" : "shrink-0"}`}
     >
-      <div className="flex flex-wrap items-center gap-2 border-b border-content/10 px-3 py-1.5 text-[12px]">
-        <button
-          type="button"
-          aria-pressed={selectingContext}
-          onClick={() => setSelectingContext((value) => !value)}
-        >
-          Select changes
-        </button>
-        {contextSelected.size ? (
-          <>
-            <span>{contextSelected.size} selected</span>
-            <button
-              type="button"
-              disabled={contextBusy}
-              className="underline disabled:opacity-40"
-              onClick={() => void prepareSelected(true)}
-            >
-              {contextBusy ? "Preparing…" : "Add to chat"}
-            </button>
-            <details>
-              <summary
-                aria-label="More selected change actions"
-                className="cursor-pointer"
-              >
-                …
-              </summary>
-              <button
-                type="button"
-                disabled={contextBusy}
-                className="underline"
-                onClick={() => void prepareSelected(false)}
-              >
-                Send to agent…
-              </button>
-            </details>
-            <button
-              type="button"
-              onClick={() => {
-                contextGeneration.current++;
-                setContextSelected(new Set());
-                setSelectingContext(false);
-                setContextBusy(false);
-                setContextError("");
-              }}
-            >
-              Cancel selection
-            </button>
-          </>
-        ) : null}
-        {contextError ? (
-          <p role="alert" className="w-full text-red-400">
-            {contextError}
-          </p>
-        ) : null}
+      <div className="flex flex-wrap items-center gap-1 border-b border-content/10 px-2 py-1 text-[12px]">
+        {selectingContext ? <span className="min-w-0 flex-1 px-1 text-content/50">{contextSelected.size ? `${contextSelected.size} selected` : "Select files"}</span> : null}
+        {selectingContext && contextSelected.size > 0 ? <>
+          <button type="button" disabled={contextBusy} className="h-7 rounded-md px-2 text-content/80 hover:bg-content/5 disabled:opacity-40" onClick={() => void prepareSelected(true)}>
+            {contextBusy ? "Loading…" : "Add to chat"}
+          </button>
+          <button type="button" disabled={contextBusy} className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5 disabled:opacity-40" onClick={() => void prepareSelected(false)}>Send to agent…</button>
+        </> : null}
+        <button type="button" aria-pressed={selectingContext} className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5" onClick={() => {
+          contextGeneration.current++;
+          setContextSelected(new Set());
+          setSelectingContext(value => !value);
+          setContextBusy(false);
+          setContextError("");
+        }}>{selectingContext ? "Done" : "Select changes"}</button>
+        {contextError ? <p role="alert" className="w-full px-1 text-red-400">{contextError}</p> : null}
       </div>
       <div className="shrink-0 border-b border-content/10 p-2">
         <div className="relative">
@@ -1313,7 +1286,7 @@ function ChangeRow({
             : "text-content hover:bg-content/5"
         }`}
       >
-        {contextSelection ? <input type="checkbox" aria-label={`Select ${kind} ${file.relative}`} checked={contextSelection.selected.has(JSON.stringify([file.relative, kind]))} onChange={() => contextSelection.toggle(file.relative, kind)} /> : null}
+        {contextSelection ? <ContextCheckbox label={`Select ${kind} ${file.relative}`} checked={contextSelection.selected.has(JSON.stringify([file.relative, kind]))} onChange={() => contextSelection.toggle(file.relative, kind)} /> : null}
         <button
           type="button"
           title={file.relative}

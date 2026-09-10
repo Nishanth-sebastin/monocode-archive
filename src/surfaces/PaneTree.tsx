@@ -34,8 +34,10 @@ import {
 } from "../lib/session";
 import { FilePane } from "./FilePane";
 import { SessionPane } from "./SessionPane";
+import { SessionSurface } from "./SessionSurface";
 
 type Shared = {
+  sessionPortal?: { sessionId: string; host: HTMLElement };
   visible: boolean;
   sessions: Session[];
   editorPanes: EditorPane[];
@@ -79,6 +81,7 @@ type Shared = {
   onQueuedMessageEditingChange: (sessionId: string, messageId?: string) => void;
   onSteerQueuedMessage: (sessionId: string, messageId: string) => void;
   onResumeQueue: (sessionId: string) => void;
+  onAddIssues?: (sessionId: string) => void;
   onInboxCardDismiss?: (sessionId: string, fileId?: string) => void;
   onNoteCardDismiss?: (sessionId: string) => void;
   onHandoffCardDismiss?: (sessionId: string) => void;
@@ -133,6 +136,7 @@ type PaneDrag = {
 const DRAG_THRESHOLD = 5;
 
 function PaneTreeComponent({
+  sessionPortal,
   visible,
   layout,
   sessions,
@@ -165,6 +169,7 @@ function PaneTreeComponent({
   onQueuedMessageEditingChange,
   onSteerQueuedMessage,
   onResumeQueue,
+  onAddIssues,
   onInboxCardDismiss,
   onNoteCardDismiss,
   onHandoffCardDismiss,
@@ -344,6 +349,7 @@ function PaneTreeComponent({
                 onTerminalMetaChange={onTerminalMetaChange}
               />
             ) : session ? (
+              <SessionSurface host={sessionPortal?.sessionId === session.id ? sessionPortal.host : undefined}>
               <SessionPane
                 session={session}
                 reviewUndoLocked={sessions.some(
@@ -355,8 +361,8 @@ function PaneTreeComponent({
                       sessionWorkCwd(session),
                     ),
                 )}
-                visible={visible}
-                focused={focusedId === session.id}
+                visible={visible || sessionPortal?.sessionId === session.id}
+                focused={focusedId === session.id || sessionPortal?.sessionId === session.id}
                 addToChatTarget={addToChatSessionId === session.id}
                 inSplit={inSplit}
                 composerFocused={composerFocused}
@@ -377,6 +383,7 @@ function PaneTreeComponent({
                 onQueuedMessageEditingChange={onQueuedMessageEditingChange}
                 onSteerQueuedMessage={onSteerQueuedMessage}
                 onResumeQueue={onResumeQueue}
+                onAddIssues={onAddIssues}
                 onInboxCardDismiss={onInboxCardDismiss}
                 onNoteCardDismiss={onNoteCardDismiss}
                 onHandoffCardDismiss={onHandoffCardDismiss}
@@ -391,6 +398,7 @@ function PaneTreeComponent({
                 onNewTerminal={onNewTerminal}
                 onPaneDragStart={onPaneDragStart}
               />
+              </SessionSurface>
             ) : null}
           </div>
         );
@@ -418,7 +426,7 @@ function PaneTreeComponent({
 
 export const PaneTree = memo(
   PaneTreeComponent,
-  (previous, next) => !previous.visible && !next.visible,
+  (previous, next) => !previous.visible && !next.visible && !previous.sessionPortal && !next.sessionPortal,
 );
 
 function PaneDropHint({ edge }: { edge: PaneEdge }) {

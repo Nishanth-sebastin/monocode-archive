@@ -8,7 +8,10 @@ import {
   saveExpanded,
 } from "../lib/fileTree";
 import type { FsEntry } from "../lib/fs";
+import { contextFromFiles, contextFromText, requestAgentContext } from "../lib/agentContext";
 import { FileTree } from "./FileTree";
+
+vi.mock("../lib/agentContext", async (original) => ({ ...(await original<typeof import("../lib/agentContext")>()), contextFromFiles: vi.fn(), requestAgentContext: vi.fn() }));
 
 const { iconRender, directories } = vi.hoisted(() => ({
   iconRender: vi.fn(),
@@ -124,4 +127,18 @@ describe("FileTree render isolation", () => {
     expect(row("added.ts")).not.toBeNull();
     expect(row("first.ts")).toBeNull();
   });
+});
+
+it("retains the initiating conversation across a slow capture and focus change", async () => {
+  let finish!: (context: ReturnType<typeof contextFromText>) => void;
+  vi.mocked(contextFromFiles).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  props = { ...props, sourceSessionId: "original" };
+  await act(async () => render());
+  await act(async () => row("first.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 })));
+  const add = [...document.querySelectorAll("button")].find(button => button.textContent?.trim() === "Add to chat")!;
+  await act(async () => add.click());
+  props = { ...props, sourceSessionId: "other" };
+  await act(async () => render(1));
+  await act(async () => finish(contextFromText("first.ts", "snapshot", cwd)));
+  expect(requestAgentContext).toHaveBeenCalledWith(expect.objectContaining({ sourceSessionId: "original", prepareInSource: true }));
 });

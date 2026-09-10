@@ -98,3 +98,10 @@ describe("acknowledgeQuoteRequest", () => {
     expect(acknowledgeQuoteRequest(current, 1)).toBe(current);
   });
 });
+
+it("keeps selected-response provenance outside the bounded quote", () => {
+  const result = consumeQuoteRequest("Draft", null, { id: 1, text: "x".repeat(33_000), origin: "session original · response reply-2 · codex · /worktree" });
+  expect(result.draft).toContain("Draft\n\n> ");
+  expect(result.draft).toContain("Source: session original · response reply-2 · codex · /worktree");
+  expect(result.draft).toContain("Selected context truncated");
+});

@@ -108,7 +108,7 @@ type Props = {
   model?: string;
   pendingQuestion?: boolean;
   onApproval?: (requestId: number, decision: ApprovalDecision) => void;
-  onAddToChat?: (text: string) => void;
+  onAddToChat?: (text: string, responseId?: string) => void;
   onSendToAgent?: (text: string, responseId?: string) => void;
   onSaveNote?: (text: string) => void;
   onOpenFile?: (path: string) => void;
@@ -947,10 +947,11 @@ function UserMessageBlock({
   const [expanded, setExpanded] = useState(false);
   const [overflows, setOverflows] = useState(false);
   const [singleLine, setSingleLine] = useState(false);
-  const textRef = useRef<HTMLPreElement>(null);
+  const textRef = useRef<HTMLDivElement>(null);
   const card = block.secondOpinion;
   const note = block.noteCard;
   const text = card && card.kind !== "handoff" ? "" : block.text;
+  const formatted = /(?:^|\n)`{3,}/.test(text) || text.startsWith("> Selected reference material.");
   const chat = layout === "chat";
   const textOnly =
     Boolean(text) && !block.attachments?.length && !card && !note;
@@ -1013,7 +1014,9 @@ function UserMessageBlock({
             : "rounded-lg border border-content/10"
         }`}
         style={{ zIndex: stickyIndex }}
-        onClick={overflows ? toggle : undefined}
+        onClick={overflows ? (event) => {
+          if (!(event.target as Element).closest("button, a, input, textarea, summary")) toggle();
+        } : undefined}
       >
         {block.attachments?.length ? (
           <div
@@ -1035,12 +1038,12 @@ function UserMessageBlock({
           </div>
         ) : null}
         {text ? (
-          <pre
+          <div
             ref={textRef}
-            className={`min-w-0 whitespace-pre-wrap break-words font-sans text-sm ${expanded ? "" : "line-clamp-4"}`}
+            className={`min-w-0 break-words font-sans text-sm ${formatted ? expanded ? "" : "max-h-64 overflow-hidden" : `whitespace-pre-wrap ${expanded ? "" : "line-clamp-4"}`}`}
           >
-            {text}
-          </pre>
+            {formatted ? <AgentMarkdown text={text} textOnly /> : text}
+          </div>
         ) : null}
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { languageFromFileName } from "../lib/editorSelection";
 import { code } from "@streamdown/code";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
@@ -84,22 +85,6 @@ const FileOpenContext = createContext<{
 }>({});
 
 const RemoteMediaContext = createContext(false);
-
-const LANGUAGE_FROM_EXT: Record<string, string> = {
-  sh: "bash",
-  zsh: "bash",
-  py: "python",
-  rb: "ruby",
-  rs: "rust",
-  ts: "typescript",
-  js: "javascript",
-  md: "markdown",
-  yml: "yaml",
-  cs: "csharp",
-  cpp: "cpp",
-  cc: "cpp",
-  cxx: "cpp",
-};
 
 const LANGUAGE_FILE_NAMES: Record<string, string> = {
   bash: "code.sh",
@@ -634,16 +619,6 @@ function MarkdownCodePath({ path }: { path: string }) {
       {path}
     </button>
   );
-}
-
-function languageFromFileName(fileName: string): string {
-  const lower = fileName.toLowerCase();
-  if (lower === "dockerfile") return "dockerfile";
-  if (lower === "makefile") return "makefile";
-  const ext = lower.includes(".")
-    ? lower.slice(lower.lastIndexOf(".") + 1)
-    : lower;
-  return LANGUAGE_FROM_EXT[ext] ?? ext;
 }
 
 function fileNameForLanguage(language: string): string {

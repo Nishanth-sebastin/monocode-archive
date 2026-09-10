@@ -181,6 +181,14 @@ export type RuntimeMode =
 
 /** One GitHub issue or pull request associated with a coding session. */
 export type LinkedWorkItem = {
+  provider?: import("./githubTasks").InboxProvider;
+  account?: string;
+  identifier?: string;
+  title?: string;
+  /** Captured ticket context, retained after sending and reopening. */
+  context?: string;
+  /** Extra explicit links, stored with the existing primary link. */
+  additionalItems?: LinkedWorkItem[];
   kind: "issue" | "pr";
   repo: string;
   number: number;
@@ -397,6 +405,6 @@ export function sessionWorkCwd(session: {
 
 /** Only replace an unused conversation; prepared context already belongs to it. */
 export function isBlankSession(session: Session | undefined): boolean {
-  if (!session || session.busy || session.contextDraft || session.inboxCard || session.noteCard || session.handoffCard || session.composerSeed?.trim()) return false;
+  if (!session || session.busy || session.linkedWorkItem || session.contextDraft || session.inboxCard || session.noteCard || session.handoffCard || session.composerSeed?.trim()) return false;
   return !session.blocks.some(block => block.role === "user");
 }

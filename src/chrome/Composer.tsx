@@ -150,7 +150,8 @@ type Props = {
   initialDraft?: string;
   inboxCard?: InboxComposerCard;
   contextDraft?: AgentContext;
-  onContextDismiss?: () => void;
+  hideTicketCards?: boolean;
+  onContextDismiss?: (entryId?: string) => void;
   noteCard?: NoteComposerCard;
   handoffCard?: HandoffComposerCard;
   question?: UserQuestionPrompt;
@@ -407,6 +408,7 @@ export function Composer({
   initialDraft,
   inboxCard,
   contextDraft,
+  hideTicketCards = false,
   onContextDismiss,
   noteCard,
   handoffCard,
@@ -1243,8 +1245,8 @@ export function Composer({
                 `${HARNESS_TITLE[harness]} does not support attachments. Choose another agent or remove the files.`}
             </p>
           ) : null}
-          {contextDraft ? <AgentContextChips context={contextDraft} onDismiss={onContextDismiss} /> : null}
-          {inboxCard ? (
+          {contextDraft ? <AgentContextChips context={hideTicketCards ? { ...contextDraft, entries: contextDraft.entries.filter(entry => !entry.ticket) } : contextDraft} onDismiss={onContextDismiss} /> : null}
+          {inboxCard && !hideTicketCards ? (
             <InboxMiniCard
               card={inboxCard}
               onDismiss={() => onInboxCardDismiss?.()}
