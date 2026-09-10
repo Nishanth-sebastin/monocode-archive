@@ -346,25 +346,25 @@ fn sanitize_log(raw: &str) -> String {
                 }
                 return "[redacted private key]".to_string();
             }
+            let normalized = lower.replace(['-', '_', ' '], "");
             if [
                 "token",
                 "password",
                 "authorization",
                 "secret",
-                "private key",
+                "privatekey",
                 "connectionstring",
-                "api_key",
                 "apikey",
                 "accountkey",
                 "sig=",
-                "ghp_",
-                "github_pat_",
+                "ghp",
+                "githubpat",
                 "eyj",
                 "akia",
                 "azdo",
             ]
             .iter()
-            .any(|word| lower.contains(word))
+            .any(|word| normalized.contains(word))
                 || (line.contains("://") && line.contains('@'))
             {
                 "[redacted sensitive line]".to_string()
@@ -563,5 +563,13 @@ mod tests {
             "Failure\n[redacted sensitive line]\n[redacted sensitive line]\nexpected 1, got 2"
         );
         assert!(sanitize_log(&"x".repeat(100_000)).len() <= 32_000);
+        for line in [
+            "X-Api-Key: abc123",
+            "API_KEY=credential",
+            "private_key=credential",
+            "Connection-String=credential",
+        ] {
+            assert_eq!(sanitize_log(line), "[redacted sensitive line]");
+        }
     }
 }
