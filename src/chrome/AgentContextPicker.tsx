@@ -43,7 +43,7 @@ export function AgentContextPicker({
     request.context.entries.length > 0 &&
     request.context.entries.every((entry) => !!entry.ticket);
   const [destination, setDestination] = useState(
-    request.sourceSessionId ?? "new",
+    request.requireDestinationSelection ? "" : request.sourceSessionId ?? "new",
   );
   const [fresh, setFresh] = useState(() => newDefaultSession(request.cwd));
   const [search, setSearch] = useState("");
@@ -97,7 +97,9 @@ export function AgentContextPicker({
     destination === "new"
       ? fresh
       : available.find((session) => session.id === destination);
-  const unsupported = !target
+  const unsupported = !destination
+    ? "Choose an agent conversation or a new conversation."
+    : !target
     ? "Conversation closed. Choose another."
     : !tickets &&
         request.context.attachments.length &&

@@ -1,0 +1,569 @@
+//! Read-only Azure Repos inspection through the shared app-host Azure connection.
+use crate::azure::{component, request, require_config, AzureConfig};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tauri::AppHandle;
+
+const PAGE_SIZE: usize = 50;
+
+// Local Git stays on the checkout's execution host; credentials never leave it.
+#[tauri::command]
+pub async fn azure_pr_remotes(cwd: String, branch: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = crate::fs::expand_home(&cwd);
+        let head =
+            crate::fs::git_command_output(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+        if !head.status.success() || String::from_utf8_lossy(&head.stdout).trim() != branch {
+            return Err(
+                "Working branch changed or is detached. Refresh Changes before discovering PRs."
+                    .into(),
+            );
+        }
+        let output = crate::fs::git_command_output(
+            &root,
+            &["config", "--get-regexp", r"^remote\..*\.url$"],
+        )?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err("Cannot read this checkout's Git remotes.".into());
+        }
+        if output.stdout.len() > 64 * 1024 {
+            return Err("Too many Git remotes. Link a PR manually.".into());
+        }
+        let rows: Vec<_> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (key, raw) = line.split_once(char::is_whitespace)?;
+                let name = key.strip_prefix("remote.")?.strip_suffix(".url")?;
+                Some(json!({"name":name,"url":safe_azure_remote(raw.trim())?}))
+            })
+            .take(21)
+            .collect();
+        Ok(json!({"items":rows.iter().take(20).collect::<Vec<_>>(),"more":rows.len()>20}))
+    })
+    .await
+    .map_err(|_| "Git remote discovery task failed")?
+}
+
+fn safe_azure_remote(raw: &str) -> Option<String> {
+    if raw.len() > 2048 || raw.chars().any(char::is_control) {
+        return None;
+    }
+    if raw.starts_with("git@ssh.dev.azure.com:v3/") {
+        return Some(raw.into());
+    }
+    let mut url = tauri::Url::parse(raw).ok()?;
+    let host = url.host_str()?;
+    if !((url.scheme() == "https"
+        && (host == "dev.azure.com" || host.ends_with(".visualstudio.com")))
+        || (url.scheme() == "ssh" && host == "ssh.dev.azure.com" && url.username() == "git"))
+        || url.port().is_some()
+    {
+        return None;
+    }
+    url.set_password(None).ok()?;
+    if url.scheme() == "https" {
+        url.set_username("").ok()?;
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+fn story_pr_link(site: &str, relation: &Value) -> Option<String> {
+    let raw = relation["url"].as_str()?;
+    if relation["rel"] == "ArtifactLink" {
+        let artifact = raw
+            .strip_prefix("vstfs:///Git/PullRequestId/")?
+            .replace("%2F", "/")
+            .replace("%2f", "/");
+        let ids: Vec<_> = artifact.split('/').collect();
+        if ids.len() != 3 || ids[2].parse::<u32>().ok().filter(|n| *n > 0).is_none() {
+            return None;
+        }
+        Some(format!(
+            "{}/{}/_git/{}/pullrequest/{}",
+            site,
+            component(ids[0]),
+            component(ids[1]),
+            ids[2]
+        ))
+    } else if relation["rel"] == "Hyperlink" {
+        Some(raw.to_string())
+    } else {
+        None
+    }
+}
+
+/// Read a story's actual links, without following provider-controlled URLs.
+#[tauri::command]
+pub async fn azure_pr_story_links(
+    app: AppHandle,
+    provider: String,
+    url: String,
+    site: String,
+    account_id: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &site)?;
+        checked_account(&config, &account_id)?;
+        let story = tauri::Url::parse(&url).map_err(|_| "Invalid linked story URL")?;
+        if story.scheme() != "https" || !story.username().is_empty() || story.password().is_some() || story.port().is_some() || story.query().is_some() || story.fragment().is_some() {
+            return Err("Invalid linked story URL".into());
+        }
+        let parts: Vec<_> = story.path().split('/').filter(|part| !part.is_empty()).collect();
+        let links = if provider == "azure" {
+            let prefix = format!("{}/", config.site);
+            if !url.starts_with(&prefix) || parts.len() != 5 || parts[2] != "_workitems" || parts[3] != "edit" {
+                return Err("This story belongs to a different Azure organization. Reconnect to discover its links.".into());
+            }
+            let item = crate::azure::item(&config, parts[4])?;
+            item["relations"].as_array().cloned().unwrap_or_default().iter().filter_map(|relation| story_pr_link(&config.site, relation)).collect::<Vec<_>>()
+        } else if provider == "jira" {
+            if parts.len() != 2 || parts[0] != "browse" || parts[1].len() > 128 || !parts[1].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                return Err("Invalid linked Jira story URL".into());
+            }
+            let jira_site = story.origin().ascii_serialization();
+            let jira = crate::jira::require_config(&app, &jira_site)?;
+            let response = crate::jira::request(&jira, &format!("issue/{}/remotelink", parts[1]), &[])?;
+            let current = crate::jira::require_config(&app, &jira_site)?;
+            if current.email != jira.email || current.token != jira.token { return Err("Jira connection changed. Discover story links again.".into()); }
+            response.as_array().ok_or("Jira returned an invalid story link list")?.iter().filter_map(|row| row["object"]["url"].as_str().map(String::from)).collect()
+        } else { return Err("Story provider does not expose Azure PR links here. Use captured story references or branch matches.".into()); };
+        checked_account(&require_config(&app, &site)?, &account_id)?;
+        Ok(json!({"links":links.iter().filter(|url| url.len()<=2048).take(50).collect::<Vec<_>>(),"more":links.len()>50}))
+    }).await.map_err(|_| "Story PR discovery task failed")?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrTarget {
+    site: String,
+    account_id: String,
+    project: String,
+    repository: String,
+    number: u32,
+}
+
+fn segment(value: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.len() > 256
+        || value.chars().any(char::is_control)
+        || matches!(value, "." | "..")
+    {
+        return Err("Choose an Azure project and repository".into());
+    }
+    Ok(component(value))
+}
+
+fn checked_account(config: &AzureConfig, account_id: &str) -> Result<(), String> {
+    if account_id.is_empty() || account_id != config.account_id {
+        return Err("Azure account changed. Refresh and choose the PR again.".into());
+    }
+    Ok(())
+}
+
+fn get(config: &AzureConfig, path: &str, query: &[(&str, String)]) -> Result<Value, String> {
+    let mut query = query.to_vec();
+    query.push(("api-version", "7.1".into()));
+    request(config, path, &query, None).map_err(|error| {
+        if error.contains("denied access") {
+            "Azure denied this PR read. Check Code (Read) and repository permissions; other Azure features remain available.".into()
+        } else if error.starts_with("Azure project, query or item is unavailable") {
+            "Azure PR, repository or branch is unavailable. Check the linked target and permissions, or open it in Azure.".into()
+        } else {
+            error
+        }
+    })
+}
+
+fn repository_path(project: &str, repository: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}/_apis/git/repositories/{}",
+        segment(project)?,
+        segment(repository)?
+    ))
+}
+
+fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    value[key]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| format!("Azure returned a PR without {key}. Refresh or open it in Azure."))
+}
+
+fn revision(pr: &Value) -> Result<String, String> {
+    let source = text(&pr["lastMergeSourceCommit"], "commitId")?;
+    let target = text(&pr["lastMergeTargetCommit"], "commitId")?;
+    Ok(format!(
+        "{source}:{target}:{}:{}",
+        text(pr, "sourceRefName")?,
+        text(pr, "targetRefName")?
+    ))
+}
+
+fn verify_pr(pr: &Value, project: &str, repository: &str, number: u32) -> Result<(), String> {
+    if pr["repository"]["id"] != repository
+        || pr["repository"]["project"]["id"] != project
+        || pr["pullRequestId"] != number
+    {
+        return Err("Azure PR identity changed. Choose the repository and PR again.".into());
+    }
+    Ok(())
+}
+
+fn page(value: &Value, key: &str, skip: u32, server_paged: bool) -> Result<Value, String> {
+    let rows = value[key]
+        .as_array()
+        .ok_or("Azure returned an invalid PR detail list")?;
+    let start = if server_paged { 0 } else { skip as usize };
+    let items: Vec<_> = rows.iter().skip(start).take(PAGE_SIZE).cloned().collect();
+    let more = if server_paged {
+        rows.len() >= PAGE_SIZE
+    } else {
+        rows.len() > start + PAGE_SIZE
+    };
+    Ok(json!({"items":items,"nextSkip": if more { Some(skip + PAGE_SIZE as u32) } else { None }}))
+}
+
+fn check_skip(skip: u32) -> Result<(), String> {
+    if skip > 10_000 {
+        return Err("PR detail limit reached. Open the remaining context in Azure.".into());
+    }
+    Ok(())
+}
+
+fn summary(pr: &Value) -> Result<Value, String> {
+    let number = pr["pullRequestId"]
+        .as_u64()
+        .filter(|id| *id > 0 && *id <= i32::MAX as u64)
+        .ok_or("Azure returned an invalid PR number")?;
+    let reviewers = pr["reviewers"].as_array().map(|rows| rows.iter().take(50).map(|row| json!({
+        "id":row["id"].as_str().unwrap_or("unknown"),
+        "displayName":row["displayName"].as_str().unwrap_or("Unknown reviewer"),
+        "vote":row["vote"].as_i64().unwrap_or(0),"isRequired":row["isRequired"].as_bool().unwrap_or(false),
+    })).collect::<Vec<_>>()).unwrap_or_default();
+    Ok(json!({
+        "pullRequestId":number,"title":text(pr,"title")?.chars().take(500).collect::<String>(),
+        "status":pr["status"].as_str().unwrap_or("unknown"),"isDraft":pr["isDraft"].as_bool().unwrap_or(false),
+        "sourceRefName":text(pr,"sourceRefName")?,"targetRefName":text(pr,"targetRefName")?,
+        "lastMergeSourceCommit":pr["lastMergeSourceCommit"],"lastMergeTargetCommit":pr["lastMergeTargetCommit"],
+        "reviewers":reviewers,
+    }))
+}
+
+/// Resolve names only within the explicitly chosen organization/project, then return stable IDs.
+#[tauri::command]
+pub async fn azure_pr_list(
+    app: AppHandle,
+    target: PrTarget,
+    branch: String,
+    skip: u32,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        check_skip(skip)?;
+        let config = require_config(&app, &target.site)?;
+        checked_account(&config, &target.account_id)?;
+        let repo = get(&config, &repository_path(&target.project, &target.repository)?, &[])?;
+        let repository = text(&repo, "id")?;
+        let project = text(&repo["project"], "id")?;
+        let path = repository_path(project, repository)?;
+        let mut result = if target.number > 0 {
+            let pr = get(&config, &format!("{path}/pullRequests/{}", target.number), &[])?;
+            verify_pr(&pr, project, repository, target.number)?;
+            json!({"items":[pr],"nextSkip":null})
+        } else {
+            if branch.is_empty() || branch.len() > 1024 || branch.chars().any(char::is_control) {
+                return Err("Enter a branch or link a specific PR".into());
+            }
+            let branch = if branch.starts_with("refs/heads/") { branch } else { format!("refs/heads/{branch}") };
+            let response = get(&config, &format!("{path}/pullRequests"), &[
+                ("searchCriteria.sourceRefName", branch),
+                ("searchCriteria.status", "all".into()),
+                ("$top", PAGE_SIZE.to_string()),
+                ("$skip", skip.to_string()),
+            ])?;
+            page(&response, "value", skip, true)?
+        };
+        if let Some(items) = result["items"].as_array_mut() {
+            for item in items {
+                let number = item["pullRequestId"].as_u64().and_then(|id| u32::try_from(id).ok()).ok_or("Azure returned an invalid PR number")?;
+                verify_pr(item, project, repository, number)?;
+                *item = summary(item)?;
+            }
+        }
+        // Never return a result under a newly selected account after a reconnect.
+        checked_account(&require_config(&app, &target.site)?, &target.account_id)?;
+        result["target"] = json!({"site":config.site,"accountId":config.account_id,"project":project,"repository":repository,"number":target.number});
+        result["repositoryName"] = repo["name"].clone();
+        result["projectName"] = repo["project"]["name"].clone();
+        Ok(result)
+    }).await.map_err(|_| "Azure PR lookup task failed")?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PrSection {
+    Summary,
+    Threads,
+    Iterations,
+    Changes,
+    Policies,
+    Statuses,
+    File,
+}
+
+/// Each on-demand section fails independently. Snapshot reads verify both sides of the read.
+#[tauri::command]
+pub async fn azure_pr_read(
+    app: AppHandle,
+    target: PrTarget,
+    section: PrSection,
+    expected_revision: Option<String>,
+    iteration: Option<u32>,
+    file_path: Option<String>,
+    skip: u32,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        check_skip(skip)?;
+        if target.number == 0 {
+            return Err("Choose a PR first".into());
+        }
+        let config = require_config(&app, &target.site)?;
+        checked_account(&config, &target.account_id)?;
+        let path = format!(
+            "{}/pullRequests/{}",
+            repository_path(&target.project, &target.repository)?,
+            target.number
+        );
+        let pr = get(&config, &path, &[])?;
+        verify_pr(&pr, &target.project, &target.repository, target.number)?;
+        let current = revision(&pr)?;
+        if expected_revision
+            .as_ref()
+            .is_some_and(|expected| expected != &current)
+        {
+            return Err("PR revision changed. Refresh before selecting or sending context.".into());
+        }
+        let mut result = match section {
+            PrSection::File => {
+                if pr.get("forkSource").is_some_and(|fork| !fork.is_null()) {
+                    return Err("Fork file content is available in Azure. Cross-repository content is not substituted.".into());
+                }
+                let iteration = iteration.filter(|id| *id > 0).ok_or("Choose a PR iteration")?;
+                let selected = file_path.as_deref().filter(|path| !path.is_empty() && path.len() <= 4096).ok_or("Choose a changed file")?;
+                let changes = get(&config, &format!("{path}/iterations/{iteration}/changes"), &[
+                    ("$top", PAGE_SIZE.to_string()), ("$skip", skip.to_string()), ("$compareTo", "0".into()),
+                ])?;
+                let change = changes["changeEntries"].as_array().and_then(|rows| rows.iter().take(PAGE_SIZE).find(|row| row["item"]["path"] == selected)).ok_or("File is no longer in the selected change page. Refresh changes.")?;
+                let commits = get(&config, &format!("{path}/iterations/{iteration}"), &[])?;
+                let kind = text(change, "changeType")?.to_ascii_lowercase();
+                let source = text(&commits["sourceRefCommit"], "commitId")?;
+                let base = text(&commits["commonRefCommit"], "commitId")?;
+                let old_path = change["originalPath"].as_str().or(change["sourceServerItem"].as_str()).unwrap_or(selected);
+                let repo_path = repository_path(&target.project, &target.repository)?;
+                let original = if kind.split(',').any(|flag| flag.trim() == "add") { String::new() } else { file_text(&config, &repo_path, old_path, base)? };
+                let modified = if kind.split(',').any(|flag| flag.trim() == "delete") { String::new() } else { file_text(&config, &repo_path, selected, source)? };
+                json!({"path":selected,"originalPath":old_path,"original":original,"modified":modified,"sourceCommit":source,"baseCommit":base,"iteration":iteration})
+            }
+            PrSection::Summary => json!({"pr":summary(&pr)?}),
+            PrSection::Threads | PrSection::Iterations => {
+                let suffix = if matches!(section, PrSection::Threads) {
+                    "threads"
+                } else {
+                    "iterations"
+                };
+                // These Azure endpoints do not offer server paging. The shared transport caps bytes;
+                // only one visible page is retained by the caller. Oversize reads offer Open in Azure.
+                page(
+                    &get(&config, &format!("{path}/{suffix}"), &[])?,
+                    "value",
+                    skip,
+                    false,
+                )?
+            }
+            PrSection::Changes => {
+                let iteration = iteration
+                    .filter(|id| *id > 0)
+                    .ok_or("Choose a PR iteration")?;
+                let response = get(
+                    &config,
+                    &format!("{path}/iterations/{iteration}/changes"),
+                    &[
+                        ("$top", PAGE_SIZE.to_string()),
+                        ("$skip", skip.to_string()),
+                        ("$compareTo", "0".into()),
+                    ],
+                )?;
+                let mut result = page(&response, "changeEntries", skip, true)?;
+                result["nextSkip"] = response["nextSkip"]
+                    .as_u64()
+                    .filter(|n| *n > skip as u64)
+                    .map_or(Value::Null, |n| json!(n));
+                result
+            }
+            PrSection::Policies => {
+                let response = request(
+                    &config,
+                    &format!("{}/_apis/policy/evaluations", segment(&target.project)?),
+                    &[
+                        (
+                            "artifactId",
+                            format!(
+                                "vstfs:///CodeReview/CodeReviewId/{}/{}",
+                                target.project, target.number
+                            ),
+                        ),
+                        ("api-version", "7.1-preview.1".into()),
+                        ("$top", PAGE_SIZE.to_string()),
+                        ("$skip", skip.to_string()),
+                    ],
+                    None,
+                )?;
+                page(&response, "value", skip, true)?
+            }
+            PrSection::Statuses => page(
+                &get(&config, &format!("{path}/statuses"), &[])?,
+                "value", skip, false,
+            )?,
+        };
+        if !matches!(section, PrSection::Summary) {
+            let after = get(&config, &path, &[])?;
+            verify_pr(&after, &target.project, &target.repository, target.number)?;
+            if revision(&after)? != current {
+                return Err("PR revision changed during loading. Refresh and retry.".into());
+            }
+        }
+        checked_account(&require_config(&app, &target.site)?, &target.account_id)?;
+        result["revision"] = json!(current);
+        Ok(result)
+    })
+    .await
+    .map_err(|_| "Azure PR detail task failed")?
+}
+
+fn file_text(
+    config: &AzureConfig,
+    repository: &str,
+    path: &str,
+    commit: &str,
+) -> Result<String, String> {
+    let item = get(
+        config,
+        &format!("{repository}/items"),
+        &[
+            ("path", path.into()),
+            ("versionDescriptor.versionType", "commit".into()),
+            ("versionDescriptor.version", commit.into()),
+            ("includeContent", "true".into()),
+            ("includeContentMetadata", "true".into()),
+            ("$format", "json".into()),
+        ],
+    )?;
+    preview_text(&item)
+}
+
+fn preview_text(item: &Value) -> Result<String, String> {
+    if item["isFolder"] == true || item["contentMetadata"]["isBinary"] == true {
+        return Err("Binary files and folders are available in Azure.".into());
+    }
+    let content = item["content"]
+        .as_str()
+        .ok_or("File text is unavailable. Open it in Azure.")?;
+    if content.len() > 100_000 || content.lines().count() > 5_000 || content.contains('\0') {
+        return Err(
+            "File exceeds the preview limit (100 KB / 5,000 lines). Open it in Azure.".into(),
+        );
+    }
+    Ok(content.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovers_story_prs_and_redacts_remote_credentials() {
+        assert_eq!(
+            story_pr_link(
+                "https://dev.azure.com/team",
+                &json!({"rel":"ArtifactLink","url":"vstfs:///Git/PullRequestId/project%2frepo%2F13"})
+            ),
+            Some("https://dev.azure.com/team/project/_git/repo/pullrequest/13".into())
+        );
+        assert!(story_pr_link(
+            "https://dev.azure.com/team",
+            &json!({"rel":"ArtifactLink","url":"vstfs:///Git/Commit/project/repo/13"})
+        )
+        .is_none());
+        assert!(story_pr_link(
+            "https://dev.azure.com/team",
+            &json!({"rel":"ArtifactLink","url":"vstfs:///Git/PullRequestId/project/repo/0"})
+        )
+        .is_none());
+        assert_eq!(
+            safe_azure_remote(
+                "https://user:secret@dev.azure.com/team/project/_git/repo?token=secret#secret"
+            ),
+            Some("https://dev.azure.com/team/project/_git/repo".into())
+        );
+        assert_eq!(
+            safe_azure_remote("git@ssh.dev.azure.com:v3/team/project/repo"),
+            Some("git@ssh.dev.azure.com:v3/team/project/repo".into())
+        );
+        assert!(
+            safe_azure_remote("https://dev.azure.com.evil.test/team/project/_git/repo").is_none()
+        );
+    }
+
+    #[test]
+    fn summaries_and_file_previews_reject_missing_or_oversized_content() {
+        assert!(summary(&json!({"pullRequestId":0})).is_err());
+        let summary = summary(&json!({"pullRequestId":13,"title":"Review","sourceRefName":"refs/heads/topic","targetRefName":"refs/heads/main","reviewers":null})).unwrap();
+        assert_eq!(summary["status"], "unknown");
+        assert_eq!(summary["reviewers"], json!([]));
+        assert_eq!(
+            preview_text(&json!({"content":"source\n"})).unwrap(),
+            "source\n"
+        );
+        assert!(preview_text(&json!({"content":"x".repeat(100_001)})).is_err());
+        assert!(preview_text(&json!({"content":"x\n".repeat(5_001)})).is_err());
+        assert!(
+            preview_text(&json!({"content":"binary","contentMetadata":{"isBinary":true}})).is_err()
+        );
+        assert!(preview_text(&json!({})).is_err());
+    }
+
+    #[test]
+    fn scoped_paths_revisions_and_bounded_pages() {
+        assert_eq!(
+            repository_path("Project A", "same/name").unwrap(),
+            "Project%20A/_apis/git/repositories/same%2Fname"
+        );
+        for invalid in ["", "..", ".", "bad\nname"] {
+            assert!(segment(invalid).is_err());
+        }
+        let pr = json!({"repository":{"id":"repo-a","project":{"id":"project-a"}},"pullRequestId":13,"sourceRefName":"refs/heads/topic","targetRefName":"refs/heads/main","lastMergeSourceCommit":{"commitId":"source"},"lastMergeTargetCommit":{"commitId":"target"}});
+        assert!(verify_pr(&pr, "project-a", "repo-a", 13).is_ok());
+        assert!(verify_pr(&pr, "project-b", "repo-a", 13).is_err());
+        assert!(verify_pr(&pr, "project-a", "repo-b", 13).is_err());
+        assert!(verify_pr(&pr, "project-a", "repo-a", 14).is_err());
+        assert_eq!(
+            revision(&pr).unwrap(),
+            "source:target:refs/heads/topic:refs/heads/main"
+        );
+        let mut retargeted = pr.clone();
+        retargeted["targetRefName"] = json!("refs/heads/release");
+        assert_ne!(revision(&retargeted).unwrap(), revision(&pr).unwrap());
+        assert!(revision(&json!({})).is_err());
+        let rows = json!({"value":(0..120).collect::<Vec<_>>()});
+        let first = page(&rows, "value", 0, false).unwrap();
+        let next = page(&rows, "value", 50, false).unwrap();
+        let last = page(&rows, "value", 100, false).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 50);
+        assert_eq!(next["items"][0], 50);
+        assert_eq!(last["items"].as_array().unwrap().len(), 20);
+        assert!(last["nextSkip"].is_null());
+        assert!(page(&json!({}), "value", 0, false).is_err());
+        assert!(check_skip(10_001).is_err());
+    }
+}

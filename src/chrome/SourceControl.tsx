@@ -1,8 +1,10 @@
+import type { LinkedWorkItem } from "../lib/session";
 import type { HarnessId } from "../lib/session";
 import type { GitFileDiffKind, GitHistoryCommit } from "../lib/fs";
 import { GitChangesPanel } from "./GitChangesPanel";
 
 type Props = {
+  linkedWorkItem?: LinkedWorkItem;
   sourceSessionId?: string;
   cwd: string;
   enabled: boolean;
@@ -17,6 +19,7 @@ type Props = {
 
 export function SourceControl({
   sourceSessionId,
+  linkedWorkItem,
   cwd,
   enabled,
   textHarness,
@@ -31,6 +34,7 @@ export function SourceControl({
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
       <GitChangesPanel
         sourceSessionId={sourceSessionId}
+        linkedWorkItem={linkedWorkItem}
         cwd={cwd}
         enabled={enabled}
         textHarness={textHarness}

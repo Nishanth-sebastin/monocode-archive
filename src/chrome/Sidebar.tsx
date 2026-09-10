@@ -1412,6 +1412,7 @@ function SidebarComponent({
         {tab === "changes" ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <SourceControl
+              linkedWorkItem={sessions.find((session) => session.id === activeSessionId)?.linkedWorkItem}
               sourceSessionId={activeSessionId}
               cwd={gitRoot}
               enabled={open}

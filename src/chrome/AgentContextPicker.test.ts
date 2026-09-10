@@ -248,3 +248,24 @@ it("searches saved conversations across projects", async () => {
     expect(document.querySelector('[data-destination="remote-saved"]')?.textContent).toContain("/other/project");
   } finally { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); }
 });
+
+it("requires an explicit destination when the source does not own the work", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  const onPrepare = vi.fn().mockReturnValue("chosen");
+  try {
+    await act(async () => root.render(createElement(AgentContextPicker, {
+      request: { context: contextFromText("PR review", "selected thread", "Azure PR #13"), cwd: "/project", requireDestinationSelection: true },
+      sessions: [{ id: "chosen", title: "Review owner", cwd: "/project", harness: "codex" } as Session],
+      recents: [], onPrepare, onOpen: vi.fn(), onClose: vi.fn(),
+    })));
+    const submit = () => [...document.querySelectorAll("button")].find(button => button.textContent === "Add to chat")!;
+    expect(submit().disabled).toBe(true);
+    expect(document.body.textContent).toContain("Choose an agent conversation");
+    await act(async () => (document.querySelector('[data-destination="chosen"]') as HTMLButtonElement).click());
+    expect(submit().disabled).toBe(false);
+    await act(async () => submit().click());
+    expect(onPrepare).toHaveBeenCalledWith(expect.anything(), "chosen", expect.any(AbortSignal));
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+});
