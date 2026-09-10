@@ -234,7 +234,7 @@ export function InboxContextPicker({
             <div className="min-w-0">
               <p className="text-[11px] text-content/50">
                 {item.identifier || `#${item.number}`} ·{" "}
-                {item.projectName || item.repo}
+                {item.provider === "azure" ? `${item.site?.split("/").pop()} / ` : ""}{item.projectName || item.repo}
               </p>
               <p className="mt-0.5 font-medium">{item.title}</p>
             </div>

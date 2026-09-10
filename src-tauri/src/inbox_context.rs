@@ -44,6 +44,7 @@ pub struct Document {
     files: Vec<ContextFile>,
     more: bool,
     adf: bool,
+    html: bool,
 }
 
 struct Loaded {
@@ -106,8 +107,57 @@ fn load(app: &AppHandle, ticket: &Ticket, pages: usize) -> Result<Loaded, String
         files: vec![],
         more: false,
         adf: false,
+        html: false,
     };
     let credential = match ticket.provider.as_str() {
+        "azure" => {
+            let org = url
+                .path_segments()
+                .and_then(|mut p| p.next())
+                .ok_or("Invalid Azure organization")?;
+            let site = format!("https://dev.azure.com/{org}");
+            let config = crate::azure::require_config(app, &site)?;
+            let item = crate::azure::item(&config, &ticket.id)?;
+            let project = text(&item["fields"]["System.TeamProject"]);
+            let expected = format!(
+                "{}/{}/_workitems/edit/{}",
+                config.site,
+                encode(&project),
+                ticket.id
+            );
+            if expected != ticket.url {
+                return Err("Azure work-item identity changed. Refresh and retry.".into());
+            }
+            document.owner = format!("azure:{}:{}", config.site, config.account_id);
+            document.description = json!([
+                "System.Description",
+                "Microsoft.VSTS.TCM.ReproSteps",
+                "Microsoft.VSTS.Common.AcceptanceCriteria"
+            ]
+            .iter()
+            .map(|key| text(&item["fields"][key]))
+            .collect::<Vec<_>>()
+            .join("<br><br>"));
+            document.html = true;
+            let discussion = crate::azure::comments(&config, &project, &ticket.id, pages)?;
+            let comments = discussion["comments"]
+                .as_array()
+                .ok_or("Invalid Azure comments")?;
+            document.more = discussion["more"] == true;
+            document.files = crate::azure::attachments(&config, &item, comments)
+                .iter()
+                .map(|f| ContextFile {
+                    id: text(&f["id"]),
+                    name: text(&f["name"]),
+                    url: text(&f["url"]),
+                    mime_type: text(&f["mimeType"]),
+                    size: f["size"].as_u64(),
+                    unavailable: None,
+                })
+                .collect();
+            document.comments = comments.iter().map(|c| json!({"id":c["id"].as_u64().or(c["commentId"].as_u64()).unwrap_or_default().to_string(),"body":c["renderedText"].as_str().or(c["text"].as_str()).unwrap_or_default(),"markdown":c["format"] == "markdown" && c["renderedText"].is_null(),"author":c["createdBy"]["displayName"],"createdAt":c["createdDate"],"updatedAt":c["modifiedDate"]})).collect();
+            ("Authorization".into(), config.authorization())
+        }
         "jira" => {
             let site = url.origin().ascii_serialization();
             let config = crate::jira::require_config(app, &site)?;
@@ -307,7 +357,7 @@ fn load(app: &AppHandle, ticket: &Ticket, pages: usize) -> Result<Loaded, String
         }
         _ => return Err("This Inbox provider does not support context selection yet".into()),
     };
-    if !document.adf {
+    if !document.adf && !document.html {
         let mut bodies = vec![text(&document.description)];
         bodies.extend(document.comments.iter().map(|c| text(&c["body"])));
         document.files = markdown_files(ticket, &bodies);
@@ -380,6 +430,14 @@ fn download_url(ticket: &Ticket, raw: &str) -> Result<String, String> {
     let url = https(raw)?;
     let host = url.host_str().unwrap_or_default();
     match ticket.provider.as_str() {
+        "azure" => {
+            let ticket_url = https(&ticket.url)?;
+            let org = ticket_url
+                .path_segments()
+                .and_then(|mut p| p.next())
+                .ok_or("Invalid Azure organization")?;
+            crate::azure::attachment_url(&format!("https://dev.azure.com/{org}"), raw)
+        }
         "linear" if host == "uploads.linear.app" => Ok(raw.into()),
         "github" if crate::inbox_media::allowed_github_attachment(raw) => Ok(raw.into()),
         "jira"

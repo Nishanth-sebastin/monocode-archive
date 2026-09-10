@@ -107,7 +107,7 @@ export function InboxMedia({ src, alt, load }: Props) {
   );
 }
 
-export function JiraImages({
+export function TicketImages({
   item,
   attachments,
 }: {
@@ -115,18 +115,19 @@ export function JiraImages({
   attachments: NonNullable<GithubWorkItemDetails["attachments"]>;
 }) {
   const [count, setCount] = useState(4);
+  const provider = item.provider === "azure" ? "Azure DevOps" : "Jira";
   const images = attachments.filter((file) =>
     file.mimeType.startsWith("image/"),
   );
   if (!images.length) return null;
   return (
-    <section aria-label="Jira images" className="my-4 space-y-2">
+    <section aria-label={`${provider} images`} className="my-4 space-y-2">
       <h3 className="text-[12px] font-medium text-content/55">
         Images · {images.length}
       </h3>
       <div className="grid grid-cols-1 gap-3 min-[1000px]:grid-cols-2">
         {images.slice(0, count).map((file) => (
-          <JiraImage key={file.id} item={item} file={file} />
+          <TicketImage key={file.id} item={item} file={file} />
         ))}
       </div>
       {images.length > count && count < 12 ? (
@@ -144,14 +145,14 @@ export function JiraImages({
           className="text-xs text-content/55 underline"
           onClick={() => void openUrl(item.url)}
         >
-          View remaining images in Jira
+          View remaining images in {provider}
         </button>
       ) : null}
     </section>
   );
 }
 
-function JiraImage({
+function TicketImage({
   item,
   file,
 }: {
@@ -161,13 +162,13 @@ function JiraImage({
   const load = useCallback(
     async () =>
       new Uint8Array(
-        await invoke<ArrayBuffer>("jira_image", {
+        await invoke<ArrayBuffer>(item.provider === "azure" ? "azure_image" : "jira_image", {
           site: item.site,
           id: item.id,
           attachmentId: file.id,
         }),
       ),
-    [item.site, item.id, file.id],
+    [item.provider, item.site, item.id, file.id],
   );
   return (
     <figure className="min-w-0">

@@ -2,6 +2,7 @@ mod bounded_process;
 mod wsl;
 use tauri::Manager;
 
+mod azure;
 mod chat_background;
 mod checkpoint;
 mod cursor_store;
@@ -262,6 +263,12 @@ pub fn run() {
             jira::jira_options,
             jira::jira_issue_content,
             jira::jira_image,
+            azure::azure_status,
+            azure::azure_set_config,
+            azure::azure_list_items,
+            azure::azure_options,
+            azure::azure_item_content,
+            azure::azure_image,
             linear::linear_set_token,
             linear::linear_list_teams,
             linear::linear_list_issues,

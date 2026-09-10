@@ -337,6 +337,7 @@ import {
 } from "./lib/sessionWorkItem";
 import { linearIssueDetails, peekLinearIssueDetails } from "./lib/linear";
 import { jiraDetails, peekJiraDetails } from "./lib/jira";
+import { azureDetails, peekAzureDetails } from "./lib/azure";
 import { gitlabWorkItemDetails, peekGitlabWorkItemDetails } from "./lib/gitlab";
 import {
   loadLiveAgentsEnabled,
@@ -1485,7 +1486,7 @@ export default function App({
         const cwd =
           item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
         const ref =
-          item.provider === "linear" || item.provider === "jira"
+          item.provider === "linear" || item.provider === "jira" || item.provider === "azure"
             ? item.identifier?.trim() || `#${item.number}`
             : `#${item.number}`;
         const linkedWorkItem = linkedWorkItemFromInboxItem(item);
@@ -1505,6 +1506,11 @@ export default function App({
       if (context) {
         if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
         start();
+        return;
+      }
+      if (item.provider === "azure") {
+        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
+        start(body ?? (peekAzureDetails(item) ?? await azureDetails(item)).body);
         return;
       }
       if (item.provider === "jira") {
@@ -2643,7 +2649,7 @@ export default function App({
               ? candidate
               : await invoke<string>("default_cwd");
           const description = context ? undefined :
-            item.provider === "jira"
+            item.provider === "azure" ? (peekAzureDetails(item) ?? await azureDetails(item)).body : item.provider === "jira"
               ? (peekJiraDetails(item) ?? (await jiraDetails(item))).body
               : item.provider === "linear" && item.id
                 ? (
@@ -2674,7 +2680,7 @@ export default function App({
               title: item.title,
               url: item.url,
               provider: item.provider,
-              ...(item.provider === "jira"
+              ...(item.provider === "jira" || item.provider === "azure"
                 ? {
                     site: item.site,
                     project: item.projectName,
