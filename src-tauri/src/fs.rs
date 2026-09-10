@@ -2622,7 +2622,7 @@ fn gh_stdout(root: &Path, args: &[&str]) -> Option<String> {
     gh_run(root, args, false).ok()
 }
 
-fn gh_checked(root: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn gh_checked(root: &Path, args: &[&str]) -> Result<String, String> {
     gh_run(root, args, false)
 }
 
@@ -3785,7 +3785,15 @@ fn write_attachment_sync(name: &str, data: &str) -> Result<String, String> {
         stamp,
         safe_attachment_name(name)
     ));
-    std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut file, &bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
 }
 

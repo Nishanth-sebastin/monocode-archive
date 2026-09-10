@@ -5,7 +5,10 @@ export type InboxAskContext = {
   key: string;
   title: string;
   url: string;
-  provider: "github" | "linear" | "gitlab";
+  provider: InboxItem["provider"];
+  site?: string;
+  project?: string;
+  identifier?: string;
   description?: string;
 };
 

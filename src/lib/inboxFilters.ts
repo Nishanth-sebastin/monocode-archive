@@ -55,14 +55,38 @@ export const DEFAULT_INBOX_FILTERS: InboxFilters = {
 };
 
 export type InboxSource = InboxProvider;
+export const INBOX_SOURCES: InboxSource[] = ["github", "linear", "gitlab", "jira"];
+export const INBOX_SOURCE_LABELS: Record<InboxSource, string> = {
+  github: "GitHub", linear: "Linear", gitlab: "GitLab", jira: "Jira",
+};
 
 const FILTERS_KEY = "monocode.inboxFilters";
 const SOURCE_KEY = "monocode.inboxSource";
+const VISIBLE_SOURCES_KEY = "monocode.inboxVisibleSources";
+
+export function loadVisibleInboxSources(): InboxSource[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(VISIBLE_SOURCES_KEY) ?? "null");
+    const visible = INBOX_SOURCES.filter(source => Array.isArray(saved) && saved.includes(source));
+    return visible.length ? visible : INBOX_SOURCES;
+  } catch {
+    return INBOX_SOURCES;
+  }
+}
+
+export function saveVisibleInboxSources(sources: InboxSource[]) {
+  try {
+    localStorage.setItem(VISIBLE_SOURCES_KEY, JSON.stringify(sources));
+  } catch {
+    // private mode / quota
+  }
+}
 
 export function loadInboxSource(): InboxSource {
   try {
     const raw = localStorage.getItem(SOURCE_KEY);
-    return raw === "linear" || raw === "gitlab" ? raw : "github";
+    const visible = loadVisibleInboxSources();
+    return visible.find(source => source === raw) ?? visible[0];
   } catch {
     return "github";
   }
@@ -271,8 +295,8 @@ export function applyInboxFilters(
   source?: InboxSource,
 ): InboxItem[] {
   const scoped = source ? filterInboxByProvider(items, source) : [...items];
-  const hiddenProjects = source === "linear" ? [] : filters.hiddenProjects;
-  const hiddenKinds = source === "linear" ? [] : filters.hiddenKinds;
+  const hiddenProjects = source === "linear" || source === "jira" ? [] : filters.hiddenProjects;
+  const hiddenKinds = source === "linear" || source === "jira" ? [] : filters.hiddenKinds;
   return filterInboxItems(
     filterInboxByStatus(
       filterInboxByTime(
@@ -296,7 +320,7 @@ export function statusFilterForSource(
   status: InboxStatusFilter,
   source?: InboxSource,
 ): InboxStatusFilter {
-  if (source !== "linear") return status;
+  if (source !== "linear" && source !== "jira") return status;
   return {
     open: status.open,
     closed: status.closed,

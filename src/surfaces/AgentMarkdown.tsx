@@ -366,6 +366,8 @@ const MARKDOWN_COMPONENTS = {
   img: MarkdownImage,
 } satisfies Components;
 
+const TEXT_ONLY_COMPONENTS = { ...MARKDOWN_COMPONENTS, img: () => <span className="text-content/45">[Image — select separately under Images & files]</span> } satisfies Components;
+
 export const AgentMarkdown = memo(function AgentMarkdown({
   text,
   streaming,
@@ -373,6 +375,7 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   cwd,
   onOpenFile,
   allowRemoteMedia,
+  textOnly,
 }: {
   text: string;
   streaming?: boolean;
@@ -380,6 +383,7 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   cwd?: string;
   onOpenFile?: (path: string) => void;
   allowRemoteMedia?: boolean;
+  textOnly?: boolean;
 }) {
   const fileOpen = useMemo(() => ({ cwd, onOpenFile }), [cwd, onOpenFile]);
   const remoteMedia = !!allowRemoteMedia;
@@ -388,7 +392,7 @@ export const AgentMarkdown = memo(function AgentMarkdown({
       <FileOpenContext.Provider value={fileOpen}>
         <Streamdown
           className={`agent-markdown min-w-0 font-sans text-sm leading-6 ${className ?? ""}`}
-          components={MARKDOWN_COMPONENTS}
+          components={textOnly ? TEXT_ONLY_COMPONENTS : MARKDOWN_COMPONENTS}
           controls={false}
           dir="auto"
           isAnimating={!!streaming}

@@ -8,7 +8,9 @@ mod cursor_store;
 mod fs;
 mod gitlab;
 mod harness;
+mod inbox_context;
 mod inbox_media;
+mod jira;
 mod linear;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -243,6 +245,8 @@ pub fn run() {
             fs::git_github_work_item_comment,
             fs::git_github_pr_diff,
             inbox_media::fetch_inbox_media,
+            inbox_context::inbox_context_document,
+            inbox_context::inbox_context_download,
             gitlab::gitlab_status,
             gitlab::gitlab_set_config,
             gitlab::gitlab_repo,
@@ -252,6 +256,12 @@ pub fn run() {
             gitlab::gitlab_work_item_comment,
             gitlab::gitlab_mr_diff,
             linear::linear_status,
+            jira::jira_status,
+            jira::jira_set_config,
+            jira::jira_list_issues,
+            jira::jira_options,
+            jira::jira_issue_content,
+            jira::jira_image,
             linear::linear_set_token,
             linear::linear_list_teams,
             linear::linear_list_issues,

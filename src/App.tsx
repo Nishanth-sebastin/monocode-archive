@@ -336,6 +336,7 @@ import {
   resolveLinkedWorkItem,
 } from "./lib/sessionWorkItem";
 import { linearIssueDetails, peekLinearIssueDetails } from "./lib/linear";
+import { jiraDetails, peekJiraDetails } from "./lib/jira";
 import { gitlabWorkItemDetails, peekGitlabWorkItemDetails } from "./lib/gitlab";
 import {
   loadLiveAgentsEnabled,
@@ -1476,7 +1477,7 @@ export default function App({
   ]);
 
   const onStartInboxItem = useCallback(
-    async (item: InboxItem, body?: string) => {
+    async (item: InboxItem, body?: string, context?: import("./lib/githubTasks").InboxComposerCard) => {
       const start = (description?: string) => {
         setInboxViewOpen(false);
         setNotesViewOpen(false);
@@ -1484,14 +1485,14 @@ export default function App({
         const cwd =
           item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
         const ref =
-          item.provider === "linear"
+          item.provider === "linear" || item.provider === "jira"
             ? item.identifier?.trim() || `#${item.number}`
             : `#${item.number}`;
         const linkedWorkItem = linkedWorkItemFromInboxItem(item);
         const session = {
           ...newDefaultSession(cwd, sessionDefaults?.runtimeMode),
           title: `${ref} ${item.title}`,
-          inboxCard: inboxComposerCard(item, description),
+          inboxCard: context ?? inboxComposerCard(item, description),
           ...(linkedWorkItem ? { linkedWorkItem } : {}),
         };
         const tab = newTab(session.id);
@@ -1501,6 +1502,16 @@ export default function App({
         setComposerFocused(true);
       };
 
+      if (context) {
+        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
+        start();
+        return;
+      }
+      if (item.provider === "jira") {
+        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
+        start(body ?? (peekJiraDetails(item) ?? await jiraDetails(item)).body);
+        return;
+      }
       if (item.provider !== "linear") {
         start();
         return;
@@ -1574,11 +1585,11 @@ export default function App({
     return () => window.removeEventListener(ADD_NOTE_TO_CHAT_EVENT, onAdd);
   }, [onAddNoteToChat]);
 
-  const onInboxCardDismiss = useCallback((sessionId: string) => {
+  const onInboxCardDismiss = useCallback((sessionId: string, fileId?: string) => {
     setSessions((prev) =>
       prev.map((session) =>
         session.id === sessionId && session.inboxCard
-          ? { ...session, inboxCard: undefined }
+          ? { ...session, inboxCard: fileId ? { ...session.inboxCard, attachments: session.inboxCard.attachments?.filter(file => file.id !== fileId) } : undefined }
           : session,
       ),
     );
@@ -2617,10 +2628,10 @@ export default function App({
   );
 
   const onAskInboxItem = useCallback(
-    (item: InboxItem): Promise<string> => {
+    (item: InboxItem, context?: import("./lib/githubTasks").InboxComposerCard): Promise<string> => {
       const key = inboxAskKey(item);
       const pending = openingInboxSessions.current.get(key);
-      if (pending) return pending;
+      if (pending) return context ? Promise.reject(new Error("This conversation is opening. Try again when it is ready.")) : pending;
       const opening = (async () => {
         let session = sessionsRef.current.find(
           (entry) => entry.inboxAsk?.key === key,
@@ -2631,39 +2642,55 @@ export default function App({
             candidate && candidate !== "~"
               ? candidate
               : await invoke<string>("default_cwd");
-          const description =
-            item.provider === "linear" && item.id
-              ? (
-                  peekLinearIssueDetails(item.id) ??
-                  (await linearIssueDetails(item.id))
-                ).body
-              : item.provider === "gitlab" &&
-                  (item.kind === "issue" || item.kind === "pr")
+          const description = context ? undefined :
+            item.provider === "jira"
+              ? (peekJiraDetails(item) ?? (await jiraDetails(item))).body
+              : item.provider === "linear" && item.id
                 ? (
-                    peekGitlabWorkItemDetails(
-                      item.projectPath,
-                      item.kind,
-                      item.number,
-                    ) ??
-                    (await gitlabWorkItemDetails(
-                      item.projectPath,
-                      item.kind,
-                      item.number,
-                    ))
+                    peekLinearIssueDetails(item.id) ??
+                    (await linearIssueDetails(item.id))
                   ).body
-                : undefined;
+                : item.provider === "gitlab" &&
+                    (item.kind === "issue" || item.kind === "pr")
+                  ? (
+                      peekGitlabWorkItemDetails(
+                        item.projectPath,
+                        item.kind,
+                        item.number,
+                      ) ??
+                      (await gitlabWorkItemDetails(
+                        item.projectPath,
+                        item.kind,
+                        item.number,
+                      ))
+                    ).body
+                  : undefined;
           session = {
             ...newDefaultSession(cwd),
             title: `Ask · ${item.title}`,
+            inboxCard: context,
             inboxAsk: {
               key,
               title: item.title,
               url: item.url,
               provider: item.provider,
+              ...(item.provider === "jira"
+                ? {
+                    site: item.site,
+                    project: item.projectName,
+                    identifier: item.identifier,
+                  }
+                : {}),
               description,
             },
           };
           sessionsRef.current = [...sessionsRef.current, session];
+          setSessions(sessionsRef.current);
+        }
+        if (context && session.inboxCard?.contextId !== context.contextId) {
+          if (session.inboxCard) throw new Error("This conversation already has staged context. Send or remove that card first, then try again.");
+          const updated = { ...session, inboxCard: context, inboxAsk: session.inboxAsk ? { ...session.inboxAsk, description: undefined } : undefined };
+          sessionsRef.current = sessionsRef.current.map(entry => entry.id === session.id ? updated : entry);
           setSessions(sessionsRef.current);
         }
         return session.id;
@@ -5674,6 +5701,7 @@ export default function App({
             onClose={onLeaveInbox}
             onToggleSidebar={onToggleSidebar}
             onStart={onStartInboxItem}
+            onOpenSettings={() => openSettings("general")}
             onAsk={onAskInboxItem}
             onAskRestart={onRestartInboxAsk}
             onAskMount={setInboxAskPortal}

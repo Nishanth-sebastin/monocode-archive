@@ -31,6 +31,8 @@ import {
   INBOX_FILTER_MENU_WIDTH,
 } from "../chrome/InboxFiltersMenu";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
+import { InboxContextPicker, useInboxContext } from "../chrome/InboxContextPicker";
+import type { InboxComposerCard } from "../lib/githubTasks";
 import { ProjectLogoIcon } from "../chrome/ProjectLogoIcon";
 import { ProjectMascot } from "../chrome/ProjectMascot";
 import { OverlayNav } from "../chrome/TitleBar";
@@ -64,6 +66,7 @@ import {
   type InboxItem,
   type InboxProviderErrors,
   type InboxQuery,
+  clearInboxCache,
 } from "../lib/githubTasks";
 import {
   applyInboxFilters,
@@ -72,6 +75,9 @@ import {
   inboxFetchState,
   loadInboxFilters,
   loadInboxSource,
+  loadVisibleInboxSources,
+  saveVisibleInboxSources,
+  INBOX_SOURCE_LABELS,
   pruneInboxFilters,
   saveInboxFilters,
   saveInboxSource,
@@ -127,6 +133,7 @@ import {
   resolveTabGroupMascot,
 } from "../lib/tabGroups";
 import { AgentMarkdown } from "./AgentMarkdown";
+import { JiraImages } from "./InboxMedia";
 import {
   InboxComments,
   InboxCommentForm,
@@ -138,6 +145,20 @@ import {
   type InboxSessionPortal,
 } from "./InboxDiscussionPanel";
 import { inboxAskKey } from "../lib/inboxAsk";
+import {
+  JIRA_CHANGE_EVENT,
+  jiraConnected,
+  jiraDetails,
+  jiraThread,
+  peekJiraDetails,
+  peekJiraThread,
+  jiraOptions,
+  loadJiraFilter,
+  saveJiraFilter,
+  DEFAULT_JIRA_FILTER,
+  type JiraFilter,
+  type JiraOption,
+} from "../lib/jira";
 
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 420;
@@ -151,6 +172,7 @@ const ACTION_GHOST = `${ACTION} h-7 text-content/70 hover:bg-content/10 hover:te
 const DEFAULT_WIDTH = 280;
 
 let rememberedWidth = DEFAULT_WIDTH;
+const rememberedSelections: Partial<Record<InboxSource, string>> = {};
 
 type InboxProjectOption = {
   path: string;
@@ -232,24 +254,23 @@ function InboxSourceTab({
   selected: boolean;
   onSelect: (source: InboxSource) => void;
 }) {
-  const label =
-    source === "linear" ? "Linear" : source === "gitlab" ? "GitLab" : "GitHub";
+  const label = INBOX_SOURCE_LABELS[source];
   return (
     <button
       type="button"
       role="tab"
       aria-selected={selected}
       onClick={() => onSelect(source)}
-      className={`flex h-6 min-w-0 flex-1 items-center justify-center rounded-md px-2 text-[12px] leading-none ${
+      className={`flex h-6 min-w-0 flex-1 items-center justify-center rounded-md px-0.5 text-[11px] leading-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-content/50 ${
         selected
           ? "bg-content/10 text-content"
           : "text-content/50 hover:bg-content/5 hover:text-content"
       }`}
     >
-      <span className="flex items-center gap-1.5">
+      <span className="flex items-center gap-0.5">
         <InboxProviderMark
           provider={source}
-          className="block size-3.5 shrink-0"
+          className="block size-4 shrink-0"
         />
         <span className="leading-none">{label}</span>
       </span>
@@ -285,7 +306,7 @@ function InboxDetailTab({
 }
 
 type Props = {
-  onAsk: (item: InboxItem) => Promise<string>;
+  onAsk: (item: InboxItem, context?: InboxComposerCard) => Promise<string>;
   onAskRestart: (item: InboxItem) => Promise<string>;
   onAskMount: (portal: InboxSessionPortal | null) => void;
   cwd: string;
@@ -293,7 +314,8 @@ type Props = {
   besideRail?: boolean;
   onClose?: () => void;
   onToggleSidebar?: () => void;
-  onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
+  onOpenSettings?: () => void;
+  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   sessions?: readonly SessionSummary[];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   /** Session-card destination to reveal after the Inbox list loads. */
@@ -309,6 +331,7 @@ export function InboxView({
   besideRail = false,
   onClose,
   onToggleSidebar,
+  onOpenSettings,
   onStart,
   sessions = [],
   onOpenSession,
@@ -338,11 +361,12 @@ export function InboxView({
   const [refresh, setRefresh] = useState(0);
   const targetSelectionKey = target ? linkedWorkItemInboxKey(target) : null;
   const [selectedKey, setSelectedKey] = useState<string | null>(
-    targetSelectionKey,
+    targetSelectionKey ?? rememberedSelections[loadInboxSource()] ?? null,
   );
   const [targetItem, setTargetItem] = useState<InboxItem | null>(null);
   const [filters, setFilters] = useState(loadInboxFilters);
   const [source, setSource] = useState(loadInboxSource);
+  const [visibleSources, setVisibleSources] = useState(loadVisibleInboxSources);
   const [filterMenu, setFilterMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -350,6 +374,11 @@ export function InboxView({
     loadHiddenLinearTeamIds,
   );
   const [linearTeams, setLinearTeams] = useState<LinearTeam[]>([]);
+  const [jiraSite, setJiraSite] = useState("");
+  const [jiraFilter, setJiraFilter] = useState<JiraFilter>(DEFAULT_JIRA_FILTER);
+  const [jiraProjects, setJiraProjects] = useState<JiraOption[]>([]);
+  const [jiraFavorites, setJiraFavorites] = useState<JiraOption[]>([]);
+  const [jiraOptionsError, setJiraOptionsError] = useState("");
   const prevRefresh = useRef(refresh);
 
   const projects = useMemo(
@@ -369,11 +398,17 @@ export function InboxView({
       ),
     [filters, projects],
   );
-  const filtersActive = hasActiveInboxFilters(
-    activeFilters,
-    source,
-    linearHiddenTeamIds,
-  );
+  const filtersActive =
+    source === "jira"
+      ? !!(
+          jiraFilter.project ||
+          jiraFilter.filter ||
+          !jiraFilter.assigned ||
+          activeFilters.time !== "all" ||
+          activeFilters.status.open ||
+          activeFilters.status.closed
+        )
+      : hasActiveInboxFilters(activeFilters, source, linearHiddenTeamIds);
   const fetchState = inboxFetchState(activeFilters);
   const fetchQuery = useMemo<InboxQuery>(
     () => ({
@@ -398,6 +433,7 @@ export function InboxView({
   useEffect(() => {
     if (!target) return;
     setSource("github");
+    setVisibleSources(previous => previous.includes("github") ? previous : ["github", ...previous]);
     setSearchInput("");
   }, [target]);
 
@@ -431,6 +467,44 @@ export function InboxView({
     return () => window.removeEventListener(GITLAB_CHANGE_EVENT, onChange);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const update = (changed = false) => {
+      if (changed) clearInboxCache();
+      void jiraConnected().then(status => {
+        if (cancelled) return;
+        setJiraSite(status.site);
+        setJiraProjects([]);
+        setJiraFavorites([]);
+        setJiraFilter(loadJiraFilter(status.site));
+        if (changed) setRefresh(value => value + 1);
+      }).catch(() => { /* The list shows the connection error locally. */ });
+    };
+    update();
+    const onChange = () => update(true);
+    window.addEventListener(JIRA_CHANGE_EVENT, onChange);
+    return () => { cancelled = true; window.removeEventListener(JIRA_CHANGE_EVENT, onChange); };
+  }, []);
+
+  useEffect(() => {
+    if (source !== "jira" || !jiraSite || !filterMenu) return;
+    let cancelled = false;
+    setJiraOptionsError("");
+    void Promise.all([
+      jiraOptions(jiraSite, false),
+      jiraOptions(jiraSite, true),
+    ])
+      .then(([projects, favorites]) => {
+        if (cancelled) return;
+        setJiraProjects(projects);
+        setJiraFavorites(favorites);
+      })
+      .catch((error) => {
+        if (!cancelled) setJiraOptionsError(String(error));
+      });
+    return () => { cancelled = true; };
+  }, [source, jiraSite, !!filterMenu, refresh]);
+
   // The roster has to come from Linear, not from the fetched issues: hiding a
   // team drops its issues, so a derived list could never offer it back.
   useEffect(() => {
@@ -453,7 +527,14 @@ export function InboxView({
     prevRefresh.current = refresh;
     const cached = peekInboxList(projects, fetchQuery);
     if (cached) {
-      setItems(cached.items);
+      setItems((previous) =>
+        cached.errors.jira && jiraSite
+          ? [
+              ...cached.items.filter((item) => item.provider !== "jira"),
+              ...previous.filter((item) => item.provider === "jira"),
+            ]
+          : cached.items,
+      );
       setProviderErrors(cached.errors);
       setLoading(false);
     }
@@ -470,7 +551,14 @@ export function InboxView({
     void listInboxItems(projects, fetchQuery, { force })
       .then((next) => {
         if (cancelled) return;
-        setItems(next.items);
+        setItems((previous) =>
+          next.errors.jira && jiraSite
+            ? [
+                ...next.items,
+                ...previous.filter((item) => item.provider === "jira"),
+              ]
+            : next.items,
+        );
         setProviderErrors(next.errors);
       })
       .catch((err: unknown) => {
@@ -482,6 +570,7 @@ export function InboxView({
           github: message,
           linear: message,
           gitlab: message,
+          jira: message,
         });
       })
       .finally(() => {
@@ -572,6 +661,7 @@ export function InboxView({
       return;
     }
     const key = inboxItemKey(selected);
+    rememberedSelections[source] = key;
     // Keep waiting while the exact cache-miss lookup loads. Otherwise the
     // current list's first row replaces the requested key.
     if (
@@ -594,8 +684,16 @@ export function InboxView({
   };
 
   const onSourceChange = (next: InboxSource) => {
+    setSelectedKey(rememberedSelections[next] ?? null);
     setSource(next);
     saveInboxSource(next);
+  };
+
+  const onVisibleSourcesChange = (next: InboxSource[]) => {
+    if (!next.length) return;
+    setVisibleSources(next);
+    saveVisibleInboxSources(next);
+    if (!next.includes(source)) onSourceChange(next[0]);
   };
 
   const onFilterButtonClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
@@ -620,21 +718,9 @@ export function InboxView({
         aria-label="Inbox source"
         className="flex h-9 shrink-0 items-center gap-px border-b border-content/10 px-2"
       >
-        <InboxSourceTab
-          source="github"
-          selected={source === "github"}
-          onSelect={onSourceChange}
-        />
-        <InboxSourceTab
-          source="linear"
-          selected={source === "linear"}
-          onSelect={onSourceChange}
-        />
-        <InboxSourceTab
-          source="gitlab"
-          selected={source === "gitlab"}
-          onSelect={onSourceChange}
-        />
+        {visibleSources.map(provider => (
+          <InboxSourceTab key={provider} source={provider} selected={source === provider} onSelect={onSourceChange} />
+        ))}
       </div>
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-content/10 px-2">
         <div className="relative flex h-7 min-w-0 flex-1 items-center">
@@ -651,7 +737,7 @@ export function InboxView({
         </div>
         <button
           type="button"
-          title="Filter inbox"
+          title="Filters and visible sources"
           aria-label="Filter inbox"
           aria-expanded={!!filterMenu}
           aria-haspopup="menu"
@@ -692,15 +778,22 @@ export function InboxView({
         ref={listLock}
         className="min-h-0 flex-1 overflow-y-auto overscroll-none"
       >
+        {sourceError && visibleItems.length > 0 ? <p role="status" className="px-3 py-2 text-[12px] text-content/50">{sourceError} <button type="button" onClick={() => setRefresh(value => value + 1)} className="underline">Retry</button></p> : null}
         {sourceError && visibleItems.length === 0 ? (
-          <p className="px-3 py-2 text-[12px] text-content/50">{sourceError}</p>
+          <div className="px-3 py-2 text-[12px] text-content/50">
+            <p>{sourceError}</p>
+            {source === "jira" ? <div className="mt-2 flex gap-3">
+              {onOpenSettings ? <button type="button" className="underline" onClick={onOpenSettings}>{jiraSite ? "Connection settings" : "Connect Jira"}</button> : null}
+              {jiraSite ? <button type="button" className="underline" onClick={() => setRefresh(value => value + 1)}>Retry</button> : null}
+            </div> : null}
+          </div>
         ) : loading && items.length === 0 ? (
           <div className="flex justify-center py-10 text-content/40">
             <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
           </div>
         ) : visibleItems.length === 0 ? (
           <p className="px-3 py-2 text-[12px] text-content/50">
-            {narrowedByUser
+            {source === "jira" ? "No Jira issues match these filters" : narrowedByUser
               ? searchNarrowed
                 ? source === "linear"
                   ? "No matching Linear issues"
@@ -781,9 +874,16 @@ export function InboxView({
       linearTeams={linearTeams}
       hiddenLinearTeamIds={linearHiddenTeamIds}
       source={source}
+      visibleSources={visibleSources}
+      onVisibleSourcesChange={onVisibleSourcesChange}
       filters={activeFilters}
       onChange={onFiltersChange}
       onLinearTeamsChange={saveHiddenLinearTeamIds}
+      jiraFilter={jiraFilter}
+      jiraProjects={jiraProjects}
+      jiraFavorites={jiraFavorites}
+      jiraOptionsError={jiraOptionsError}
+      onJiraFilterChange={next => { setJiraFilter(next); saveJiraFilter(jiraSite, next); }}
       onClose={() => setFilterMenu(null)}
     />
   ) : null;
@@ -828,7 +928,11 @@ export function InboxView({
               relatedSessions={
                 selected ? relatedSessionsForInboxItem(selected, sessions) : []
               }
-              onDiscuss={() => setDiscussionOpen(true)}
+              onDiscuss={async context => {
+                if (!selected) return;
+                await onAsk(selected, context);
+                setDiscussionOpen(true);
+              }}
               onStart={onStart}
               onOpenSession={onOpenSession}
             />
@@ -865,8 +969,8 @@ function InboxDetailBody({
   projects: InboxProjectOption[];
   revision?: number;
   relatedSessions: readonly SessionSummary[];
-  onDiscuss?: () => void;
-  onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
+  onDiscuss?: (context: InboxComposerCard) => void | Promise<void>;
+  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
 }) {
   if (!item) {
@@ -956,7 +1060,8 @@ function InboxCard({
   const time = formatRelativeTime(item.updatedAt);
   const name = projectName(item.projectPath);
   const linear = item.provider === "linear";
-  const source = linear ? item.teamName || item.repo : item.repo || name;
+  const jira = item.provider === "jira";
+  const source = jira ? item.projectName : linear ? item.teamName || item.repo : item.repo || name;
   const unseen = isInboxEntryUnseen({
     key: inboxItemKey(item),
     updatedAt: item.updatedAt,
@@ -967,7 +1072,7 @@ function InboxCard({
       type="button"
       title={item.title}
       aria-current={active ? "true" : undefined}
-      aria-label={`${status.label} ${kindLabel.toLowerCase()} ${inboxItemRef(
+      aria-label={`${jira ? item.state : status.label} ${kindLabel.toLowerCase()} ${inboxItemRef(
         item,
       )}: ${item.title}${unseen ? ", new" : ""}${relatedSessionCount > 0 ? `, ${relatedSessionCount} related ${relatedSessionCount === 1 ? "thread" : "threads"}` : ""}`}
       onClick={onSelect}
@@ -988,7 +1093,7 @@ function InboxCard({
             strokeWidth={1.75}
           />
           <span className="min-w-0 truncate text-[11px] text-content/50">
-            {kindLabel} · {inboxItemRef(item)}
+            {jira ? "" : `${kindLabel} · `}{inboxItemRef(item)}
           </span>
         </span>
         {relatedSessionCount > 0 || time || unseen ? (
@@ -1018,7 +1123,7 @@ function InboxCard({
       </span>
       <span className="mt-1 flex min-w-0 items-center gap-2">
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] text-content/45">
-          {linear ? null : logoPath ? (
+          {linear || jira ? null : logoPath ? (
             <ProjectLogoIcon
               path={logoPath}
               className="size-3.5 shrink-0 rounded-sm"
@@ -1032,6 +1137,7 @@ function InboxCard({
               className="size-3 shrink-0"
             />
           )}
+          {jira ? <span className="max-w-[55%] truncate" title={item.state}>{item.state} ·</span> : null}
           <span className="min-w-0 truncate">{source}</span>
         </span>
         {item.labels.length > 0 ? (
@@ -1061,11 +1167,13 @@ function InboxDetail({
   projects: InboxProjectOption[];
   revision: number;
   relatedSessions: readonly SessionSummary[];
-  onDiscuss?: () => void;
-  onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
+  onDiscuss?: (context: InboxComposerCard) => void | Promise<void>;
+  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
 }) {
   const linear = item.provider === "linear";
+  const jira = item.provider === "jira";
+  const ticket = linear || jira;
   const gitlab = item.provider === "gitlab";
   const isPr = !linear && item.kind === "pr";
   const githubKind =
@@ -1074,7 +1182,7 @@ function InboxDetail({
       : null;
   const gitlabKind =
     gitlab && (item.kind === "issue" || item.kind === "pr") ? item.kind : null;
-  const cached = linear
+  const cached = jira ? peekJiraDetails(item) : linear
     ? peekLinearIssueDetails(item.id ?? "")
     : gitlabKind
       ? peekGitlabWorkItemDetails(item.projectPath, gitlabKind, item.number)
@@ -1086,7 +1194,7 @@ function InboxDetail({
       ? peekGitlabMrDiff(item.projectPath, item.number)
       : peekGithubPrDiff(item.projectPath, item.number)
     : null;
-  const cachedThread = linear
+  const cachedThread = jira ? peekJiraThread(item) : linear
     ? peekLinearIssueThread(item.id ?? "")
     : gitlabKind
       ? peekGitlabWorkItemThread(item.projectPath, gitlabKind, item.number)
@@ -1113,17 +1221,17 @@ function InboxDetail({
     projects[0]?.path ??
     cwd;
   const [startProject, setStartProject] = useState(defaultProject);
-  const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
-  const status = linear
+  const context = useInboxContext(item);
+  const [retry, setRetry] = useState(0);
+  const status = ticket
     ? item.state || inboxItemStatus(item)
     : inboxItemStatus(item);
   const statusMark = inboxStatusMark(item);
 
-  const source = linear
+  const source = jira ? item.projectName : linear
     ? item.teamName || item.repo
     : item.repo || projectName(item.projectPath);
-  const markdownCwd = linear ? startProject || cwd : item.projectPath || cwd;
+  const markdownCwd = ticket ? startProject || cwd : item.projectPath || cwd;
   const authorName = details?.author?.trim() ?? "";
   const extraAssignees = item.assignees.filter(
     (person) =>
@@ -1148,7 +1256,7 @@ function InboxDetail({
 
   useEffect(() => {
     let cancelled = false;
-    const cachedDetails = linear
+    const cachedDetails = jira ? peekJiraDetails(item) : linear
       ? peekLinearIssueDetails(item.id ?? "")
       : gitlabKind
         ? peekGitlabWorkItemDetails(item.projectPath, gitlabKind, item.number)
@@ -1164,7 +1272,7 @@ function InboxDetail({
       setError(null);
       setDetails(null);
     }
-    const pending = linear
+    const pending = jira ? jiraDetails(item) : linear
       ? item.id
         ? linearIssueDetails(item.id)
         : Promise.reject(new Error("Missing Linear issue"))
@@ -1181,7 +1289,7 @@ function InboxDetail({
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        if (cachedDetails) return;
+        if (cachedDetails && !jira) return;
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
@@ -1198,13 +1306,15 @@ function InboxDetail({
     item.projectPath,
     linear,
     revision,
+    jira,
+    retry,
   ]);
 
   useEffect(() => {
     let cancelled = false;
-    if (linear) {
+    if (linear || jira) {
       const id = item.id ?? "";
-      const cachedThread = peekLinearIssueThread(id);
+      const cachedThread = jira ? peekJiraThread(item) : peekLinearIssueThread(id);
       if (cachedThread) {
         setThread(cachedThread);
         setThreadLoading(false);
@@ -1214,7 +1324,7 @@ function InboxDetail({
         setThreadError(null);
         setThread(null);
       }
-      void linearIssueThread(id)
+      void (jira ? jiraThread(item) : linearIssueThread(id))
         .then((next) => {
           if (cancelled) return;
           setThread(next);
@@ -1222,7 +1332,7 @@ function InboxDetail({
         })
         .catch((err: unknown) => {
           if (cancelled) return;
-          if (cachedThread) return;
+          if (cachedThread && !jira) return;
           setThreadError(err instanceof Error ? err.message : String(err));
         })
         .finally(() => {
@@ -1305,6 +1415,8 @@ function InboxDetail({
     item.projectPath,
     linear,
     revision,
+    jira,
+    retry,
   ]);
 
   useEffect(() => {
@@ -1469,7 +1581,7 @@ function InboxDetail({
               )}
             </>
           ) : null}
-          {linear ? null : (
+          {ticket ? null : (
             <>
               <span aria-hidden>·</span>
               <span>{projectName(item.projectPath)}</span>
@@ -1537,41 +1649,23 @@ function InboxDetail({
               <button
                 type="button"
                 disabled={
-                  starting || (linear && (!startProject || loading || !!error))
+                  context.busy
                 }
                 onClick={() => {
-                  if (starting) return;
-                  setStarting(true);
-                  setStartError(null);
-                  const next = linear
-                    ? { ...item, projectPath: startProject }
-                    : item;
-                  void Promise.resolve(
-                    onStart(next, linear ? (details?.body ?? "") : undefined),
-                  )
-                    .catch((err: unknown) => {
-                      setStartError(
-                        err instanceof Error ? err.message : String(err),
-                      );
-                    })
-                    .finally(() => setStarting(false));
+                  context.open("send");
                 }}
                 className={`${ACTION_FILLED} disabled:cursor-default disabled:opacity-40`}
               >
-                {starting ? "Sending..." : "Send to agent"}
+                Send to agent
               </button>
-              {linear ? (
-                <InboxProjectPicker
-                  projects={projects}
-                  value={startProject}
-                  onChange={setStartProject}
-                />
-              ) : null}
             </>
           ) : null}
           <button
             type="button"
-            onClick={onDiscuss}
+            disabled={context.busy}
+            onClick={() => {
+              context.open("ask");
+            }}
             className={item.kind === "pr" ? ACTION_FILLED : ACTION_OUTLINE}
           >
             <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask
@@ -1586,16 +1680,20 @@ function InboxDetail({
               ? gitlab
                 ? "Review on GitLab"
                 : "Review on GitHub"
-              : linear
+              : jira ? "Open in Jira" : linear
                 ? "Open in Linear"
                 : gitlab
                   ? "Open on GitLab"
                   : "Open on GitHub"}
           </button>
         </div>
-        {startError ? (
-          <p className="text-[12px] text-red-400/90">{startError}</p>
-        ) : null}
+        <InboxContextPicker context={context}
+          destination={ticket ? <InboxProjectPicker projects={projects} value={startProject} onChange={setStartProject} /> : <span className="truncate" title={item.projectPath}>{projectName(item.projectPath)}</span>}
+          onConfirm={async (card, action) => {
+            if (action === "ask") await onDiscuss?.(card);
+            else await onStart?.(ticket ? { ...item, projectPath: startProject } : item, undefined, card);
+          }} />
+        {jira && error && details ? <p role="status" className="text-[12px] text-content/50">{error} <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry</button></p> : null}
       </header>
       {isPr ? (
         <div
@@ -1638,8 +1736,8 @@ function InboxDetail({
         <div className="flex justify-center py-10 text-content/40">
           <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
         </div>
-      ) : error ? (
-        <p className="text-[13px] text-content/50">{error}</p>
+      ) : error && !details ? (
+        <div className="text-[13px] text-content/50">{error}{jira ? <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry</button> : null}</div>
       ) : (
         <>
           {details?.body.trim() ? (
@@ -1651,6 +1749,7 @@ function InboxDetail({
           ) : (
             <p className="text-[13px] text-content/45">No description</p>
           )}
+          {jira && details?.attachments?.length ? <JiraImages key={`${item.site}:${item.id}:${revision}`} item={item} attachments={details.attachments} /> : null}
           <InboxComments
             thread={thread}
             loading={threadLoading}
@@ -1658,9 +1757,10 @@ function InboxDetail({
             cwd={markdownCwd}
             provider={item.provider}
             replyMode={linear ? "parent" : gitlab ? undefined : "thread"}
-            onReply={setReplyTo}
+            onReply={jira ? undefined : setReplyTo}
           />
-          <InboxCommentForm
+          {jira && threadError ? <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry comments</button> : null}
+          {jira ? null : <InboxCommentForm
             replyTo={replyTo}
             posting={posting}
             error={postError}
@@ -1669,7 +1769,7 @@ function InboxDetail({
               setPostError(null);
             }}
             onSubmit={postComment}
-          />
+          />}
         </>
       )}
     </div>

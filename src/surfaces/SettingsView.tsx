@@ -140,6 +140,7 @@ import {
   gitlabConnected,
   saveGitlabConfig,
 } from "../lib/gitlab";
+import { jiraConnected, saveJiraConfig, type JiraStatus } from "../lib/jira";
 import {
   disconnectLinear,
   LINEAR_CHANGE_EVENT,
@@ -545,8 +546,159 @@ function GeneralPage({
       <Heading title="Linear" />
       <LinearSettings />
 
+      <Heading title={<span className="flex items-center gap-2"><InboxProviderMark provider="jira" className="size-4 shrink-0" />Jira Cloud</span>} />
+      <JiraSettings />
+
       <Heading title="About" />
       <UpdateRow onOpenWhatsNew={onOpenWhatsNew} />
+    </>
+  );
+}
+
+function JiraSettings() {
+  const [status, setStatus] = useState<JiraStatus>({
+    connected: false,
+    site: "",
+    account: "",
+  });
+  const [site, setSite] = useState("");
+  const [email, setEmail] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    void jiraConnected()
+      .then((next) => {
+        if (!cancelled) {
+          setStatus(next);
+          setSite(next.site);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const save = async (disconnect = false) => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      setStatus(await saveJiraConfig(site, email, disconnect ? "" : token));
+      setToken("");
+      clearInboxCache();
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Row
+        stacked={!status.connected}
+        label={status.connected ? "Connected account" : "Connect your account"}
+        description="Browse issues from your Jira Cloud site. Your API token stays on this device."
+      >
+        {status.connected ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span
+              className="max-w-56 truncate text-[12px] text-content/50"
+              title={`${status.site} · ${status.account}`}
+            >
+              {status.site} · {status.account}
+            </span>
+            <SecondaryButton onClick={() => void save(true)} disabled={busy}>
+              Disconnect
+            </SecondaryButton>
+          </div>
+        ) : (
+          <form
+            className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (site.trim() && email.trim() && token.trim()) void save();
+            }}
+          >
+            {(
+              [
+                {
+                  value: site,
+                  change: setSite,
+                  type: "url",
+                  label: "Jira Cloud site",
+                  placeholder: "https://team.atlassian.net",
+                },
+                {
+                  value: email,
+                  change: setEmail,
+                  type: "email",
+                  label: "Atlassian email",
+                  placeholder: "you@example.com",
+                },
+                {
+                  value: token,
+                  change: setToken,
+                  type: "password",
+                  label: "Jira API token",
+                  placeholder: "API token",
+                },
+              ] as const
+            ).map((field) => (
+              <label
+                key={field.label}
+                className={`flex min-w-0 flex-col gap-1.5 ${field.type === "url" ? "sm:col-span-2" : ""}`}
+              >
+                <span className="text-[12px] text-content/60">
+                  {field.label}
+                </span>
+                <input
+                  type={field.type}
+                  value={field.value}
+                  onChange={(event) => field.change(event.target.value)}
+                  placeholder={field.placeholder}
+                  aria-label={field.label}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={busy}
+                  required
+                  className="h-8 w-full min-w-0 rounded-md border border-content/10 bg-transparent px-2.5 text-[12px] text-content outline-none placeholder:text-content/35 focus:border-content/30 disabled:opacity-50"
+                />
+              </label>
+            ))}
+            <div className="flex items-start justify-between gap-4 sm:col-span-2">
+              <p className="max-w-sm text-[12px] leading-relaxed text-content/45">
+                Use an API token without scopes. Jira Server and Data Center
+                aren't supported.
+              </p>
+              <SecondaryButton
+                type="submit"
+                disabled={
+                  busy || !site.trim() || !email.trim() || !token.trim()
+                }
+              >
+                {busy ? "Connecting…" : "Connect"}
+              </SecondaryButton>
+            </div>
+            {error ? (
+              <p
+                role="alert"
+                className="text-[12px] text-red-400/90 sm:col-span-2"
+              >
+                {error}
+              </p>
+            ) : null}
+          </form>
+        )}
+      </Row>
+      {error && status.connected ? (
+        <p role="alert" className="pb-2 text-[12px] text-red-400/90">
+          {error}
+        </p>
+      ) : null}
     </>
   );
 }
@@ -1716,7 +1868,7 @@ function PageHeader({
   );
 }
 
-function Heading({ title, first = false }: { title: string; first?: boolean }) {
+function Heading({ title, first = false }: { title: ReactNode; first?: boolean }) {
   return (
     <h2
       className={`pb-1 text-[15px] font-semibold text-content ${
@@ -1732,13 +1884,15 @@ function Row({
   label,
   description,
   children,
+  stacked = false,
 }: {
   label: ReactNode;
   description?: string;
   children?: ReactNode;
+  stacked?: boolean;
 }) {
   return (
-    <div className="flex items-start gap-6 border-b border-content/5 py-4 last:border-b-0">
+    <div className={`flex items-start border-b border-content/5 py-4 last:border-b-0 ${stacked ? "flex-col gap-4" : "gap-6"}`}>
       <div className="min-w-0 flex-1">
         <div className="text-[13px] font-medium text-content">{label}</div>
         {description ? (
@@ -1747,7 +1901,7 @@ function Row({
           </p>
         ) : null}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      <div className={stacked ? "w-full min-w-0" : "flex shrink-0 flex-wrap items-center justify-end gap-2"}>
         {children}
       </div>
     </div>
@@ -2055,18 +2209,20 @@ function Select({
 
 function SecondaryButton({
   onClick,
+  type = "button",
   disabled = false,
   danger = false,
   children,
 }: {
-  onClick: () => void;
+  onClick?: () => void;
+  type?: "button" | "submit";
   disabled?: boolean;
   danger?: boolean;
   children: ReactNode;
 }) {
   return (
     <button
-      type="button"
+      type={type}
       onClick={onClick}
       disabled={disabled}
       className={`flex shrink-0 items-center gap-1.5 rounded-md border border-content/10 px-2.5 py-1 text-[12px] ${
