@@ -557,14 +557,22 @@ pub async fn azure_item_content(
         let config = require_config(&app, &site)?;
         let item = item(&config, &id)?;
         if discussion {
-            comments(
+            let mut discussion = comments(
                 &config,
                 item["fields"]["System.TeamProject"]
                     .as_str()
                     .ok_or("Azure item has no project")?,
                 &id,
                 1,
-            )
+            )?;
+            discussion["attachments"] = json!(attachments(
+                &config,
+                &item,
+                discussion["comments"]
+                    .as_array()
+                    .ok_or("Invalid Azure comments")?
+            ));
+            Ok(discussion)
         } else {
             let mut item = item;
             item["attachments"] = json!(attachments(&config, &item, &[]));
@@ -585,7 +593,11 @@ pub async fn azure_image(
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         let config = require_config(&app, &site)?;
         let item = item(&config, &id)?;
-        let files = attachments(&config, &item, &[]);
+        let mut files = attachments(&config, &item, &[]);
+        if !files.iter().any(|f| f["id"] == attachment_id) {
+            let discussion = comments(&config, item["fields"]["System.TeamProject"].as_str().ok_or("Azure item has no project")?, &id, 1)?;
+            files = attachments(&config, &item, discussion["comments"].as_array().ok_or("Invalid Azure comments")?);
+        }
         let file = files.iter().find(|f| f["id"] == attachment_id).ok_or("Image is no longer on this Azure work item")?;
         let url = attachment_url(&config.site, file["url"].as_str().ok_or("Invalid Azure image")?)?;
         let response = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).redirects(0).build().get(&url).set("Authorization", &config.authorization()).call().map_err(|_| "Cannot load Azure image. Check access and retry.")?;
@@ -685,5 +697,15 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0]["mimeType"], "image/png");
         assert_eq!(files[0]["size"], 123);
+        let comment = json!({"renderedText":format!("<img src=\"{url}\">")});
+        let comment_files = attachments(
+            &config,
+            &json!({"fields":{}}),
+            std::slice::from_ref(&comment),
+        );
+        assert_eq!(comment_files.len(), 1);
+        assert_eq!(comment_files[0]["name"], "checkout.png");
+        assert_eq!(comment_files[0]["mimeType"], "image/png");
+        assert_eq!(attachments(&config, &item, &[comment]).len(), 1);
     }
 }

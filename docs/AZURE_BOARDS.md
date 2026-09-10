@@ -71,6 +71,11 @@ the local connection; it does not revoke the token at Microsoft.
 - Final visual pass: colored marks in both themes; five-source switching and
   no source-label overflow with a 240 px Inbox list; keyboard opening of the
   context dialog and Escape returning focus to Send to agent.
+- Fresh-agent review identified missing comment-only image previews. The fix
+  carries attachments from the loaded discussion into the deduplicated gallery
+  and revalidates comment membership before authenticated image fetch. Rust and
+  rendered regression checks plus a browser fixture cover this path; the fresh
+  reviewer approved the fix.
 - Colored Jira/Azure marks reuse the shared provider-mark component. Assets are
   local Devicon SVGs, with attribution in NOTICE and the bundled
   `DEVICON-LICENSE.txt`; no runtime icon service or library.
@@ -104,5 +109,6 @@ and missing-scope service responses, two real organizations with colliding
 IDs, Windows UI → WSL agent handoff, the richer repository/base/worktree kickoff,
 mixed-provider delivery through future Repos/Pipelines connectors, and
 responsiveness while a real agent streams. No credentials or Windows/WSL test
-host were used for this slice. Keep the PR draft and do not treat fixtures,
-native startup or a hosted build as completing those acceptance scenarios.
+host were used for this slice. The user authorized merging and closing the
+issue after the reviewed fix and local checks. That delivery decision does not
+turn fixtures, native startup or a hosted build into live acceptance evidence.

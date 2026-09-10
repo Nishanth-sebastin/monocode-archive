@@ -254,6 +254,7 @@ export async function azureThread(
   const before = generation;
   const raw = await invoke<{
     more: boolean;
+    attachments?: GithubWorkItemDetails["attachments"];
     comments: {
       id?: number;
       commentId?: number;
@@ -267,6 +268,7 @@ export async function azureThread(
   if (before !== generation)
     throw new Error("Azure connection changed. Refresh and retry.");
   const result: GithubWorkItemThread = {
+    attachments: raw.attachments ?? [],
     comments: raw.comments
       .slice(0, 50)
       .reverse()

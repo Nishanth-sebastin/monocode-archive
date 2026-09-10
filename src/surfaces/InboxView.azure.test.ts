@@ -21,7 +21,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
     setItem: (key: string, value: string) => stored.set(key, value),
   });
   let fail = false;
-  vi.mocked(invoke).mockImplementation(async (cmd) => {
+  vi.mocked(invoke).mockImplementation(async (cmd, args) => {
     if (cmd === "azure_status")
       return {
         connected: true,
@@ -52,6 +52,9 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
       return {
         fields: { "System.Description": "<p>Loaded description</p>" },
         comments: [],
+        attachments: (args as { discussion?: boolean })?.discussion
+          ? [{ id: "comment-image", name: "comment-only.png", mimeType: "image/png" }]
+          : [],
         more: false,
       };
     if (cmd === "inbox_context_document")
@@ -94,6 +97,8 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
     expect(
       container.querySelector('[role="tab"][aria-label="Azure Boards"]'),
     ).not.toBeNull();
+    expect(container.querySelector('[aria-label="Azure DevOps images"]')?.textContent).toContain("comment-only.png");
+    expect(invoke).toHaveBeenCalledWith("azure_image", expect.objectContaining({ attachmentId: "comment-image" }));
     await click(
       container.querySelector(
         '[aria-label="Custom review issue Bug 141: Ticket 141"]',

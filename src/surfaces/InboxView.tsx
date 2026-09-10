@@ -1237,6 +1237,10 @@ function InboxDetail({
     GithubWorkItemThread | LinearIssueThread | GitlabWorkItemThread | null
   >(cachedThread);
   const [threadLoading, setThreadLoading] = useState(cachedThread == null);
+  const galleryAttachments = [...new Map([
+    ...(details?.attachments ?? []),
+    ...(azure && thread && "attachments" in thread ? thread.attachments ?? [] : []),
+  ].map(file => [file.id, file])).values()];
   const [threadError, setThreadError] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<InboxReplyTarget | null>(null);
   const [posting, setPosting] = useState(false);
@@ -1774,7 +1778,7 @@ function InboxDetail({
           ) : (
             <p className="text-[13px] text-content/45">No description</p>
           )}
-          {(jira || azure) && details?.attachments?.length ? <TicketImages key={`${item.site}:${item.id}:${revision}`} item={item} attachments={details.attachments} /> : null}
+          {(jira || azure) && galleryAttachments.length ? <TicketImages key={`${item.site}:${item.id}:${revision}`} item={item} attachments={galleryAttachments} /> : null}
           <InboxComments
             thread={thread}
             loading={threadLoading}

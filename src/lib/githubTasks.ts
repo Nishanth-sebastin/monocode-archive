@@ -93,6 +93,7 @@ export type GithubWorkItemComment = {
 };
 
 export type GithubWorkItemThread = {
+  attachments?: GithubWorkItemDetails["attachments"];
   comments: GithubWorkItemComment[];
   truncated: boolean;
   reviewDecision: string;
