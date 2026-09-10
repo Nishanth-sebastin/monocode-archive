@@ -1,3 +1,4 @@
+import { contextFromFiles, requestAgentContext } from "../lib/agentContext";
 import {
   ChevronDown,
   ChevronRight,
@@ -65,6 +66,7 @@ const GIT_STATUS_COLOR: Record<string, string> = {
 };
 
 type Props = {
+  sourceSessionId?: string;
   cwd: string;
   onOpenFile: (path: string) => void;
   onOpenTerminal?: (cwd: string) => void;
@@ -181,6 +183,8 @@ function explorerItems(
       disabled: target.isRoot,
     },
     { kind: "sep" },
+    { kind: "item", id: "add-to-chat", label: "Add to chat", disabled: target.isDir },
+    { kind: "item", id: "send-to-agent", label: "Send to agent…", disabled: target.isDir },
     { kind: "item", id: "copy-path", label: "Copy Path" },
     { kind: "item", id: "copy-relative-path", label: "Copy Relative Path" },
     { kind: "sep" },
@@ -216,6 +220,7 @@ function explorerItems(
 // Chat updates rerender the sidebar even when Files is hidden. Keep its tree
 // intact unless file-tree props, local state, or subscriptions actually change.
 export const FileTree = memo(function FileTree({
+  sourceSessionId,
   cwd,
   onOpenFile,
   onOpenTerminal,
@@ -458,6 +463,10 @@ export const FileTree = memo(function FileTree({
         return;
       case "duplicate":
         await run(() => duplicateAt(target.path));
+        return;
+      case "add-to-chat":
+      case "send-to-agent":
+        await run(async () => requestAgentContext({ context: await contextFromFiles([target.path], cwd), cwd, sourceSessionId, prepareInSource: id === "add-to-chat" }));
         return;
       case "copy-path":
         await copyText(target.path);

@@ -974,7 +974,7 @@ fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<Session
                 linked_work_item_json
          FROM sessions
          WHERE cwd = ?1
-           AND has_user_message = 1
+           AND (has_user_message = 1 OR linked_work_item_json IS NOT NULL)
            AND id NOT IN (SELECT id FROM sessions WHERE inbox_ask IS NOT NULL)
          ORDER BY updated_at DESC, id ASC",
     )?;
@@ -1011,8 +1011,7 @@ fn list_linked(conn: &Connection) -> rusqlite::Result<Vec<SessionSummary>> {
                 created_at, updated_at, branch, archived, pinned,
                 linked_work_item_json
          FROM sessions
-         WHERE has_user_message = 1
-           AND linked_work_item_json IS NOT NULL
+         WHERE linked_work_item_json IS NOT NULL
            AND id NOT IN (SELECT id FROM sessions WHERE inbox_ask IS NOT NULL)
          ORDER BY updated_at DESC, id ASC",
     )?;
@@ -1392,19 +1391,33 @@ mod tests {
         let store = SessionStore::open_in_memory().unwrap();
         let conn = store.conn.lock().unwrap();
         let mut row = sample("s1", "/tmp/a", "Fix PR");
+        row.blocks = json!([]);
         row.linked_work_item = Some(json!({
             "kind": "pr",
             "repo": "openai/codex",
             "number": 42,
-            "url": "https://github.com/openai/codex/pull/42"
+            "url": "https://github.com/openai/codex/pull/42",
+            "additionalItems": [{ "kind": "issue", "repo": "openai/codex", "number": 43, "url": "https://github.com/openai/codex/issues/43" }]
         }));
 
         let summary = upsert_session(&conn, &row).unwrap();
         assert_eq!(summary.linked_work_item, row.linked_work_item);
         let listed = list_by_project(&conn, "/tmp/a").unwrap();
         assert_eq!(listed[0].linked_work_item, row.linked_work_item);
+        assert_eq!(
+            list_linked(&conn).unwrap()[0].linked_work_item,
+            row.linked_work_item
+        );
         let stored = get_session(&conn, "s1").unwrap().unwrap();
         assert_eq!(stored.linked_work_item, row.linked_work_item);
+        row.linked_work_item = None;
+        upsert_session(&conn, &row).unwrap();
+        assert!(get_session(&conn, "s1")
+            .unwrap()
+            .unwrap()
+            .linked_work_item
+            .is_none());
+        assert!(list_linked(&conn).unwrap().is_empty());
     }
 
     #[test]

@@ -1314,11 +1314,6 @@ html.theme-light .popover-backdrop {
   }
 }
 
-[data-session-review-shell] + [data-message-queue] [data-message-queue-card] {
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-}
-
 /* Graph node cutouts so lane strokes do not show through the circles. */
 .git-history-item svg {
   display: block;
@@ -1360,4 +1355,18 @@ html.theme-light .popover-backdrop {
     var(--color-content) 10%,
     var(--color-background-base)
   );
+}
+
+/* Interactive controls use a pointer; disabled controls retain the default cursor. */
+button:not(:disabled):not([aria-disabled="true"]),
+a[href],
+summary,
+[role="button"]:not([aria-disabled="true"]),
+[role="menuitem"]:not([aria-disabled="true"]),
+input:is([type="checkbox"], [type="radio"]):not(:disabled) {
+  cursor: pointer;
+}
+
+header[data-tauri-drag-region] button:not(:disabled):not([aria-disabled="true"]) {
+  cursor: pointer !important;
 }

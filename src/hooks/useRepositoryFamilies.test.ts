@@ -3,6 +3,7 @@ import { discoverRepositoryFamilies } from "./useRepositoryFamilies";
 import {
   getVerifiedFamilies,
   publishRepositoryFamilies,
+  subscribeRepositoryFamilies,
   type RepositoryFamily,
 } from "../lib/repositoryFamilies";
 const family = (path: string): RepositoryFamily => ({
@@ -88,4 +89,54 @@ it("does not publish cancelled discovery or overwrite concurrent updates to anot
   finish(family("/later"));
   await pending;
   expect(getVerifiedFamilies().has("/later")).toBe(false);
+});
+
+it("never drops a recent subfolder alias while refreshing a sibling checkout", async () => {
+  const initial = {
+    ...family("/main"),
+    worktrees: ["/main", "/branch"].map((path) => ({
+      path,
+      head: "abc",
+      branch: "main",
+      main: path === "/main",
+      missing: false,
+      locked: null,
+      prunable: null,
+    })),
+  };
+  publishRepositoryFamilies(
+    new Map(
+      ["/main", "/branch", "/main/src-tauri"].map((path) => [path, initial]),
+    ),
+  );
+  const snapshots: boolean[] = [];
+  const unsubscribe = subscribeRepositoryFamilies(() =>
+    snapshots.push(getVerifiedFamilies().has("/main/src-tauri")),
+  );
+  let finish!: (value: RepositoryFamily) => void;
+  const probe = vi.fn((path: string) =>
+    path === "/main/src-tauri"
+      ? new Promise<RepositoryFamily>((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve({ ...initial, checkout: path }),
+  );
+  try {
+    const done = discoverRepositoryFamilies(
+      ["/branch", "/main", "/main/src-tauri"],
+      probe,
+      () => false,
+      "/branch",
+    );
+    await vi.waitFor(() =>
+      expect(probe).toHaveBeenCalledWith("/main/src-tauri"),
+    );
+    expect(snapshots.every(Boolean)).toBe(true);
+    finish(initial);
+    await done;
+    expect(snapshots.every(Boolean)).toBe(true);
+    expect(getVerifiedFamilies().get("/branch")?.checkout).toBe("/branch");
+  } finally {
+    unsubscribe();
+  }
 });

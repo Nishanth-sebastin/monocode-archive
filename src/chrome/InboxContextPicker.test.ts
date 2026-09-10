@@ -86,7 +86,7 @@ it("reviews before handoff, restores selection for Ask, and cancels without deli
         '[aria-label="Include comment by Sam"]',
       )!,
     );
-    await click(button("Open agent draft"));
+    await click(button("Choose conversation"));
     expect(delivered).toHaveBeenCalledWith(
       expect.objectContaining({
         prompt: expect.stringContaining("Discuss this"),

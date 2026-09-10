@@ -8,6 +8,10 @@ import {
   type InboxItem,
 } from "./githubTasks";
 import {
+  inboxRelatedSessionCounts,
+  removeSessionWorkItem,
+  addSessionWorkItems,
+  sessionWorkItems,
   inboxItemMatchesLinkedWorkItem,
   linkedWorkItemInboxKey,
   linkedWorkItemFromInboxItem,
@@ -154,4 +158,37 @@ describe("session work items", () => {
       ),
     ).toEqual([]);
   });
+});
+
+it("keeps account-less and identified links distinct", () => {
+  const first = { kind: "issue" as const, repo: "a/b", number: 8, url: "https://github.com/a/b/issues/8" };
+  const session = { linkedWorkItem: first };
+  const next = addSessionWorkItems(session, [{ ...first, account: "alice" }, { ...first, number: 13, url: "https://github.com/a/b/issues/13", account: "alice" }]);
+  expect(sessionWorkItems(next)).toHaveLength(3);
+  expect(next.linkedWorkItem.account).toBeUndefined();
+  expect(relatedSessionsForInboxItem({ provider: "github", kind: "issue", repo: "a/b", number: 13, account: "alice" } as InboxItem, [next])).toEqual([next]);
+  expect(sessionWorkItems(addSessionWorkItems(next, [{ ...first, account: "bob" }]))).toHaveLength(4);
+  const removed = removeSessionWorkItem(next, first);
+  expect(sessionWorkItems(removed).map(link => link.number)).toEqual([8, 13]);
+  expect(sessionWorkItems(removeSessionWorkItem(removed, sessionWorkItems(removed)[0]))).toHaveLength(1);
+});
+
+it("bounds the combined snapshot size after twenty incremental links", () => {
+  let session: { linkedWorkItem?: import("./session").LinkedWorkItem } = {};
+  for (let number = 1; number <= 20; number++) {
+    session = addSessionWorkItems(session, [{kind: "issue", repo: "a/b", number, url: `https://github.com/a/b/issues/${number}`, context: "x".repeat(32_000)}]);
+  }
+  const links = sessionWorkItems(session);
+  expect(links).toHaveLength(20);
+  expect(links.reduce((sum, link) => sum + (link.context?.length ?? 0), 0)).toBeLessThanOrEqual(32_000);
+  expect(links.every(link => link.context?.includes("Snapshot truncated"))).toBe(true);
+});
+
+it("indexes related counts without changing account and legacy matching", () => {
+  const items = Array.from({ length: 100 }, (_, number) => ({ provider: "github", kind: "issue", repo: "a/b", number, url: `https://github.com/a/b/issues/${number}`, account: number % 2 ? "alice" : "bob" }) as InboxItem);
+  const sessions = Array.from({ length: 100 }, (_, i) => ({ linkedWorkItem: {
+    kind: "issue" as const, repo: "a/b", number: i % 50, url: `https://github.com/a/b/issues/${i % 50}`, account: i % 3 ? "alice" : undefined,
+  } }));
+  const counts = inboxRelatedSessionCounts(items, sessions);
+  for (const item of items) expect(counts.get(item)).toBe(relatedSessionsForInboxItem(item, sessions).length);
 });

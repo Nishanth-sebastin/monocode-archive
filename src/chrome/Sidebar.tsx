@@ -1,3 +1,4 @@
+import { sessionWorkItems } from "../lib/sessionWorkItem";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Archive,
@@ -1149,6 +1150,7 @@ function SidebarComponent({
           ) : cwd && cwd !== "~" ? (
             <div className="flex min-h-0 flex-1 flex-col">
               <FileTree
+                sourceSessionId={activeSessionId}
                 key={gitRoot}
                 cwd={gitRoot}
                 onOpenFile={onOpenFile}
@@ -1410,6 +1412,7 @@ function SidebarComponent({
         {tab === "changes" ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <SourceControl
+              sourceSessionId={activeSessionId}
               cwd={gitRoot}
               enabled={open}
               textHarness={textHarness}
@@ -2219,10 +2222,10 @@ function SessionCard({
     </span>
   );
 
-  const linkedWorkItem = session.linkedWorkItem;
-  const workItemBadge = linkedWorkItem ? (
+  const workItemBadge = sessionWorkItems(session).map(linkedWorkItem => (
     <button
       type="button"
+      key={`${linkedWorkItem.url}:${linkedWorkItem.account ?? ""}`}
       data-no-drag
       data-tauri-drag-region="false"
       title={`Open ${linkedWorkItem.kind === "pr" ? "PR" : "issue"} #${linkedWorkItem.number} in Inbox (${MOD}-click for GitHub)`}
@@ -2251,9 +2254,9 @@ function SessionCard({
       ) : (
         <CircleDot className="size-3" strokeWidth={1.75} />
       )}
-      <span>#{linkedWorkItem.number}</span>
+      <span>{linkedWorkItem.identifier || `#${linkedWorkItem.number}`}</span>
     </button>
-  ) : null;
+  ));
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return;
@@ -2422,7 +2425,6 @@ function SessionCard({
               </span>
             </span>
             <span className="flex shrink-0 items-center gap-1.5">
-              {workItemBadge}
               {status}
             </span>
           </span>
@@ -2443,11 +2445,11 @@ function SessionCard({
           </span>
           {compact ? (
             <span className="flex shrink-0 items-center gap-1.5">
-              {workItemBadge}
               {status}
             </span>
           ) : null}
         </span>
+        {workItemBadge.length ? <span aria-label="Linked tickets" className="relative mt-1 flex flex-wrap items-center gap-1.5">{workItemBadge}</span> : null}
         <span className="relative mt-1 flex items-center gap-2">
           {gitLabel ? (
             <span className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45">

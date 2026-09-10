@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
+import { AgentContextChips } from "./AgentContextChips";
 import { InboxMiniCard } from "./InboxMiniCard";
 import type { InboxComposerCard } from "../lib/githubTasks";
 
@@ -24,6 +25,14 @@ it("keeps the source and labels in the original full-width row above context", (
   const button = (markup: string) =>
     markup.match(/<button\b[^]*?<\/button>/)?.[0];
   expect(button(selected)).toBe(button(original));
+  const multiple = renderToStaticMarkup(createElement(AgentContextChips, {
+    context: { id: "selected", attachments: [], entries: [1, 2].map(number => ({ id: String(number), title: card.title, origin: card.url, text: `Description ${number}`, ticket: card })) },
+  }));
+  expect(button(multiple)).toBe(button(original));
+  expect(multiple).not.toContain("Description 1");
+  expect(multiple).toContain("max-h-[min(35vh,240px)]");
+  expect(multiple.match(/Preview selected context/g)).toHaveLength(2);
+
   expect(button(selected)).toContain(
     "mt-1 flex w-full min-w-0 items-center gap-2",
   );

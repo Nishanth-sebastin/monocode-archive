@@ -1,3 +1,7 @@
+import { contextFromText, requestAgentContext } from "../lib/agentContext";
+import { requestAddToChat } from "../lib/quoteDraft";
+import { formatCodeBlock } from "../lib/editorSelection";
+import { ExplorerMenu } from "../chrome/ExplorerMenu";
 import {
   Check,
   ChevronDown,
@@ -26,6 +30,8 @@ import { highlightDiffFile, type SyntaxToken } from "./syntaxTokens";
 import { DiffCommentComposer } from "./DiffCommentComposer";
 import {
   expandFold,
+  selectedDiffHunk,
+  formatUnifiedHunk,
   type FoldReveal,
   type UnifiedBlock,
   type UnifiedLine,
@@ -541,6 +547,7 @@ function VirtualRows({
   onReveal: (foldId: string, direction: "up" | "down" | "all") => void;
   onStageHunk?: (id: string, pos: number) => void;
 }) {
+  const [hunkMenu, setHunkMenu] = useState<{ x: number; y: number; lines: UnifiedLine[] } | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const codeRef = useRef<HTMLDivElement | null>(null);
   const mouseYRef = useRef<number | null>(null);
@@ -726,6 +733,7 @@ function VirtualRows({
         <DiffLane
           key={`${lane}-${key}`}
           row={row}
+          rowIndex={range.start + index}
           lane={lane}
           hovered={hoverKey === key}
           commenting={commentTarget?.key === key}
@@ -753,6 +761,32 @@ function VirtualRows({
     <>
       <div
         ref={bodyRef}
+        title="Right-click a diff line for hunk actions"
+        onContextMenu={(event) => {
+          let y = event.clientY - event.currentTarget.getBoundingClientRect().top - range.padTop;
+          for (let index = range.start; index < range.end; index++) {
+            const row = rows[index];
+            if (y < row.height) {
+              if (row.type !== "line") return;
+              const lines = selectedDiffHunk(blocks, row.line);
+              if (!lines.some(line => line.kind === "add" || line.kind === "del")) return;
+              event.preventDefault();
+              setHunkMenu({ x: event.clientX, y: event.clientY, lines });
+              return;
+            }
+            y -= row.height;
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+          const element = (event.target as HTMLElement).closest<HTMLElement>("[data-diff-row]");
+          if (!element) return;
+          const row = rows[Number(element.dataset.diffRow)];
+          if (!row || row.type !== "line") return;
+          event.preventDefault();
+          const rect = element.getBoundingClientRect();
+          setHunkMenu({ x: rect.left + 48, y: Math.max(0, rect.top), lines: selectedDiffHunk(blocks, row.line) });
+        }}
         className="flex"
         onMouseMove={(event) => {
           mouseYRef.current = event.clientY;
@@ -775,6 +809,17 @@ function VirtualRows({
           </div>
         </div>
       </div>
+      {hunkMenu ? <ExplorerMenu x={hunkMenu.x} y={hunkMenu.y} ariaLabel="Selected hunk actions" header={<div className="truncate px-2 py-1 text-[11px] text-content/50">{filePath} · selected hunk</div>} items={[
+        { kind: "item", id: "add", label: "Add to chat" },
+        { kind: "item", id: "send", label: "Send to agent…" },
+      ]} onClose={() => setHunkMenu(null)} onPick={id => {
+        const patch = formatUnifiedHunk(hunkMenu.lines);
+        const context = contextFromText(`${filePath} · selected hunk`, patch, filePath);
+        context.entries[0].language = "diff";
+        if (id === "add") requestAddToChat(`${filePath.slice(0, 2000)}\n\n${formatCodeBlock(context.entries[0].text.slice(0, 28_000), "diff")}${context.entries[0].truncated || patch.length > 28_000 ? "\n\n_Hunk truncated to the context limit._" : ""}`, "plain");
+        else requestAgentContext({ context });
+        setHunkMenu(null);
+      }} /> : null}
       {commentTarget ? (
         <DiffCommentComposer
           path={filePath}
@@ -801,6 +846,7 @@ function diffRowKey(row: DiffViewRow, index: number) {
 
 function DiffLane({
   row,
+  rowIndex,
   lane,
   hovered,
   commenting,
@@ -810,6 +856,7 @@ function DiffLane({
   onComment,
 }: {
   row: DiffViewRow;
+  rowIndex: number;
   lane: Lane;
   hovered: boolean;
   commenting: boolean;
@@ -835,6 +882,7 @@ function DiffLane({
   }
   return (
     <DiffLineRow
+      rowIndex={rowIndex}
       line={row.line}
       lane={lane}
       hovered={hovered}
@@ -889,6 +937,7 @@ function FoldBar({
 
 const DiffLineRow = memo(function DiffLineRow({
   line,
+  rowIndex,
   lane,
   hovered,
   commenting,
@@ -897,6 +946,7 @@ const DiffLineRow = memo(function DiffLineRow({
   onComment,
 }: {
   line: UnifiedLine;
+  rowIndex: number;
   lane: Lane;
   hovered: boolean;
   commenting: boolean;
@@ -907,6 +957,7 @@ const DiffLineRow = memo(function DiffLineRow({
   if (line.kind === "hunk") {
     return (
       <div
+        data-diff-row={rowIndex}
         className="flex items-center bg-content/5"
         style={{ height: UNIFIED_HUNK_PX }}
       >
@@ -936,6 +987,7 @@ const DiffLineRow = memo(function DiffLineRow({
   if (lane === "gutter") {
     return (
       <div
+        data-diff-row={rowIndex}
         className={`relative flex items-center ${row}`}
         style={{ height: UNIFIED_LINE_PX }}
       >
@@ -985,6 +1037,7 @@ const DiffLineRow = memo(function DiffLineRow({
 
   return (
     <div
+      data-diff-row={rowIndex}
       className={`flex items-center ${row}`}
       style={{ height: UNIFIED_LINE_PX }}
     >

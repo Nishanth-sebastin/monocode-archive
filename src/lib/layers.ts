@@ -4,6 +4,10 @@
  * menus, dialogs, toasts — picks a layer from here so the order is decided in
  * one place instead of by whichever stray `z-50` was written last.
  */
+import { createContext } from "react";
+
+export const PopoverLayerOffset = createContext(0);
+
 export const LAYER = {
   /** Anchored menus, dropdowns, and pickers. */
   popover: 80,

@@ -9,6 +9,7 @@ export type GitlabStatus = {
 };
 
 export type GitlabWorkItem = {
+  account?: string;
   kind: GitlabKind;
   number: number;
   title: string;

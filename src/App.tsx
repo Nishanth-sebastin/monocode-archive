@@ -1,3 +1,5 @@
+import { AgentContextPicker } from "./chrome/AgentContextPicker";
+import { PREPARE_AGENT_CONTEXT, removeContextItem, contextFromTicketDescriptions, linkTicketContext, prepareSessionContext, contextFromTickets, type AgentContextRequest } from "./lib/agentContext";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -234,6 +236,7 @@ import {
   canReplaceSessionTitle,
   formatSessionTitle,
   sessionNeedsInput,
+  isBlankSession,
   newDefaultSession,
   newSession,
   sessionDisplayTitle,
@@ -333,6 +336,8 @@ import { NotesView } from "./surfaces/NotesView";
 import { inboxComposerCard, type InboxItem } from "./lib/githubTasks";
 import {
   linkedWorkItemFromInboxItem,
+  OPEN_INBOX_WORK_ITEM,
+  removeSessionWorkItem,
   resolveLinkedWorkItem,
 } from "./lib/sessionWorkItem";
 import { linearIssueDetails, peekLinearIssueDetails } from "./lib/linear";
@@ -635,6 +640,12 @@ export default function App({
   const [searchViewOpen, setSearchViewOpen] = useState(false);
   const [searchViewFocusToken, setSearchViewFocusToken] = useState(0);
   const [inboxViewOpen, setInboxViewOpen] = useState(false);
+  const [inboxConversationId, setInboxConversationId] = useState<string>();
+  const [inboxConversationRevision, setInboxConversationRevision] = useState(0);
+  const [inboxSelectionRevision, setInboxSelectionRevision] = useState(0);
+  useEffect(() => {
+    if (!inboxViewOpen) setInboxConversationId(undefined);
+  }, [inboxViewOpen]);
   const [inboxTarget, setInboxTarget] = useState<LinkedWorkItem | null>(null);
   const [inboxAskPortal, setInboxAskPortal] =
     useState<InboxSessionPortal | null>(null);
@@ -1360,7 +1371,7 @@ export default function App({
     // Inbox owns these panes independently of project tabs. Keep their drafts
     // and attachments mounted when the panel closes or switches items.
     for (const session of sessions) {
-      if (session.inboxAsk) visibleIds.add(session.id);
+      if (session.inboxAsk || session.contextDraft) visibleIds.add(session.id);
     }
     const keepUnseen = liveAgentsEnabled;
     const idleDetached = sessions.filter(
@@ -1477,6 +1488,120 @@ export default function App({
     projectCwd,
   ]);
 
+  const [inboxMounted, setInboxMounted] = useState(inboxViewOpen);
+  useEffect(() => {
+    if (inboxViewOpen) setInboxMounted(true);
+  }, [inboxViewOpen]);
+  const [contextRequest, setContextRequest] = useState<AgentContextRequest>();
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const request = (event as CustomEvent<AgentContextRequest>).detail;
+      const source = sessionsRef.current.find(
+        (session) =>
+          session.id === (request.sourceSessionId ?? activeSessionIdRef.current),
+      );
+      if (
+        request.prepareInSource &&
+        source &&
+        (!request.cwd || sessionWorkCwd(source) === request.cwd)
+      ) {
+        try {
+          const next = prepareSessionContext(source, request.context, true);
+          const updated = sessionsRef.current.map((session) =>
+            session.id === next.id ? next : session,
+          );
+          sessionsRef.current = updated;
+          setSessions(updated);
+          request.onPrepared?.();
+          return;
+        } catch {
+          /* Keep the selection available in the review sheet. */
+        }
+      }
+      setContextRequest(
+        (current) =>
+          current ?? {
+            ...request,
+            sourceSessionId:
+              request.sourceSessionId ??
+              (source && (!request.cwd || sessionWorkCwd(source) === request.cwd)
+                ? source.id
+                : undefined),
+          },
+      );
+    };
+    window.addEventListener(PREPARE_AGENT_CONTEXT, receive);
+    return () => window.removeEventListener(PREPARE_AGENT_CONTEXT, receive);
+  }, []);
+
+  const prepareContextDestination = async (
+    request: AgentContextRequest,
+    destination: string | Session,
+    signal?: AbortSignal,
+  ): Promise<string> => {
+    const context = request.tickets ? await contextFromTicketDescriptions(request.tickets, signal) : request.context;
+    if (typeof destination === "string" && !sessionsRef.current.some(session => session.id === destination)) {
+      await ensureOpenSession(destination);
+      signal?.throwIfAborted();
+    }
+    signal?.throwIfAborted();
+    const existing = typeof destination === "string";
+    const target = existing
+      ? sessionsRef.current.find((session) => session.id === destination)
+      : destination;
+    if (!target)
+      throw new Error("Conversation closed. Choose another destination.");
+    const tickets = request.context.entries.every(entry => !!entry.ticket);
+    let next = tickets ? linkTicketContext(target, context) : prepareSessionContext(target, context, true);
+    if (existing) {
+      const updated = sessionsRef.current.map((session) =>
+        session.id === next.id ? next : session,
+      );
+      sessionsRef.current = updated;
+      setSessions(updated);
+    } else {
+      const created = next = { ...next, ...(tickets ? { title: request.context.entries.map(entry => entry.ticket!.identifier).join(", ") } : {}) };
+      const updated = [...sessionsRef.current, created];
+      sessionsRef.current = updated;
+      setSessions(updated);
+      const tab = newTab(created.id);
+      appendTab(tab, created.cwd);
+      setActiveTabId(tab.id);
+      if (tickets) { setInboxViewOpen(true); setInboxConversationId(created.id); }
+      else setInboxViewOpen(false);
+      setNotesViewOpen(false);
+      setComposerFocused(true);
+    }
+    if (tickets) persistSession(next);
+    request.onPrepared?.();
+    return next.id;
+  };
+  const onToggleConversationTicket = async (sessionId: string, item: InboxItem, selected: boolean) => {
+    const session = sessionsRef.current.find(session => session.id === sessionId);
+    const link = linkedWorkItemFromInboxItem(item);
+    if (!session || !link) throw new Error("Conversation or ticket is unavailable.");
+    const context = selected ? await contextFromTicketDescriptions([item]) : undefined;
+    const current = sessionsRef.current.find(entry => entry.id === sessionId);
+    if (!current) throw new Error("Conversation closed.");
+    const next = context ? linkTicketContext(current, context) : removeSessionWorkItem(current, link);
+    if (!selected && next.contextDraft) {
+      const entries = next.contextDraft.entries.filter(entry => entry.workItem?.url !== link.url || entry.workItem?.account !== link.account);
+      next.contextDraft = entries.length || next.contextDraft.attachments.length ? { ...next.contextDraft, entries } : undefined;
+    }
+    const updated = sessionsRef.current.map(session => session.id === sessionId ? next : session);
+    sessionsRef.current = updated;
+    setSessions(updated);
+    // Normal edits use the existing debounced session save, avoiding a full
+    // transcript serialization for every checkbox. Empty sessions need an
+    // explicit write because the autosave intentionally skips them.
+    if (!shouldPersistSession(next)) {
+      pendingPersist.current.delete(sessionId);
+      const summary = await upsertSession(next, { allowEmpty: true });
+      if (summary && summary.cwd === sidebarCwdRef.current) setHistory(current => mergeProjectHistorySummary(current, summary));
+    } else {
+      pendingPersist.current.set(sessionId, next);
+    }
+  };
   const onStartInboxItem = useCallback(
     async (item: InboxItem, body?: string, context?: import("./lib/githubTasks").InboxComposerCard) => {
       const start = (description?: string) => {
@@ -1504,8 +1629,7 @@ export default function App({
       };
 
       if (context) {
-        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
-        start();
+        setContextRequest({ context: contextFromTickets([item], context), tickets: [item], cwd: item.projectPath || active?.cwd });
         return;
       }
       if (item.provider === "azure") {
@@ -1594,8 +1718,11 @@ export default function App({
   const onInboxCardDismiss = useCallback((sessionId: string, fileId?: string) => {
     setSessions((prev) =>
       prev.map((session) =>
-        session.id === sessionId && session.inboxCard
-          ? { ...session, inboxCard: fileId ? { ...session.inboxCard, attachments: session.inboxCard.attachments?.filter(file => file.id !== fileId) } : undefined }
+        session.id === sessionId && (session.inboxCard || session.contextDraft)
+          ? { ...session,
+              contextDraft: fileId === "__context__" ? undefined : fileId && session.contextDraft ? removeContextItem(session.contextDraft, fileId) : session.contextDraft,
+              inboxCard: fileId === "__context__" ? session.inboxCard : fileId && session.inboxCard ? { ...session.inboxCard, attachments: session.inboxCard.attachments?.filter(file => file.id !== fileId) } : undefined,
+            }
           : session,
       ),
     );
@@ -3730,6 +3857,7 @@ export default function App({
                 ? {
                     ...s,
                     inboxCard: rawCommand ? s.inboxCard : undefined,
+                    contextDraft: rawCommand ? s.contextDraft : undefined,
                     noteCard: rawCommand ? s.noteCard : undefined,
                     handoffCard: rawCommand ? s.handoffCard : undefined,
                     queuedMessages: [
@@ -3772,6 +3900,7 @@ export default function App({
             let next: Session = {
               ...s,
               inboxCard: rawCommand ? s.inboxCard : undefined,
+              contextDraft: rawCommand ? s.contextDraft : undefined,
               noteCard: rawCommand ? s.noteCard : undefined,
               handoffCard: rawCommand ? s.handoffCard : undefined,
             };
@@ -3860,6 +3989,7 @@ export default function App({
           let next: Session = {
             ...selected,
             inboxCard: rawCommand ? s.inboxCard : undefined,
+            contextDraft: rawCommand ? s.contextDraft : undefined,
             noteCard: rawCommand ? s.noteCard : undefined,
             handoffCard: rawCommand ? s.handoffCard : undefined,
           };
@@ -4846,9 +4976,15 @@ export default function App({
     setSettingsOpen(false);
     setSearchViewOpen(false);
     setNotesViewOpen(false);
-    setInboxTarget(item);
+    setInboxTarget({ ...item });
     setInboxViewOpen(true);
   }, []);
+
+  useEffect(() => {
+    const open = (event: Event) => onOpenLinkedWorkItem((event as CustomEvent<LinkedWorkItem>).detail);
+    window.addEventListener(OPEN_INBOX_WORK_ITEM, open);
+    return () => window.removeEventListener(OPEN_INBOX_WORK_ITEM, open);
+  }, [onOpenLinkedWorkItem]);
 
   const onLeaveInbox = useCallback(() => {
     setInboxViewOpen(false);
@@ -4856,11 +4992,12 @@ export default function App({
   }, []);
 
   const onOpenInboxSession = useCallback(
-    (sessionId: string) => {
-      setInboxViewOpen(false);
-      setInboxTarget(null);
-      setSidebarTab("sessions");
-      void onSelectHistorySession(sessionId);
+    async (sessionId: string) => {
+      await onSelectHistorySession(sessionId);
+      setInboxViewOpen(true);
+      setInboxConversationId(sessionId);
+      setInboxConversationRevision(value => value + 1);
+      setComposerFocused(true);
     },
     [onSelectHistorySession],
   );
@@ -5372,6 +5509,7 @@ export default function App({
     onQueuedMessageEditingChange,
     onSteerQueuedMessage,
     onResumeQueue,
+    onAddIssues: async (sessionId: string) => { await onOpenInboxSession(sessionId); setInboxSelectionRevision(value => value + 1); },
     onInboxCardDismiss,
     onNoteCardDismiss,
     onHandoffCardDismiss,
@@ -5617,6 +5755,7 @@ export default function App({
                         <PaneTree
                           {...sessionPaneProps}
                           visible={tab.id === activeTabId && !inboxViewOpen}
+                          sessionPortal={inboxViewOpen && tab.id === activeTabId ? inboxAskPortal ?? undefined : undefined}
                           layout={tab.layout}
                           sessions={sessions}
                           editorPanes={[
@@ -5699,7 +5838,7 @@ export default function App({
               );
             })}
         </div>
-        {inboxViewOpen ? (
+        {inboxMounted || inboxViewOpen ? <div hidden={!inboxViewOpen} className={inboxViewOpen ? "flex min-h-0 min-w-0 flex-1" : "hidden"}>
           <InboxView
             cwd={sidebarCwd}
             recents={recents}
@@ -5714,8 +5853,16 @@ export default function App({
             sessions={inboxRelatedSessions}
             onOpenSession={onOpenInboxSession}
             target={inboxTarget}
+            visible={inboxViewOpen}
+            conversationId={inboxConversationId}
+            conversationRevision={inboxConversationRevision}
+            selectionRevision={inboxSelectionRevision}
+            onCloseConversation={() => setInboxConversationId(undefined)}
+            onToggleConversationTicket={onToggleConversationTicket}
+            onSelectTickets={items => setContextRequest({ context: contextFromTickets(items), tickets: items, cwd: sidebarCwd })}
           />
-        ) : null}
+        </div> : null}
+        {contextRequest ? <AgentContextPicker request={contextRequest} history={sidebarHistory} sessions={sessions} recents={recents} onPrepare={prepareContextDestination} onOpen={id => { if (contextRequest.context.entries.every(entry => !!entry.ticket)) void onOpenInboxSession(id); else { setInboxViewOpen(false); void onSelectHistorySession(id); } }} onClose={() => setContextRequest(undefined)} /> : null}
         {notesViewOpen ? (
           <NotesView
             besideRail={projectRailOpen}
@@ -5790,11 +5937,6 @@ function lastUserBlockId(session: Session): string | undefined {
     if (session.blocks[i]?.role === "user") return session.blocks[i]?.id;
   }
   return undefined;
-}
-
-function isBlankSession(session: Session | undefined): boolean {
-  if (!session || session.busy) return false;
-  return !session.blocks.some((block) => block.role === "user");
 }
 
 function selectedChangePath(

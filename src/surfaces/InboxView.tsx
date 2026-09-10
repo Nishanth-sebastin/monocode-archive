@@ -1,6 +1,9 @@
+import { inboxComposerCard } from "../lib/githubTasks";
+import { contextTicketKey } from "../lib/agentContext";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   CheckCheck,
+  Check,
   ChevronDown,
   CircleDot,
   CircleX,
@@ -20,6 +23,8 @@ import {
   type IconComponent,
 } from "../chrome/icons";
 import {
+  memo,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -31,7 +36,7 @@ import {
   INBOX_FILTER_MENU_WIDTH,
 } from "../chrome/InboxFiltersMenu";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
-import { InboxContextPicker, useInboxContext } from "../chrome/InboxContextPicker";
+import { ContextCheckbox, InboxContextPicker, useInboxContext } from "../chrome/InboxContextPicker";
 import type { InboxComposerCard } from "../lib/githubTasks";
 import { ProjectLogoIcon } from "../chrome/ProjectLogoIcon";
 import { ProjectMascot } from "../chrome/ProjectMascot";
@@ -90,8 +95,10 @@ import { sameProjectPath, type RecentProject } from "../lib/recents";
 import { sessionDisplayTitle, type LinkedWorkItem } from "../lib/session";
 import type { SessionSummary } from "../lib/sessionStore";
 import {
+  inboxRelatedSessionCounts,
   inboxItemMatchesLinkedWorkItem,
   linkedWorkItemInboxKey,
+  sessionWorkItems,
   relatedSessionsForInboxItem,
 } from "../lib/sessionWorkItem";
 import {
@@ -322,6 +329,13 @@ type Props = {
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   /** Session-card destination to reveal after the Inbox list loads. */
   target?: LinkedWorkItem | null;
+  visible?: boolean;
+  conversationId?: string;
+  conversationRevision?: number;
+  selectionRevision?: number;
+  onCloseConversation?: () => void;
+  onToggleConversationTicket?: (sessionId: string, item: InboxItem, selected: boolean) => Promise<void>;
+  onSelectTickets?: (items: InboxItem[]) => void;
 };
 
 export function InboxView({
@@ -338,8 +352,50 @@ export function InboxView({
   sessions = [],
   onOpenSession,
   target = null,
+  visible = true,
+  conversationId,
+  conversationRevision,
+  selectionRevision = 0,
+  onCloseConversation,
+  onToggleConversationTicket,
+  onSelectTickets,
 }: Props) {
+  const [selectingTickets, setSelectingTickets] = useState(false);
+  const [issuesCollapsed, setIssuesCollapsed] = useState(false);
+  useEffect(() => { if (selectionRevision) { setSelectingTickets(true); setIssuesCollapsed(false); } }, [selectionRevision]);
+  const [selectedTickets, setSelectedTickets] = useState<Map<string, InboxItem>>(new Map());
+  const [selectionError, setSelectionError] = useState("");
+  const [pendingTickets, setPendingTickets] = useState<Map<string, boolean>>(new Map());
+  const conversationLinks = sessionWorkItems(sessions.find(session => session.id === conversationId) ?? {});
+  const editingLinks = !!conversationId && !!onToggleConversationTicket;
+  const selectionCount = editingLinks ? conversationLinks.length : selectedTickets.size;
+  const ticketSelected = (item: InboxItem) => pendingTickets.get(contextTicketKey(item)) ?? (editingLinks ? conversationLinks.some(link => inboxItemMatchesLinkedWorkItem(item, link)) : selectedTickets.has(contextTicketKey(item)));
+  const toggleTicket = (item: InboxItem) => {
+    setSelectionError("");
+    if (editingLinks) {
+      const key = contextTicketKey(item);
+      if (pendingTickets.has(key)) return;
+      const selected = !ticketSelected(item);
+      setPendingTickets(previous => new Map(previous).set(key, selected));
+      void onToggleConversationTicket!(conversationId!, item, selected)
+        .catch(error => setSelectionError(`Could not save ticket links: ${String(error)}`))
+        .finally(() => setPendingTickets(previous => { const next = new Map(previous); next.delete(key); return next; }));
+      return;
+    }
+    const identity = contextTicketKey(item);
+    if (!selectedTickets.has(identity) && selectedTickets.size >= 20) { setSelectionError("Select at most 20 tickets."); return; }
+    setSelectedTickets(previous => { const next = new Map(previous); if (next.has(identity)) next.delete(identity); else next.set(identity, { ...item }); return next; });
+  };
   const [discussionOpen, setDiscussionOpen] = useState(false);
+  const [previewingTicket, setPreviewingTicket] = useState(false);
+  useEffect(() => setPreviewingTicket(false), [conversationId, conversationRevision]);
+  useEffect(() => {
+    if (visible) return;
+    setSelectingTickets(false);
+    setSelectedTickets(new Map());
+    setSelectionError("");
+    setDiscussionOpen(false);
+  }, [visible]);
   const listLock = useLockOverscroll<HTMLDivElement>();
   const detailLock = useLockOverscroll<HTMLDivElement>();
   const onCloseRef = useRef(onClose);
@@ -436,13 +492,18 @@ export function InboxView({
   });
 
   useEffect(() => {
+    if (!visible) return;
     if (!target) return;
-    setSource("github");
-    setVisibleSources(previous => previous.includes("github") ? previous : ["github", ...previous]);
+    setPreviewingTicket(true);
+    setDiscussionOpen(false);
+    setSelectedKey(linkedWorkItemInboxKey(target));
+    setSource(target.provider ?? "github");
+    setVisibleSources(previous => previous.includes(target.provider ?? "github") ? previous : [target.provider ?? "github", ...previous]);
     setSearchInput("");
-  }, [target]);
+  }, [target, visible]);
 
   useEffect(() => {
+    if (!visible) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -455,24 +516,27 @@ export function InboxView({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [filterMenu]);
+  }, [visible, filterMenu]);
 
   useEffect(() => {
+    if (!visible) return;
     const onChange = () => {
       setLinearHiddenTeamIds(loadHiddenLinearTeamIds());
       setRefresh((value) => value + 1);
     };
     window.addEventListener(LINEAR_CHANGE_EVENT, onChange);
     return () => window.removeEventListener(LINEAR_CHANGE_EVENT, onChange);
-  }, []);
+  }, [visible]);
 
   useEffect(() => {
+    if (!visible) return;
     const onChange = () => setRefresh((value) => value + 1);
     window.addEventListener(GITLAB_CHANGE_EVENT, onChange);
     return () => window.removeEventListener(GITLAB_CHANGE_EVENT, onChange);
-  }, []);
+  }, [visible]);
 
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     const update = (changed = false) => {
       if (changed) clearInboxCache();
@@ -489,9 +553,10 @@ export function InboxView({
     const onChange = () => update(true);
     window.addEventListener(JIRA_CHANGE_EVENT, onChange);
     return () => { cancelled = true; window.removeEventListener(JIRA_CHANGE_EVENT, onChange); };
-  }, []);
+  }, [visible]);
 
   useEffect(() => {
+    if (!visible) return;
     if (source !== "jira" || !jiraSite || !filterMenu) return;
     let cancelled = false;
     setJiraOptionsError("");
@@ -508,9 +573,10 @@ export function InboxView({
         if (!cancelled) setJiraOptionsError(String(error));
       });
     return () => { cancelled = true; };
-  }, [source, jiraSite, !!filterMenu, refresh]);
+  }, [visible, source, jiraSite, !!filterMenu, refresh]);
 
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     const update = (changed = false) => {
       if (changed) clearInboxCache();
@@ -528,11 +594,12 @@ export function InboxView({
     const onChange = () => update(true);
     window.addEventListener(AZURE_CHANGE_EVENT, onChange);
     return () => { cancelled = true; window.removeEventListener(AZURE_CHANGE_EVENT, onChange); };
-  }, []);
+  }, [visible]);
 
   // The roster has to come from Linear, not from the fetched issues: hiding a
   // team drops its issues, so a derived list could never offer it back.
   useEffect(() => {
+    if (!visible) return;
     if (source !== "linear") return;
     let cancelled = false;
     void listLinearTeams()
@@ -545,9 +612,10 @@ export function InboxView({
     return () => {
       cancelled = true;
     };
-  }, [source, linearHiddenTeamIds]);
+  }, [visible, source, linearHiddenTeamIds]);
 
   useEffect(() => {
+    if (!visible) return;
     const force = refresh !== prevRefresh.current;
     prevRefresh.current = refresh;
     const cached = peekInboxList(projects, fetchQuery);
@@ -600,11 +668,13 @@ export function InboxView({
     return () => {
       cancelled = true;
     };
-  }, [fetchQuery, projects, refresh]);
+  }, [visible, fetchQuery, projects, refresh]);
 
   useEffect(() => {
+    if (!visible) return;
     if (
       !target ||
+      (target.provider && target.provider !== "github") ||
       items.some((item) => inboxItemMatchesLinkedWorkItem(item, target))
     ) {
       return;
@@ -625,7 +695,7 @@ export function InboxView({
     return () => {
       cancelled = true;
     };
-  }, [cwd, items, target, targetSelectionKey]);
+  }, [visible, cwd, items, target, targetSelectionKey]);
 
   const visibleItems = useMemo(() => {
     const visible = applyInboxFilters(
@@ -635,7 +705,7 @@ export function InboxView({
       Date.now(),
       source,
     );
-    if (!target || source !== "github") return visible;
+    if (!target || source !== (target.provider ?? "github")) return visible;
     const targeted =
       items.find((item) => inboxItemMatchesLinkedWorkItem(item, target)) ??
       (targetItem && inboxItemMatchesLinkedWorkItem(targetItem, target)
@@ -644,6 +714,15 @@ export function InboxView({
     if (!targeted || visible.includes(targeted)) return visible;
     return [targeted, ...visible];
   }, [activeFilters, items, searchInput, source, target, targetItem]);
+
+  const relatedSessionCounts = useMemo(() => inboxRelatedSessionCounts(visibleItems, sessions), [visibleItems, sessions]);
+  const selectTicketPreview = useCallback((item: InboxItem) => {
+    const key = inboxItemKey(item);
+    markInboxItemSeen({ key, updatedAt: item.updatedAt });
+    setSelectedKey(key);
+    setPreviewingTicket(true);
+    setDiscussionOpen(false);
+  }, []);
 
   const inboxSeenTick = useInboxSeenTick();
   const sourceEntries = useMemo(
@@ -729,7 +808,9 @@ export function InboxView({
   const list = (
     <div
       ref={resize.setPaneRef}
-      className="relative flex h-full min-h-0 shrink-0 flex-col border-r border-content/10"
+      id="inbox-ticket-list"
+      hidden={!!conversationId && issuesCollapsed}
+      className={conversationId && issuesCollapsed ? "hidden" : "relative flex h-full min-h-0 shrink-0 flex-col border-r border-content/10"}
     >
       <div
         role="tablist"
@@ -741,6 +822,14 @@ export function InboxView({
         ))}
       </div>
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-content/10 px-2">
+        {selectingTickets ? <>
+          <span className="min-w-0 flex-1 text-[12px] text-content/60">{selectionCount} {editingLinks ? "linked" : "selected"}</span>
+          {!editingLinks ? <button type="button" disabled={!selectionCount} onClick={() => {
+            try { onSelectTickets?.([...selectedTickets.values()]); } catch (error) { setSelectionError(String(error)); }
+          }} className="rounded-md bg-content/10 px-2 py-1 text-[11px] disabled:opacity-40">Open conversation</button> : null}
+          <button type="button" aria-label="Done selecting tickets" onClick={() => { setSelectedTickets(new Map()); setSelectingTickets(false); setSelectionError(""); }} className="rounded-md px-2 py-1 text-[11px] text-content/60 hover:bg-content/5">Done</button>
+        </> : <>
+
         <div className="relative flex h-7 min-w-0 flex-1 items-center">
           <Search className="pointer-events-none absolute left-2 size-3 shrink-0 opacity-50" />
           <input
@@ -766,6 +855,7 @@ export function InboxView({
         >
           <ListFilter className="size-3" strokeWidth={1.75} />
         </button>
+        {onSelectTickets ? <button type="button" aria-label="Select tickets" title="Select tickets" onClick={() => { setSelectingTickets(true); setFilterMenu(null); setSelectionError(""); }} className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content"><Check className="size-3.5" strokeWidth={1.75} /></button> : null}
         <button
           type="button"
           title="Mark all as read"
@@ -791,7 +881,9 @@ export function InboxView({
             <RefreshCw className="size-3.5" strokeWidth={1.75} />
           )}
         </button>
+        </>}
       </div>
+      {selectionError ? <p role="alert" className="px-3 py-1 text-[11px] text-red-400">{selectionError}</p> : null}
       <div
         ref={listLock}
         className="min-h-0 flex-1 overflow-y-auto overscroll-none"
@@ -842,13 +934,10 @@ export function InboxView({
             {visibleItems.map((item) => {
               const key = inboxItemKey(item);
               const projectId = projectKey(item.projectPath);
-              const relatedSessions = relatedSessionsForInboxItem(
-                item,
-                sessions,
-              );
               return (
-                <li key={key}>
-                  <InboxCard
+                <li key={key} className={selectingTickets ? "flex items-center gap-1" : undefined}>
+                  {selectingTickets ? <ContextCheckbox label={`Select ${item.provider} ${item.identifier || item.number} ${item.title}`} checked={ticketSelected(item)} disabled={pendingTickets.has(contextTicketKey(item))} onChange={() => toggleTicket(item)} /> : null}
+                  <div className="min-w-0 flex-1"><InboxCard
                     item={item}
                     active={selected != null && key === inboxItemKey(selected)}
                     logoPath={resolveTabGroupLogo(projectId, logos)}
@@ -859,15 +948,9 @@ export function InboxView({
                       groupCustomColors,
                       projectName(item.projectPath),
                     )}
-                    relatedSessionCount={relatedSessions.length}
-                    onSelect={() => {
-                      markInboxItemSeen({
-                        key,
-                        updatedAt: item.updatedAt,
-                      });
-                      setSelectedKey(key);
-                    }}
-                  />
+                    relatedSessionCount={relatedSessionCounts.get(item) ?? 0}
+                    onSelect={selectTicketPreview}
+                  /></div>
                 </li>
               );
             })}
@@ -932,6 +1015,8 @@ export function InboxView({
             strokeWidth={1.75}
           />
           <span className="min-w-0 truncate text-content">Inbox</span>
+          {conversationId ? <button type="button" aria-expanded={!issuesCollapsed} aria-controls="inbox-ticket-list" onClick={() => setIssuesCollapsed(value => !value)} className="rounded-md px-2 py-1 text-[11px] text-content/60 hover:bg-content/5">{issuesCollapsed ? "Show issues" : "Hide issues"}</button> : null}
+          {conversationId && previewingTicket ? <button type="button" className="ml-auto rounded-md px-2 py-1 text-[11px] text-content/60 hover:bg-content/5" onClick={() => setPreviewingTicket(false)}>Back to conversation</button> : null}
         </div>
         {IS_MAC ? null : <WindowControls />}
       </div>
@@ -941,8 +1026,15 @@ export function InboxView({
         <div className="relative flex min-h-0 min-w-0 flex-1">
           <div
             ref={detailLock}
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"
+            hidden={!!conversationId && !previewingTicket}
+            className={conversationId && !previewingTicket ? "hidden" : "min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"}
           >
+            {target && !selected && selectedKey === targetSelectionKey && !loading && source === target.provider && target.provider !== "github" ? (
+              <div role="status" className="p-4 text-[13px] text-content/60">
+                <p className="mb-2 font-medium text-content">{target.title || target.identifier || `Issue ${target.number}`}</p>
+                <p>This linked issue is not available in the current Inbox. Check the connected account and provider filters.</p>
+              </div>
+            ) : null}
             <InboxDetailBody
               item={selected}
               cwd={cwd}
@@ -957,17 +1049,18 @@ export function InboxView({
                 setDiscussionOpen(true);
               }}
               onStart={onStart}
-              onOpenSession={onOpenSession}
+              onOpenSession={id => { setPreviewingTicket(false); return onOpenSession?.(id); }}
             />
           </div>
-          {discussionOpen && selected ? (
+          {(conversationId && !previewingTicket) || (discussionOpen && selected) ? (
             <InboxDiscussionPanel
               onOpen={onAsk}
               onRestart={onAskRestart}
               onMount={onAskMount}
-              key={inboxAskKey(selected)}
-              item={selected}
-              onClose={() => setDiscussionOpen(false)}
+              key={conversationId ?? (selected ? inboxAskKey(selected) : "") }
+              sessionId={conversationId}
+              item={selected ?? undefined}
+              onClose={() => { setDiscussionOpen(false); onCloseConversation?.(); }}
             />
           ) : null}
         </div>
@@ -1055,7 +1148,7 @@ function inboxStatusMark(item: InboxItem): InboxStatusMark {
   };
 }
 
-function InboxCard({
+const InboxCard = memo(function InboxCard({
   item,
   active,
   logoPath,
@@ -1070,7 +1163,7 @@ function InboxCard({
   mascotName: string | null;
   mascotColor: string;
   relatedSessionCount: number;
-  onSelect: () => void;
+  onSelect: (item: InboxItem) => void;
 }) {
   useInboxSeenTick();
   const status = inboxStatusMark(item);
@@ -1099,7 +1192,7 @@ function InboxCard({
       aria-label={`${jira || azure ? item.state : status.label} ${kindLabel.toLowerCase()} ${inboxItemRef(
         item,
       )}: ${item.title}${unseen ? ", new" : ""}${relatedSessionCount > 0 ? `, ${relatedSessionCount} related ${relatedSessionCount === 1 ? "thread" : "threads"}` : ""}`}
-      onClick={onSelect}
+      onClick={() => onSelect(item)}
       className={`flex w-full flex-col rounded-md border px-2.5 py-2 text-left ${
         active
           ? "border-transparent bg-content/10 text-content"
@@ -1174,7 +1267,7 @@ function InboxCard({
       </span>
     </button>
   );
-}
+});
 
 function InboxDetail({
   item,
@@ -1251,6 +1344,7 @@ function InboxDetail({
     cwd;
   const [startProject, setStartProject] = useState(defaultProject);
   const context = useInboxContext(item);
+  const [sendError, setSendError] = useState("");
   const [retry, setRetry] = useState(0);
   const status = ticket
     ? item.state || inboxItemStatus(item)
@@ -1681,7 +1775,8 @@ function InboxDetail({
                   context.busy
                 }
                 onClick={() => {
-                  context.open("send");
+                  setSendError("");
+                  void Promise.resolve(onStart(ticket ? { ...item, projectPath: startProject } : item, undefined, inboxComposerCard(item))).catch(reason => setSendError(String(reason)));
                 }}
                 className={`${ACTION_FILLED} disabled:cursor-default disabled:opacity-40`}
               >
@@ -1716,6 +1811,7 @@ function InboxDetail({
                   : "Open on GitHub"}
           </button>
         </div>
+        {sendError ? <p role="alert" className="text-[12px] text-red-400">{sendError}</p> : null}
         <InboxContextPicker context={context}
           destination={ticket ? <InboxProjectPicker projects={projects} value={startProject} onChange={setStartProject} /> : <span className="truncate" title={item.projectPath}>{projectName(item.projectPath)}</span>}
           onConfirm={async (card, action) => {

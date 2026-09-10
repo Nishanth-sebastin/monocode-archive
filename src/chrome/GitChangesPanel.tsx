@@ -1,3 +1,5 @@
+import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
+import { ContextCheckbox } from "./InboxContextPicker";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -90,6 +92,7 @@ const indexByCwd = new Map<string, GitDiffIndex>();
 const prByCwd = new Map<string, GitPr | null>();
 
 type Props = {
+  sourceSessionId?: string;
   cwd: string;
   enabled: boolean;
   textHarness?: HarnessId;
@@ -102,6 +105,7 @@ type Props = {
 };
 
 export function GitChangesPanel({
+  sourceSessionId,
   cwd,
   enabled,
   textHarness,
@@ -163,6 +167,7 @@ export function GitChangesPanel({
       <ChangedFiles
         cwd={cwd}
         textHarness={textHarness}
+        sourceSessionId={sourceSessionId}
         index={index}
         files={files}
         selected={selectedPath}
@@ -221,6 +226,7 @@ export function GitChangesPanel({
 function ChangedFiles({
   cwd,
   textHarness,
+  sourceSessionId,
   index,
   files,
   selected,
@@ -233,6 +239,7 @@ function ChangedFiles({
 }: {
   cwd: string;
   textHarness?: HarnessId;
+  sourceSessionId?: string;
   index: GitDiffIndex | null;
   files: GitChangedFile[];
   selected?: string;
@@ -243,6 +250,32 @@ function ChangedFiles({
   onOpenAllChanges: () => void;
   onMutated: (paths?: string[]) => void;
 }) {
+  const [selectingContext, setSelectingContext] = useState(false);
+  const [contextSelected, setContextSelected] = useState<Set<string>>(new Set());
+  const [contextBusy, setContextBusy] = useState(false);
+  const [contextError, setContextError] = useState("");
+  const contextGeneration = useRef(0);
+  useEffect(() => {
+    setContextSelected(new Set());
+    return () => {
+      contextGeneration.current++;
+    };
+  }, [cwd]);
+  const contextSelection = selectingContext
+    ? {
+        selected: contextSelected,
+        toggle: (relative: string, kind: GitFileDiffKind) => {
+          if (contextBusy) return;
+          const key = JSON.stringify([relative, kind]);
+          setContextSelected((previous) => {
+            const next = new Set(previous);
+            if (next.has(key)) next.delete(key);
+            else if (next.size < 20) next.add(key);
+            return next;
+          });
+        },
+      }
+    : undefined;
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const menuRef = useRef<HTMLDivElement>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
@@ -467,10 +500,68 @@ function ChangedFiles({
     }
   };
 
+  const contextLoading = useRef(false);
+  const prepareSelected = async (prepareInSource: boolean) => {
+    if (contextLoading.current) return;
+    contextLoading.current = true;
+    const generation = contextGeneration.current;
+    setContextBusy(true);
+    setContextError("");
+    try {
+      const selections = [...contextSelected].map((key) => {
+        const [relative, kind] = JSON.parse(key) as [string, GitFileDiffKind];
+        return { relative, kind };
+      });
+      if (
+        selections.some(
+          (selection) =>
+            !files.some(
+              (file) =>
+                file.relative === selection.relative &&
+                (selection.kind === "staged" ? file.staged : file.unstaged),
+            ),
+        )
+      )
+        throw new Error(
+          "A selected change is no longer available. Select changes again.",
+        );
+      const context = await contextFromChanges(cwd, selections);
+      if (generation === contextGeneration.current) {
+        requestAgentContext({ context, cwd, sourceSessionId, prepareInSource, onPrepared: () => {
+          if (generation !== contextGeneration.current) return;
+          setContextSelected(new Set());
+          setSelectingContext(false);
+        } });
+      }
+    } catch (reason) {
+      if (generation === contextGeneration.current)
+        setContextError(String(reason));
+    } finally {
+      contextLoading.current = false;
+      if (generation === contextGeneration.current) setContextBusy(false);
+    }
+  };
   return (
     <aside
       className={`flex min-h-0 min-w-0 flex-col ${fill ? "flex-1" : "shrink-0"}`}
     >
+      <div className="flex flex-wrap items-center gap-1 border-b border-content/10 px-2 py-1 text-[12px]">
+        {selectingContext ? <span className="min-w-0 flex-1 px-1 text-content/50">{contextSelected.size ? `${contextSelected.size} selected` : "Select files"}</span> : null}
+        {selectingContext && contextSelected.size > 0 ? <>
+          <button type="button" disabled={contextBusy} className="h-7 rounded-md px-2 text-content/80 hover:bg-content/5 disabled:opacity-40" onClick={() => void prepareSelected(true)}>
+            {contextBusy ? "Loading…" : "Add to chat"}
+          </button>
+          <button type="button" disabled={contextBusy} className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5 disabled:opacity-40" onClick={() => void prepareSelected(false)}>Send to agent…</button>
+        </> : null}
+        <button type="button" aria-pressed={selectingContext} className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5" onClick={() => {
+          contextGeneration.current++;
+          setContextSelected(new Set());
+          setSelectingContext(value => !value);
+          setContextBusy(false);
+          setContextError("");
+        }}>{selectingContext ? "Done" : "Select changes"}</button>
+        {contextError ? <p role="alert" className="w-full px-1 text-red-400">{contextError}</p> : null}
+      </div>
       <div className="shrink-0 border-b border-content/10 p-2">
         <div className="relative">
           <textarea
@@ -608,6 +699,7 @@ function ChangedFiles({
                 ]}
               >
                 <ChangeList
+                  contextSelection={contextSelection}
                   files={staged}
                   view={view}
                   kind="staged"
@@ -649,6 +741,7 @@ function ChangedFiles({
                 ]}
               >
                 <ChangeList
+                  contextSelection={contextSelection}
                   files={unstaged}
                   view={view}
                   kind="unstaged"
@@ -950,7 +1043,12 @@ type ChangeDir = {
   status: string | null;
 };
 
+type ContextSelection = {
+  selected: ReadonlySet<string>;
+  toggle: (relative: string, kind: GitFileDiffKind) => void;
+};
 type ChangeRowProps = {
+  contextSelection?: ContextSelection;
   files: GitChangedFile[];
   view: ChangesView;
   kind: GitFileDiffKind;
@@ -980,6 +1078,7 @@ function ChangeList({ files, view, ...rest }: ChangeRowProps) {
           kind={rest.kind}
           onOpenFile={rest.onOpenFile}
           onAction={rest.onAction}
+          contextSelection={rest.contextSelection}
         />
       ))}
     </>
@@ -995,6 +1094,7 @@ function ChangeDirChildren({
   busy,
   onOpenFile,
   onAction,
+  contextSelection,
 }: Omit<ChangeRowProps, "files" | "view"> & {
   dir: ChangeDir;
   depth: number;
@@ -1012,6 +1112,7 @@ function ChangeDirChildren({
           busy={busy}
           onOpenFile={onOpenFile}
           onAction={onAction}
+          contextSelection={contextSelection}
         />
       ))}
       {dir.files.map((file) => (
@@ -1024,6 +1125,7 @@ function ChangeDirChildren({
           depth={depth}
           onOpenFile={onOpenFile}
           onAction={onAction}
+          contextSelection={contextSelection}
         />
       ))}
     </>
@@ -1153,7 +1255,9 @@ function ChangeRow({
   depth,
   onOpenFile,
   onAction,
+  contextSelection,
 }: {
+  contextSelection?: ContextSelection;
   file: GitChangedFile;
   active: boolean;
   busy: boolean;
@@ -1182,6 +1286,7 @@ function ChangeRow({
             : "text-content hover:bg-content/5"
         }`}
       >
+        {contextSelection ? <ContextCheckbox label={`Select ${kind} ${file.relative}`} checked={contextSelection.selected.has(JSON.stringify([file.relative, kind]))} onChange={() => contextSelection.toggle(file.relative, kind)} /> : null}
         <button
           type="button"
           title={file.relative}

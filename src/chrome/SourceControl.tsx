@@ -3,6 +3,7 @@ import type { GitFileDiffKind, GitHistoryCommit } from "../lib/fs";
 import { GitChangesPanel } from "./GitChangesPanel";
 
 type Props = {
+  sourceSessionId?: string;
   cwd: string;
   enabled: boolean;
   textHarness?: HarnessId;
@@ -15,6 +16,7 @@ type Props = {
 };
 
 export function SourceControl({
+  sourceSessionId,
   cwd,
   enabled,
   textHarness,
@@ -28,6 +30,7 @@ export function SourceControl({
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
       <GitChangesPanel
+        sourceSessionId={sourceSessionId}
         cwd={cwd}
         enabled={enabled}
         textHarness={textHarness}

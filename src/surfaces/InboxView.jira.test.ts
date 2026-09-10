@@ -106,8 +106,7 @@ it("retains the selected Jira ticket and explicit project through handoff and re
       )!,
     );
     await click(button("Send to agent"));
-    expect(onStart).not.toHaveBeenCalled();
-    await click(button("Open agent draft"));
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(onStart).toHaveBeenCalledWith(
       expect.objectContaining({
         identifier: "ENG-41",
@@ -117,12 +116,10 @@ it("retains the selected Jira ticket and explicit project through handoff and re
       }),
       undefined,
       expect.objectContaining({
-        prompt: expect.stringContaining("Loaded description"),
-        attachments: [],
+        prompt: expect.stringContaining("Ticket"),
       }),
     );
     expect(document.body.textContent).toContain("Handoff failed");
-    await click(button("Cancel"));
     await click(button("GitHub"));
     await click(button("Jira"));
     expect(container.querySelector("h1")?.textContent).toBe("Ticket 41");

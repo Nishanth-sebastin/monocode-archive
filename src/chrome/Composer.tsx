@@ -1,3 +1,5 @@
+import { composeAgentContext, type AgentContext } from "../lib/agentContext";
+import { AgentContextChips } from "./AgentContextChips";
 import { WslBadge } from "./WslBadge";
 import {
   ArrowUp,
@@ -147,6 +149,9 @@ type Props = {
   quoteRequest?: QuoteRequest;
   initialDraft?: string;
   inboxCard?: InboxComposerCard;
+  contextDraft?: AgentContext;
+  hideTicketCards?: boolean;
+  onContextDismiss?: (entryId?: string) => void;
   noteCard?: NoteComposerCard;
   handoffCard?: HandoffComposerCard;
   question?: UserQuestionPrompt;
@@ -402,6 +407,9 @@ export function Composer({
   quoteRequest,
   initialDraft,
   inboxCard,
+  contextDraft,
+  hideTicketCards = false,
+  onContextDismiss,
   noteCard,
   handoffCard,
   question,
@@ -444,13 +452,13 @@ export function Composer({
   const [hasValue, setHasValue] = useState(
     () =>
       (initialDraft ?? "").trim().length > 0 ||
-      !!inboxCard ||
+      !!contextDraft || !!inboxCard ||
       !!noteCard ||
       !!handoffCard,
   );
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState("");
-  const contextFiles = inboxCard?.attachments ?? [];
+  const contextFiles = [...(inboxCard?.attachments ?? []), ...(contextDraft?.attachments ?? [])];
   const allAttachments = [...contextFiles, ...attachments];
   const [fileDrag, setFileDrag] = useState(false);
   const [plusOpen, setPlusOpen] = useState(false);
@@ -488,7 +496,7 @@ export function Composer({
   const navigationEmpty =
     draft.length === 0 &&
     attachments.length === 0 &&
-    !inboxCard &&
+    !contextDraft && !inboxCard &&
     !noteCard &&
     !handoffCard;
   const pickerOpen = creatingSkill || slash !== null;
@@ -548,17 +556,17 @@ export function Composer({
       setHasValue(
         text.trim().length > 0 ||
           files.length > 0 ||
-          !!inboxCard ||
+          !!contextDraft || !!inboxCard ||
           !!noteCard ||
           !!handoffCard,
       );
     },
-    [inboxCard, noteCard, handoffCard],
+    [contextDraft, inboxCard, noteCard, handoffCard],
   );
 
   useEffect(() => {
     syncHasValue(ref.current?.value ?? "", attachmentsRef.current);
-  }, [inboxCard, noteCard, handoffCard, syncHasValue]);
+  }, [contextDraft, inboxCard, noteCard, handoffCard, syncHasValue]);
 
   const addAttachments = useCallback(
     (incoming: Attachment[]) => {
@@ -917,7 +925,7 @@ export function Composer({
     const command = consumePlanCommand(value);
     const text = isNativeCommandPrompt(command.text, harness)
       ? command.text
-      : composeInboxMessage(inboxCard, command.text);
+      : composeAgentContext(contextDraft, composeInboxMessage(inboxCard, command.text));
     const nativeCommand = isNativeCommandPrompt(command.text, harness);
     const files = nativeCommand ? attachments : allAttachments;
     if (files.length && !attachmentsSupported) {
@@ -1237,7 +1245,8 @@ export function Composer({
                 `${HARNESS_TITLE[harness]} does not support attachments. Choose another agent or remove the files.`}
             </p>
           ) : null}
-          {inboxCard ? (
+          {contextDraft ? <AgentContextChips context={hideTicketCards ? { ...contextDraft, entries: contextDraft.entries.filter(entry => !entry.ticket) } : contextDraft} onDismiss={onContextDismiss} /> : null}
+          {inboxCard && !hideTicketCards ? (
             <InboxMiniCard
               card={inboxCard}
               onDismiss={() => onInboxCardDismiss?.()}

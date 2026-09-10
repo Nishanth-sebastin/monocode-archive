@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { describe, expect, it, vi } from "vitest";
 import { newSession, type Block, type Session } from "./session";
 import {
+  upsertSession,
+  getSession,
+  shouldPersistSession,
   isPersistableId,
   persistFingerprint,
   sanitizeSessionForPersist,
@@ -299,4 +303,34 @@ describe("persistFingerprint", () => {
       persistFingerprint({ ...session, context: { used: 10, window: 0 } }),
     ).toBe(persistFingerprint({ ...session, context: { used: 10 } }));
   });
+});
+
+it("retains every explicit ticket link without requiring an initial prompt", () => {
+  const session = newSession("codex", "/tmp/project");
+  session.linkedWorkItem = { kind: "issue", repo: "a/b", number: 8, url: "https://github.com/a/b/issues/8", additionalItems: [{ kind: "issue", repo: "a/b", number: 13, url: "https://github.com/a/b/issues/13" }] };
+  expect(shouldPersistSession(session)).toBe(true);
+  expect(sanitizeSessionForPersist(session).linkedWorkItem).toEqual(session.linkedWorkItem);
+  expect(sanitizeSessionForPersist(session).blocks).toEqual([]);
+});
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+it("can clear the last persisted ticket without manufacturing a user message", async () => {
+  const session = newSession("codex", "/tmp/project");
+  vi.mocked(invoke).mockResolvedValue(null);
+  await upsertSession(session);
+  expect(invoke).not.toHaveBeenCalled();
+  await upsertSession(session, { allowEmpty: true });
+  expect(invoke).toHaveBeenCalledWith("session_upsert", { session: expect.objectContaining({ id: session.id, blocks: [] }) });
+  expect((vi.mocked(invoke).mock.calls[0][1] as { session: object }).session).not.toHaveProperty("linkedWorkItem");
+});
+
+
+it("restores saved issue descriptions and legacy links when reopening a conversation", async () => {
+  const session = newSession("codex", "/tmp/project");
+  session.linkedWorkItem = { kind: "issue", repo: "a/b", number: 8, url: "https://github.com/a/b/issues/8", title: "Saved issue", context: "Original description", additionalItems: [{ provider: "jira", account: "alice", kind: "issue", repo: "ENG", number: 13, url: "https://team.atlassian.net/browse/ENG-13", identifier: "ENG-13", title: "Second issue", context: "Jira description" }, { kind: "issue", repo: "a/b", number: 1, url: "https://github.com/a/b/issues/1" }] };
+  const record = sanitizeSessionForPersist(session);
+  vi.mocked(invoke).mockResolvedValueOnce(record);
+  const restored = await getSession(session.id);
+  expect(restored?.linkedWorkItem).toEqual(session.linkedWorkItem);
+  expect(restored?.contextDraft).toBeUndefined();
 });
