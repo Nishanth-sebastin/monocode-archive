@@ -10,8 +10,7 @@ permissions:
 
 jobs:
   release:
-    # Preserve upstream workflow for merges; this fork has no release authority.
-    if: github.repository == 'hardbeat920/monocode'
+    if: github.repository == 'kaceper11/monocode'
     needs: [linux, windows]
     runs-on: macos-latest
     steps:
@@ -24,11 +23,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Write Apple API key
+      - name: Prepare optional Apple notarization key
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
+          if [[ -z "${APPLE_API_KEY:-}" || -z "${APPLE_API_KEY_P8:-}" ]]; then
+            echo "Apple notarization credentials are not configured; building an ad-hoc-signed macOS artifact."
+            exit 0
+          fi
           mkdir -p "$HOME/private_keys"
           printf '%s\n' "$APPLE_API_KEY_P8" > "$HOME/private_keys/AuthKey_${APPLE_API_KEY}.p8"
           echo "APPLE_API_KEY_PATH=$HOME/private_keys/AuthKey_${APPLE_API_KEY}.p8" >> "$GITHUB_ENV"
@@ -64,35 +67,28 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          TAURI_UPDATER_ENDPOINT: ${{ secrets.TAURI_UPDATER_ENDPOINT }}
-          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
         run: |
           node <<'NODE'
           const { writeFileSync } = require("node:fs");
-          const identity = (process.env.APPLE_SIGNING_IDENTITY || "").trim();
-          if (!identity || identity === "-") {
-            console.error("APPLE_SIGNING_IDENTITY is required and must not be ad-hoc '-'");
-            process.exit(1);
-          }
+          const identity = (process.env.APPLE_SIGNING_IDENTITY || "").trim() || "-";
           const pubkey = process.env.TAURI_UPDATER_PUBKEY || "";
-          const endpoint =
-            process.env.TAURI_UPDATER_ENDPOINT ||
-            (process.env.R2_PUBLIC_BASE_URL
-              ? `${process.env.R2_PUBLIC_BASE_URL.replace(/\/$/, "")}/latest.json`
-              : "");
-          if (!pubkey || !endpoint) {
-            console.error("TAURI_UPDATER_PUBKEY and an updater endpoint are required");
+          const endpoint = "https://github.com/kaceper11/monocode/releases/latest/download/latest.json";
+          if (!pubkey) {
+            console.error("TAURI_UPDATER_PUBKEY is required");
             process.exit(1);
           }
           writeFileSync(
             process.env.RUNNER_TEMP + "/tauri.release.conf.json",
             JSON.stringify(
               {
-                bundle: { macOS: { signingIdentity: identity } },
+                bundle: {
+                  createUpdaterArtifacts: true,
+                  macOS: { signingIdentity: identity },
+                },
                 plugins: {
                   updater: {
                     pubkey,
-                    endpoints: endpoint ? [endpoint] : [],
+                    endpoints: [endpoint],
                   },
                 },
               },
@@ -102,7 +98,7 @@ jobs:
           );
           NODE
 
-      - name: Build, sign, and notarize
+      - name: Build macOS packages
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -125,14 +121,7 @@ jobs:
           name: windows-packages
           path: target/release/bundle/nsis
 
-      - name: Upload to R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+      - name: Stage GitHub release
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -140,33 +129,37 @@ jobs:
           TAR=$(find "$BUNDLE/macos" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)
           SIG="${TAR}.sig"
           DMG=$(find "$BUNDLE/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)
-          shopt -s nullglob
-          WINDOWS_INSTALLERS=("$BUNDLE"/nsis/*.exe)
-          WINDOWS_SIGNATURES=("$BUNDLE"/nsis/*.exe.sig)
-          if (( ${#WINDOWS_INSTALLERS[@]} != 1 || ${#WINDOWS_SIGNATURES[@]} != 1 )); then
-            echo "Expected exactly one Windows installer and updater signature" >&2
-            exit 1
-          fi
-          WINDOWS_INSTALLER="${WINDOWS_INSTALLERS[0]}"
-          WINDOWS_SIGNATURE="${WINDOWS_SIGNATURES[0]}"
-          BASE="${R2_PUBLIC_BASE_URL%/}"
-          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          RELEASE_PREFIX="releases/${VERSION}"
-          TAR_KEY="${RELEASE_PREFIX}/MonoCode.app.tar.gz"
-          SIG_KEY="${TAR_KEY}.sig"
-          DMG_KEY="${RELEASE_PREFIX}/MonoCode_${VERSION}_aarch64.dmg"
-          WINDOWS_INSTALLER_KEY="${RELEASE_PREFIX}/MonoCode_${VERSION}_x64-setup.exe"
-          WINDOWS_SIGNATURE_KEY="${WINDOWS_INSTALLER_KEY}.sig"
+          DEB=$(find "$BUNDLE/linux" -maxdepth 1 -type f -name '*.deb' -print -quit)
+          APPIMAGE=$(find "$BUNDLE/linux" -maxdepth 1 -type f -name '*.AppImage' -print -quit)
+          WINDOWS_INSTALLER=$(find "$BUNDLE/nsis" -maxdepth 1 -type f -name '*.exe' -print -quit)
+          WINDOWS_SIGNATURE="${WINDOWS_INSTALLER}.sig"
+          for artifact in "$DMG" "$TAR" "$SIG" "$DEB" "$APPIMAGE" "$WINDOWS_INSTALLER" "$WINDOWS_SIGNATURE"; do
+            if [[ ! -f "$artifact" ]]; then
+              echo "Missing release artifact: $artifact" >&2
+              exit 1
+            fi
+          done
+
+          mkdir -p release-artifacts
+          cp "$DMG" release-artifacts/MonoCode.dmg
+          cp "$TAR" release-artifacts/MonoCode.app.tar.gz
+          cp "$SIG" release-artifacts/MonoCode.app.tar.gz.sig
+          cp "$DEB" release-artifacts/MonoCode_amd64.deb
+          cp "$APPIMAGE" release-artifacts/MonoCode_amd64.AppImage
+          cp "$WINDOWS_INSTALLER" release-artifacts/MonoCode_x64-setup.exe
+          cp "$WINDOWS_SIGNATURE" release-artifacts/MonoCode_x64-setup.exe.sig
+
+          BASE="https://github.com/kaceper11/monocode/releases/download/${GITHUB_REF_NAME}"
 
           VERSION="$VERSION" \
-            SIG="$SIG" \
-            TAR_URL="$BASE/$TAR_KEY" \
-            WINDOWS_SIGNATURE="$WINDOWS_SIGNATURE" \
-            WINDOWS_INSTALLER_URL="$BASE/$WINDOWS_INSTALLER_KEY" \
+            SIG="release-artifacts/MonoCode.app.tar.gz.sig" \
+            TAR_URL="$BASE/MonoCode.app.tar.gz" \
+            WINDOWS_SIGNATURE="release-artifacts/MonoCode_x64-setup.exe.sig" \
+            WINDOWS_INSTALLER_URL="$BASE/MonoCode_x64-setup.exe" \
             node <<'NODE'
           const fs = require("fs");
           fs.writeFileSync(
-            "latest.json",
+            "release-artifacts/latest.json",
             JSON.stringify(
               {
                 version: process.env.VERSION,
@@ -191,46 +184,23 @@ jobs:
           );
           NODE
 
-          brew list awscli >/dev/null 2>&1 || brew install awscli
-          IMMUTABLE_CACHE="public,max-age=31536000,immutable"
-          NO_CACHE="no-store,max-age=0,must-revalidate"
-          aws s3 cp "$DMG" "s3://${R2_BUCKET_NAME}/${DMG_KEY}" --cache-control "$IMMUTABLE_CACHE" --endpoint-url "$ENDPOINT"
-          aws s3 cp "$TAR" "s3://${R2_BUCKET_NAME}/${TAR_KEY}" --cache-control "$IMMUTABLE_CACHE" --endpoint-url "$ENDPOINT"
-          aws s3 cp "$SIG" "s3://${R2_BUCKET_NAME}/${SIG_KEY}" --cache-control "$IMMUTABLE_CACHE" --endpoint-url "$ENDPOINT"
-          aws s3 cp "$WINDOWS_INSTALLER" "s3://${R2_BUCKET_NAME}/${WINDOWS_INSTALLER_KEY}" --cache-control "$IMMUTABLE_CACHE" --endpoint-url "$ENDPOINT"
-          aws s3 cp "$WINDOWS_SIGNATURE" "s3://${R2_BUCKET_NAME}/${WINDOWS_SIGNATURE_KEY}" --cache-control "$IMMUTABLE_CACHE" --endpoint-url "$ENDPOINT"
-          # Keep the website's stable DMG link, but never let the CDN retain an
-          # older release under this mutable name.
-          aws s3 cp "$DMG" "s3://${R2_BUCKET_NAME}/MonoCode.dmg" --cache-control "$NO_CACHE" --endpoint-url "$ENDPOINT"
-          aws s3 cp latest.json "s3://${R2_BUCKET_NAME}/latest.json" --content-type "application/json" --cache-control "$NO_CACHE" --endpoint-url "$ENDPOINT"
-
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          BUNDLE="target/release/bundle"
-          TAR="$BUNDLE/macos/MonoCode.app.tar.gz"
-          SIG="${TAR}.sig"
-          DMG="$BUNDLE/dmg/MonoCode_${VERSION}_aarch64.dmg"
-          DEB="$BUNDLE/linux/MonoCode_${VERSION}_amd64.deb"
-          APPIMAGE="$BUNDLE/linux/MonoCode_${VERSION}_amd64.AppImage"
-          NSIS="$BUNDLE/nsis/MonoCode_${VERSION}_x64-setup.exe"
-          NSIS_SIG="${NSIS}.sig"
-          for artifact in "$DMG" "$TAR" "$SIG" "$DEB" "$APPIMAGE" "$NSIS" "$NSIS_SIG"; do
-            if [[ ! -f "$artifact" ]]; then
-              echo "Missing release artifact: $artifact" >&2
-              exit 1
-            fi
-          done
-          gh release create "$GITHUB_REF_NAME" \
-            --title "MonoCode $VERSION" \
-            --notes "See CHANGELOG.md for details." \
-            "$DMG" "$TAR" "$SIG" "$DEB" "$APPIMAGE" "$NSIS" "$NSIS_SIG"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-artifacts/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "MonoCode $VERSION" \
+              --notes "See CHANGELOG.md for details. macOS uses Apple signing when its optional secrets are configured; the Windows installer is not Authenticode-signed." \
+              release-artifacts/*
+          fi
 
   linux:
-    if: github.repository == 'hardbeat920/monocode'
+    if: github.repository == 'kaceper11/monocode'
     name: Linux packages
     runs-on: ubuntu-22.04
     steps:
@@ -272,7 +242,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    if: github.repository == 'hardbeat920/monocode'
+    if: github.repository == 'kaceper11/monocode'
     name: Windows packages
     runs-on: windows-latest
     steps:
@@ -290,16 +260,8 @@ jobs:
       - name: Write updater release config
         env:
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          TAURI_UPDATER_ENDPOINT: ${{ secrets.TAURI_UPDATER_ENDPOINT }}
-          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
         run: |
-          $endpoint = $env:TAURI_UPDATER_ENDPOINT
-          if ([string]::IsNullOrWhiteSpace($endpoint)) {
-            if ([string]::IsNullOrWhiteSpace($env:R2_PUBLIC_BASE_URL)) {
-              throw "TAURI_UPDATER_ENDPOINT or R2_PUBLIC_BASE_URL is required"
-            }
-            $endpoint = "$($env:R2_PUBLIC_BASE_URL.TrimEnd('/'))/latest.json"
-          }
+          $endpoint = "https://github.com/kaceper11/monocode/releases/latest/download/latest.json"
           if ([string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_PUBKEY)) {
             throw "TAURI_UPDATER_PUBKEY is required"
           }

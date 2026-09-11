@@ -4,7 +4,7 @@ The canonical backlog is [GitHub roadmap #1](https://github.com/kaceper11/monoco
 
 Start with **#32 worktree management** and **#22 Windows-to-WSL execution**. With those foundation branches in place, **#7 agent status is the next active product slice**, followed by #8 targeted handoff. Continue Jira/Azure tickets and delivery, then schedules/watchers. The first WSL slice does not wait for a full daemon or terminal redesign.
 
-Each issue delivers working behavior. Research, performance measurement, tests, host-boundary decisions and credential setup are implementation steps inside that feature, not separate prerequisite projects. Preserve the current app identity and upstream history; no additional branding/setup work is planned.
+Each issue delivers working behavior. Research, performance measurement, tests, host-boundary decisions and credential setup are implementation steps inside that feature, not separate prerequisite projects. Preserve the current app identifier and upstream history. Distribution work is tracked separately in #64.
 
 Each real connector owns its smallest usable connection flow; later capabilities for the same service reuse it. Ticket providers (GitHub, Azure Boards, Jira, existing Linear), Git remotes, PR providers (GitHub/Azure Repos), CI providers (Actions/Azure Pipelines) and agent accounts remain independently selectable. Preserve the compact UI and existing provider behavior.
 

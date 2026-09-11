@@ -497,7 +497,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     ] {
         ensure_session_column(conn, column, decl)?;
     }
-    // Idempotent fork migration: older builds can keep using this database.
+    // Idempotent downstream migration: older builds can keep using this database.
     // LIMIT bounds retained activity, while this covering index bounds lookup IO.
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS sessions_worktree_activity_idx

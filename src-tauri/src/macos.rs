@@ -540,7 +540,7 @@ fn relaunch_from_dev_bundle() -> Result<(), String> {
     let app = exe
         .parent()
         .ok_or("missing exe parent")?
-        .join("MonoCode Fork.app");
+        .join("MonoCode.app");
     let macos_dir = app.join("Contents/MacOS");
     std::fs::create_dir_all(&macos_dir).map_err(|e| e.to_string())?;
     write_dev_bundle_icons(&app)?;
@@ -603,7 +603,7 @@ const DEV_BUNDLE_PLIST: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>MonoCode Fork</string>
+	<string>MonoCode</string>
 	<key>CFBundleExecutable</key>
 	<string>monocode</string>
 	<key>CFBundleIconFile</key>
@@ -615,7 +615,7 @@ const DEV_BUNDLE_PLIST: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>MonoCode Fork</string>
+	<string>MonoCode</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
