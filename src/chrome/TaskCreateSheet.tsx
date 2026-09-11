@@ -78,6 +78,7 @@ type Props = {
   editingTaskId?: string;
   /** An inbox item the new task starts linked to. */
   initialTickets?: LinkedWorkItem[];
+  initialName?: string;
   onClose: () => void;
 };
 
@@ -102,6 +103,7 @@ export function TaskCreateSheet({
   projectId,
   editingTaskId,
   initialTickets,
+  initialName,
   onClose,
 }: Props) {
   const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
@@ -125,7 +127,7 @@ export function TaskCreateSheet({
     [editingTaskId, tasksRaw],
   );
 
-  const [name, setName] = useState(editingTask?.name ?? "");
+  const [name, setName] = useState(editingTask?.name ?? initialName ?? "");
   const [brief, setBrief] = useState(editingTask?.brief ?? "");
   const [selected, setSelected] = useState<string[]>(
     () => editingTask?.children.map((child) => child.repositoryId) ?? [],

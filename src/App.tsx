@@ -373,6 +373,7 @@ import { inboxAskKey, inboxAskPrompt } from "./lib/inboxAsk";
 import { NotesView } from "./surfaces/NotesView";
 import type { InboxItem } from "./lib/githubTasks";
 import {
+  addSessionWorkItems,
   linkedWorkItemFromInboxItem,
   OPEN_INBOX_WORK_ITEM,
   removeSessionWorkItem,
@@ -597,6 +598,12 @@ function titleTabsEqual(a: TitleTab[], b: TitleTab[]): boolean {
 
 // Register capabilities before composer hooks choose their discovery strategy.
 registerBuiltinHarnesses();
+
+/** Prefill a task name from an inbox item: "ENG-41 Fix login redirect". */
+function inboxItemTaskName(item: InboxItem): string {
+  const ref = item.identifier?.trim() || `#${item.number}`;
+  return `${ref} ${item.title}`.trim();
+}
 
 export default function App({
   windowTransfer = null,
@@ -4399,6 +4406,7 @@ export default function App({
     projectId: string;
     editingTaskId?: string;
     initialTickets?: LinkedWorkItem[];
+    initialName?: string;
   } | null>(null);
   const onNewTask = useCallback(
     (path: string, projectId?: string) => {
@@ -4659,7 +4667,27 @@ export default function App({
     (item: InboxItem, taskId: string | null) => {
       const linked = linkedWorkItemFromInboxItem(item);
       if (taskId) {
-        if (linked) linkTicketToTask(taskId, linked);
+        if (linked) {
+          linkTicketToTask(taskId, linked);
+          // Reflect the link on the task's existing session too — otherwise
+          // the issue never shows in that conversation's Issues row.
+          const task = loadTaskWorkspaces().find(
+            (entry) => entry.id === taskId,
+          );
+          const sessionIds = [
+            ...(task?.sessionIds ?? []),
+            ...(task?.children.flatMap((entry) => entry.sessionIds) ?? []),
+          ];
+          if (sessionIds.length) {
+            const next = sessionsRef.current.map((session) =>
+              sessionIds.includes(session.id)
+                ? addSessionWorkItems(session, [linked])
+                : session,
+            );
+            sessionsRef.current = next;
+            setSessions(next);
+          }
+        }
         setInboxViewOpen(false);
         onOpenTask(taskId);
         return;
@@ -4677,6 +4705,7 @@ export default function App({
       setInboxViewOpen(false);
       setTaskSheet({
         projectId: project.id,
+        initialName: inboxItemTaskName(item),
         ...(linked ? { initialTickets: [linked] } : {}),
       });
     },
@@ -4711,6 +4740,7 @@ export default function App({
       setInboxViewOpen(false);
       setTaskSheet({
         projectId: project.id,
+        ...(items[0] ? { initialName: inboxItemTaskName(items[0]) } : {}),
         ...(linked.length ? { initialTickets: linked } : {}),
       });
     },
@@ -6100,6 +6130,7 @@ export default function App({
           projectId={taskSheet.projectId}
           editingTaskId={taskSheet.editingTaskId}
           initialTickets={taskSheet.initialTickets}
+          initialName={taskSheet.initialName}
           onClose={() => setTaskSheet(null)}
         />
       )}

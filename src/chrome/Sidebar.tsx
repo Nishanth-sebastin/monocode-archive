@@ -2241,12 +2241,17 @@ function FolderRenameRow({
   );
 }
 
+/** Task scope for a session, live against the task store. */
+function useTaskScope(sessionId: string) {
+  useSyncExternalStore(subscribeTaskWorkspaces, taskWorkspacesSnapshot);
+  return taskForSession(sessionId);
+}
+
 /** Task marker on a session card — the session belongs to a task rather
  * than a bare repository. Resolves against the task store itself so the
  * card needs no extra props. */
 function SessionTaskChip({ sessionId }: { sessionId: string }) {
-  useSyncExternalStore(subscribeTaskWorkspaces, taskWorkspacesSnapshot);
-  const scope = taskForSession(sessionId);
+  const scope = useTaskScope(sessionId);
   if (!scope) return null;
   return (
     <span
@@ -2305,6 +2310,7 @@ function SessionCard({
   const [dragging, setDragging] = useState(false);
   const title = sessionDisplayTitle(session.title, session.harness);
   const gitLabel = formatGitLabel(session.repo, session.branch);
+  const taskScope = useTaskScope(session.id);
   const time = formatRelative(session.updatedAt, now);
   const model = compact
     ? null
@@ -2582,7 +2588,14 @@ function SessionCard({
         <span className="relative mt-1 flex items-center gap-2">
           {gitLabel ? (
             <span className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45">
-              <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
+              {taskScope ? (
+                <CircleDot
+                  className="size-3 shrink-0 text-accent"
+                  strokeWidth={1.75}
+                />
+              ) : (
+                <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
+              )}
               <span className="min-w-0 truncate">{gitLabel}</span>
             </span>
           ) : (

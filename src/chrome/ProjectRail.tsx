@@ -127,6 +127,7 @@ import {
   taskForSession,
   taskWorkspacesSnapshot,
   loadTaskWorkspaces,
+  projectForTask,
   type TaskChild,
   type TaskWorkspace,
 } from "../lib/taskWorkspaces";
@@ -337,6 +338,20 @@ export function ProjectRail({
     // tasksRaw changes on every store write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasksRaw, liveAgents]);
+  const railTasks = useMemo(() => {
+    const live = loadTaskWorkspaces().filter((task) => !task.archived);
+    const rank = (task: TaskWorkspace) =>
+      task.id === activeTask?.id
+        ? 0
+        : taskBusyIds.has(task.id)
+          ? 1
+          : 2;
+    return [...live].sort(
+      (a, b) => rank(a) - rank(b) || b.createdAt - a.createdAt,
+    );
+    // tasksRaw changes on every store write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasksRaw, activeTask?.id, taskBusyIds]);
   const taskBySessionId = useMemo(() => {
     const map = new Map<string, { task: TaskWorkspace; child: TaskChild }>();
     for (const agent of liveAgents) {
@@ -750,6 +765,13 @@ export function ProjectRail({
               groupMascots={groupMascots}
             />
           </div>
+          <TasksPreview
+            tasks={railTasks}
+            activeTaskId={activeTask?.id}
+            busyIds={taskBusyIds}
+            needsInputIds={needsInputSessionIds}
+            onOpen={onOpenTask}
+          />
           <LiveAgentsPreview
             agents={liveAgents}
             activeSessionId={activeSessionId}
@@ -968,6 +990,131 @@ type SortableHandle = ReturnType<typeof useSortable>;
 
 const LIVE_AGENT_MIN = 2;
 const LIVE_AGENT_CAP = 4;
+
+const TASK_RAIL_CAP = 5;
+
+/** Every active task across projects, with live status — the rail's answer
+ * to "what is the agent working on". Rows: focused task first, then busy,
+ * then the rest by recency. */
+function TasksPreview({
+  tasks,
+  activeTaskId,
+  busyIds,
+  needsInputIds,
+  onOpen,
+}: {
+  tasks: TaskWorkspace[];
+  activeTaskId?: string;
+  busyIds: ReadonlySet<string>;
+  needsInputIds?: ReadonlySet<string>;
+  onOpen?: (taskId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (!tasks.length) return null;
+  const extra = tasks.length - TASK_RAIL_CAP;
+  const visible =
+    expanded || extra <= 0 ? tasks : tasks.slice(0, TASK_RAIL_CAP);
+  return (
+    <div className="shrink-0 px-2">
+      <div
+        role="status"
+        aria-label="Tasks"
+        className="overflow-hidden rounded-lg bg-content/5"
+      >
+        <div className="flex items-center gap-2 px-3.5 py-1.5">
+          <CircleDot
+            aria-hidden
+            className="size-3 shrink-0 text-content/45"
+            strokeWidth={1.75}
+          />
+          <span className="min-w-0 flex-1 truncate text-xs text-content/50">
+            Tasks
+          </span>
+          <span className="text-[11px] tabular-nums text-content/40">
+            {tasks.length}
+          </span>
+        </div>
+        <div className="flex flex-col gap-px px-1 pb-1">
+          {visible.map((task) => {
+            const busy = busyIds.has(task.id);
+            const needsInput =
+              task.sessionIds?.some((id) => needsInputIds?.has(id)) ||
+              task.children.some((entry) =>
+                entry.sessionIds.some((id) => needsInputIds?.has(id)),
+              );
+            const project = projectForTask(task);
+            const projectLabel = project
+              ? project.name?.trim() ||
+                (project.anchor ? projectName(project.anchor) : "Project")
+              : "";
+            const status = busy
+              ? "Working"
+              : needsInput
+                ? "Needs input"
+                : `${task.children.length} repo${task.children.length === 1 ? "" : "s"}`;
+            return (
+              <button
+                key={task.id}
+                type="button"
+                title={[task.name, projectLabel, status]
+                  .filter(Boolean)
+                  .join(" · ")}
+                aria-current={task.id === activeTaskId ? "true" : undefined}
+                onClick={() => onOpen?.(task.id)}
+                className={`flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left ${
+                  task.id === activeTaskId
+                    ? "bg-content/10"
+                    : "hover:bg-content/8"
+                }`}
+              >
+                <CircleDot
+                  aria-hidden
+                  className={`size-3 shrink-0 ${
+                    busy
+                      ? "animate-pulse text-accent"
+                      : needsInput
+                        ? "text-amber-400"
+                        : task.id === activeTaskId
+                          ? "text-accent/80"
+                          : "text-content/40"
+                  }`}
+                  strokeWidth={1.75}
+                />
+                <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug text-content">
+                  {task.name}
+                </span>
+                <span
+                  className={`shrink-0 truncate text-[10px] ${
+                    needsInput && !busy
+                      ? "text-amber-400"
+                      : "text-content/40"
+                  }`}
+                >
+                  {status}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {extra > 0 ? (
+          <button
+            type="button"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((open) => !open)}
+            className="flex w-full items-center justify-center gap-1 px-2 py-1.5 text-[11px] text-content/50 hover:bg-content/8 hover:text-content"
+          >
+            {expanded ? (
+              <ChevronUp className="size-3" strokeWidth={1.75} />
+            ) : (
+              <ChevronDown className="size-3" strokeWidth={1.75} />
+            )}
+            {expanded ? "Show less" : `${extra} more`}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 function LiveAgentsPreview({
   agents,
