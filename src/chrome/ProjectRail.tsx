@@ -297,21 +297,7 @@ export function ProjectRail({
     subscribeTaskWorkspaces,
     taskWorkspacesSnapshot,
   );
-  const tasksByProject = useMemo(() => {
-    const tasks = loadTaskWorkspaces();
-    const map = new Map<string, TaskWorkspace[]>();
-    for (const task of tasks) {
-      if (task.archived) continue;
-      const list = map.get(task.projectId) ?? [];
-      list.push(task);
-      map.set(task.projectId, list);
-    }
-    for (const list of map.values())
-      list.sort((a, b) => b.createdAt - a.createdAt);
-    return map;
-    // tasksRaw changes on every store write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasksRaw]);
+
 
   /** Task owning the focused session — drives the scope highlight across all
    * of its repository rows, not just the host cwd. */
@@ -710,6 +696,28 @@ export function ProjectRail({
             }}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none pb-2"
           >
+            <TasksSection
+              tasks={railTasks}
+              currentTaskId={currentTaskId}
+              busyIds={taskBusyIds}
+              needsInputIds={needsInputSessionIds}
+              onOpen={onOpenTask}
+              onMenu={openTaskMenu}
+              onNewTask={
+                storedProjects.length
+                  ? () => {
+                      const current = storedProjects.find((project) =>
+                        projectContainsPath(project, cwd, families),
+                      );
+                      const project = current ?? storedProjects[0];
+                      onNewTask?.(
+                        project.anchor ?? projectRailKey(project.id),
+                        project.id,
+                      );
+                    }
+                  : undefined
+              }
+            />
             {sections.pinned.length > 0 ? (
               <ProjectSection
                 label="Pinned"
@@ -724,14 +732,7 @@ export function ProjectRail({
                 onTogglePin={onTogglePin}
                 onContextMenu={onProjectContextMenu}
                 onOpenMenu={openProjectMenu}
-                tasksByProject={tasksByProject}
-                needsInputSessionIds={needsInputSessionIds}
-                onNewTask={onNewTask}
-                onOpenTask={onOpenTask}
-                onTaskMenu={openTaskMenu}
-                activeTaskId={currentTaskId}
                 scopeRepoIds={scopeRepoIds}
-                taskBusyIds={taskBusyIds}
                 groupLabels={groupLabels}
                 groupColors={groupColors}
                 groupCustomColors={groupCustomColors}
@@ -757,14 +758,7 @@ export function ProjectRail({
               onTogglePin={onTogglePin}
               onContextMenu={onProjectContextMenu}
               onOpenMenu={openProjectMenu}
-              tasksByProject={tasksByProject}
-              needsInputSessionIds={needsInputSessionIds}
-              onNewTask={onNewTask}
-              onOpenTask={onOpenTask}
-              onTaskMenu={openTaskMenu}
-              activeTaskId={currentTaskId}
               scopeRepoIds={scopeRepoIds}
-              taskBusyIds={taskBusyIds}
               groupLabels={groupLabels}
               groupColors={groupColors}
               groupCustomColors={groupCustomColors}
@@ -772,13 +766,6 @@ export function ProjectRail({
               groupMascots={groupMascots}
             />
           </div>
-          <TasksPreview
-            tasks={railTasks}
-            activeTaskId={currentTaskId}
-            busyIds={taskBusyIds}
-            needsInputIds={needsInputSessionIds}
-            onOpen={onOpenTask}
-          />
           <LiveAgentsPreview
             agents={liveAgents}
             activeSessionId={activeSessionId}
@@ -997,131 +984,6 @@ type SortableHandle = ReturnType<typeof useSortable>;
 
 const LIVE_AGENT_MIN = 2;
 const LIVE_AGENT_CAP = 4;
-
-const TASK_RAIL_CAP = 5;
-
-/** Every active task across projects, with live status — the rail's answer
- * to "what is the agent working on". Rows: focused task first, then busy,
- * then the rest by recency. */
-function TasksPreview({
-  tasks,
-  activeTaskId,
-  busyIds,
-  needsInputIds,
-  onOpen,
-}: {
-  tasks: TaskWorkspace[];
-  activeTaskId?: string;
-  busyIds: ReadonlySet<string>;
-  needsInputIds?: ReadonlySet<string>;
-  onOpen?: (taskId: string) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  if (!tasks.length) return null;
-  const extra = tasks.length - TASK_RAIL_CAP;
-  const visible =
-    expanded || extra <= 0 ? tasks : tasks.slice(0, TASK_RAIL_CAP);
-  return (
-    <div className="shrink-0 px-2">
-      <div
-        role="status"
-        aria-label="Tasks"
-        className="overflow-hidden rounded-lg bg-content/5"
-      >
-        <div className="flex items-center gap-2 px-3.5 py-1.5">
-          <CircleDot
-            aria-hidden
-            className="size-3 shrink-0 text-content/45"
-            strokeWidth={1.75}
-          />
-          <span className="min-w-0 flex-1 truncate text-xs text-content/50">
-            Tasks
-          </span>
-          <span className="text-[11px] tabular-nums text-content/40">
-            {tasks.length}
-          </span>
-        </div>
-        <div className="flex flex-col gap-px px-1 pb-1">
-          {visible.map((task) => {
-            const busy = busyIds.has(task.id);
-            const needsInput =
-              task.sessionIds?.some((id) => needsInputIds?.has(id)) ||
-              task.children.some((entry) =>
-                entry.sessionIds.some((id) => needsInputIds?.has(id)),
-              );
-            const project = projectForTask(task);
-            const projectLabel = project
-              ? project.name?.trim() ||
-                (project.anchor ? projectName(project.anchor) : "Project")
-              : "";
-            const status = busy
-              ? "Working"
-              : needsInput
-                ? "Needs input"
-                : `${task.children.length} repo${task.children.length === 1 ? "" : "s"}`;
-            return (
-              <button
-                key={task.id}
-                type="button"
-                title={[task.name, projectLabel, status]
-                  .filter(Boolean)
-                  .join(" · ")}
-                aria-current={task.id === activeTaskId ? "true" : undefined}
-                onClick={() => onOpen?.(task.id)}
-                className={`flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left ${
-                  task.id === activeTaskId
-                    ? "bg-content/10"
-                    : "hover:bg-content/8"
-                }`}
-              >
-                <CircleDot
-                  aria-hidden
-                  className={`size-3 shrink-0 ${
-                    busy
-                      ? "animate-pulse text-accent"
-                      : needsInput
-                        ? "text-amber-400"
-                        : task.id === activeTaskId
-                          ? "text-accent/80"
-                          : "text-content/40"
-                  }`}
-                  strokeWidth={1.75}
-                />
-                <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug text-content">
-                  {task.name}
-                </span>
-                <span
-                  className={`shrink-0 truncate text-[10px] ${
-                    needsInput && !busy
-                      ? "text-amber-400"
-                      : "text-content/40"
-                  }`}
-                >
-                  {status}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        {extra > 0 ? (
-          <button
-            type="button"
-            aria-expanded={expanded}
-            onClick={() => setExpanded((open) => !open)}
-            className="flex w-full items-center justify-center gap-1 px-2 py-1.5 text-[11px] text-content/50 hover:bg-content/8 hover:text-content"
-          >
-            {expanded ? (
-              <ChevronUp className="size-3" strokeWidth={1.75} />
-            ) : (
-              <ChevronDown className="size-3" strokeWidth={1.75} />
-            )}
-            {expanded ? "Show less" : `${extra} more`}
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
 
 function LiveAgentsPreview({
   agents,
@@ -1352,14 +1214,7 @@ function ProjectSection({
   onTogglePin,
   onContextMenu,
   onOpenMenu,
-  tasksByProject,
-  needsInputSessionIds,
-  onNewTask,
-  onOpenTask,
-  onTaskMenu,
-  activeTaskId,
   scopeRepoIds,
-  taskBusyIds,
   groupLabels,
   groupColors,
   groupCustomColors,
@@ -1384,14 +1239,7 @@ function ProjectSection({
     x: number,
     y: number,
   ) => void;
-  tasksByProject: ReadonlyMap<string, TaskWorkspace[]>;
-  needsInputSessionIds?: ReadonlySet<string>;
-  onNewTask?: (path: string, projectId?: string) => void;
-  onOpenTask?: (taskId: string) => void;
-  onTaskMenu: (task: TaskWorkspace, x: number, y: number) => void;
-  activeTaskId?: string;
   scopeRepoIds?: ReadonlySet<string>;
-  taskBusyIds?: ReadonlySet<string>;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
   groupCustomColors: Record<string, string>;
@@ -1439,14 +1287,7 @@ function ProjectSection({
             onTogglePin={onTogglePin}
             onContextMenu={onContextMenu}
             onOpenMenu={onOpenMenu}
-            tasks={item.project ? (tasksByProject.get(item.project.id) ?? []) : []}
-            needsInputSessionIds={needsInputSessionIds}
-            onNewTask={onNewTask}
-            onOpenTask={onOpenTask}
-            onTaskMenu={onTaskMenu}
-            activeTaskId={activeTaskId}
             scopeRepoIds={scopeRepoIds}
-            taskBusyIds={taskBusyIds}
             groupLabels={groupLabels}
             groupColors={groupColors}
             groupCustomColors={groupCustomColors}
@@ -1746,13 +1587,88 @@ function ProjectRepositoryRow({
   );
 }
 
-/** One task row inside an expanded project — name, ticket ref, repository
- * count, needs-input dot. Opens the task's last active repository child. */
+/** The rail's one home for tasks — a dedicated section listing every active
+ * task with live status, instead of rows buried inside each project. */
+function TasksSection({
+  tasks,
+  currentTaskId,
+  busyIds,
+  needsInputIds,
+  onOpen,
+  onMenu,
+  onNewTask,
+}: {
+  tasks: TaskWorkspace[];
+  currentTaskId?: string;
+  busyIds: ReadonlySet<string>;
+  needsInputIds?: ReadonlySet<string>;
+  onOpen?: (taskId: string) => void;
+  onMenu: (task: TaskWorkspace, x: number, y: number) => void;
+  onNewTask?: () => void;
+}) {
+  if (!tasks.length) return null;
+  return (
+    <div className="mb-2 shrink-0">
+      <div className="flex items-center gap-1 px-3 pb-1.5 pt-1">
+        <span className="min-w-0 flex-1 truncate px-1 text-xs text-content/50">
+          Tasks
+        </span>
+        {onNewTask ? (
+          <button
+            type="button"
+            title="New task"
+            aria-label="New task"
+            onClick={onNewTask}
+            className="grid size-5 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/8 hover:text-content"
+          >
+            <Plus className="size-3.5" strokeWidth={1.75} />
+          </button>
+        ) : null}
+      </div>
+      <div className="flex flex-col gap-px px-2">
+        {tasks.map((task) => {
+          const project = projectForTask(task);
+          return (
+            <TaskRailRow
+              key={task.id}
+              task={task}
+              active={task.id === currentTaskId}
+              busy={busyIds.has(task.id)}
+              needsInput={
+                task.sessionIds?.some((id) => needsInputIds?.has(id)) ||
+                task.children.some((entry) =>
+                  entry.sessionIds.some((id) => needsInputIds?.has(id)),
+                ) ||
+                false
+              }
+              projectLabel={
+                project
+                  ? project.name?.trim() ||
+                    (project.anchor ? projectName(project.anchor) : "Project")
+                  : ""
+              }
+              onOpen={() => onOpen?.(task.id)}
+              onMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onMenu(task, event.clientX, event.clientY);
+              }}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** One task row in the Tasks section — name, ticket ref, project +
+ * repository meta, needs-input and working markers. Opens the task. */
 function TaskRailRow({
   task,
   active = false,
   busy = false,
   needsInput,
+  projectLabel = "",
   onOpen,
   onMenu,
 }: {
@@ -1762,6 +1678,8 @@ function TaskRailRow({
   /** Its agent is mid-turn — pulsing marker. */
   busy?: boolean;
   needsInput: boolean;
+  /** Owning project — shown when the row lives outside the project tree. */
+  projectLabel?: string;
   onOpen: () => void;
   onMenu: (event: MouseEvent<HTMLElement>) => void;
 }) {
@@ -1806,9 +1724,17 @@ function TaskRailRow({
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug text-content">
             {task.name}
           </span>
-          {ticket ? (
+          {busy ? (
+            <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-accent">
+              Working
+            </span>
+          ) : ticket ? (
             <span className="shrink-0 text-[11px] text-content/40">
               {ticket}
+            </span>
+          ) : projectLabel ? (
+            <span className="shrink-0 truncate text-[10px] text-content/40">
+              {projectLabel}
             </span>
           ) : null}
         </span>
@@ -1824,6 +1750,7 @@ function TaskRailRow({
             {needsInput ? "Needs input" : ""}
             {needsInput && repoNames ? " · " : ""}
             {repoNames || `${task.children.length} repos`}
+            {projectLabel ? ` · ${projectLabel}` : ""}
           </span>
         </span>
       </button>
@@ -1846,14 +1773,7 @@ function ProjectFamilyCard(
     families: ReadonlyMap<string, RepositoryFamily>;
     cwd: string;
     busyPaths: Set<string>;
-    tasks: TaskWorkspace[];
-    needsInputSessionIds?: ReadonlySet<string>;
-    onNewTask?: (path: string, projectId?: string) => void;
-    onOpenTask?: (taskId: string) => void;
-    onTaskMenu: (task: TaskWorkspace, x: number, y: number) => void;
-    activeTaskId?: string;
     scopeRepoIds?: ReadonlySet<string>;
-    taskBusyIds?: ReadonlySet<string>;
   },
 ) {
   const {
@@ -1862,14 +1782,7 @@ function ProjectFamilyCard(
     cwd,
     busyPaths,
     onSelect,
-    tasks,
-    needsInputSessionIds,
-    onNewTask,
-    onOpenTask,
-    onTaskMenu,
-    activeTaskId,
     scopeRepoIds,
-    taskBusyIds,
   } = props;
   const project = props.item.project;
   const multiRepo = (project?.repositories.length ?? 0) > 1;
@@ -1897,10 +1810,7 @@ function ProjectFamilyCard(
       !hidden.some((path) => sameProjectPath(path, child.path)),
   );
   const visible =
-    expanded ??
-    (isGroup ||
-      (!multiRepo && children.length > 1) ||
-      tasks.some((task) => task.id === activeTaskId));
+    expanded ?? (isGroup || (!multiRepo && children.length > 1));
   const selected =
     multiRepo || isGroup
       ? !!project && projectContainsPath(project, cwd, families)
@@ -1974,55 +1884,6 @@ function ProjectFamilyCard(
             : undefined
         }
       />
-      {visible && tasks.length ? (
-        <div className="my-1 ml-5 overflow-hidden rounded-lg bg-content/5 pb-1">
-          <div className="flex items-center gap-2 px-2.5 pb-1 pt-1.5">
-            <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wide text-content/35">
-              Tasks · {tasks.length}
-            </span>
-            {onNewTask ? (
-              <button
-                type="button"
-                title="New task in this project"
-                aria-label="New task in this project"
-                className="grid size-4 place-items-center rounded text-content/40 hover:bg-content/10 hover:text-content"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onNewTask(props.item.path, project?.id);
-                }}
-              >
-                <Plus className="size-3" strokeWidth={1.75} />
-              </button>
-            ) : null}
-          </div>
-          <div className="px-1">
-            {tasks.map((task) => (
-              <TaskRailRow
-                key={task.id}
-                task={task}
-                active={task.id === activeTaskId}
-                busy={taskBusyIds?.has(task.id) ?? false}
-                needsInput={
-                  task.sessionIds?.some((id) =>
-                    needsInputSessionIds?.has(id),
-                  ) ||
-                  task.children.some((entry) =>
-                    entry.sessionIds.some(
-                      (id) => needsInputSessionIds?.has(id),
-                    ),
-                  )
-                }
-                onOpen={() => onOpenTask?.(task.id)}
-                onMenu={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onTaskMenu(task, event.clientX, event.clientY);
-                }}
-              />
-            ))}
-          </div>
-        </div>
-      ) : null}
       {visible && (multiRepo || isGroup) && project && (
         <div className="my-0.5 ml-5">
           {project.repositories.map((repo) => (
