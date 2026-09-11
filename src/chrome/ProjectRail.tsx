@@ -1281,8 +1281,9 @@ function ProjectRepositoryRow({
   onSelect: (path: string) => void;
 }) {
   const anchor = useRef<HTMLButtonElement>(null);
-  const managePath = useRef<string | undefined>(undefined);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [menu, setMenu] = useState<{ create: boolean; path?: string } | null>(
+    null,
+  );
   const [working, setWorking] = useState(false);
   const family = familyForRepository(repo, families);
   const [expanded, setExpanded] = useExpandedRow(
@@ -1322,7 +1323,7 @@ function ProjectRepositoryRow({
           type="button"
           title={prettyCwd(repo.anchor)}
           aria-current={active ? "true" : undefined}
-          className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pl-2 pr-7 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+          className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pl-2 pr-7 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 group-hover/repository:pr-12 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
           onClick={openRepository}
         >
           <Folder
@@ -1331,7 +1332,9 @@ function ProjectRepositoryRow({
           />
           <span className="min-w-0 flex-1 truncate">{name}</span>
           {wsl ? (
-            <span className="shrink-0 text-[10px] text-content/40">WSL</span>
+            <span className="shrink-0 text-[10px] text-content/40 group-hover/repository:invisible">
+              WSL
+            </span>
           ) : null}
           {active ? (
             <Check
@@ -1340,18 +1343,34 @@ function ProjectRepositoryRow({
             />
           ) : null}
         </button>
-        <button
-          type="button"
-          title="Repository worktrees"
-          aria-label={`Manage ${name} worktrees`}
-          className="invisible absolute right-1 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/repository:visible group-focus-within/repository:visible focus-visible:ring-1 focus-visible:ring-content/30"
-          onClick={(event) => {
-            anchor.current = event.currentTarget;
-            setMenuOpen(true);
-          }}
-        >
-          <MoreHorizontal className="size-3" />
-        </button>
+        <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+          {family ? (
+            <button
+              type="button"
+              title={`New worktree in ${name}`}
+              aria-label={`New worktree in ${name}`}
+              className="invisible grid size-5 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/repository:visible group-focus-within/repository:visible focus-visible:ring-1 focus-visible:ring-content/30"
+              onClick={(event) => {
+                anchor.current = event.currentTarget;
+                setMenu({ create: true });
+              }}
+            >
+              <Plus className="size-3" strokeWidth={1.75} />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            title="Repository worktrees"
+            aria-label={`Manage ${name} worktrees`}
+            className="invisible grid size-5 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/repository:visible group-focus-within/repository:visible focus-visible:ring-1 focus-visible:ring-content/30"
+            onClick={(event) => {
+              anchor.current = event.currentTarget;
+              setMenu({ create: false });
+            }}
+          >
+            <MoreHorizontal className="size-3" />
+          </button>
+        </div>
       </div>
       {visible && family ? (
         <div className="my-0.5 ml-5">
@@ -1364,13 +1383,12 @@ function ProjectRepositoryRow({
             onSelect={onSelect}
             onManage={(event, path) => {
               anchor.current = event.currentTarget;
-              setMenuOpen(true);
-              managePath.current = path;
+              setMenu({ create: false, path });
             }}
           />
         </div>
       ) : null}
-      {menuOpen && (
+      {menu && (
         <Popover
           anchor={anchor}
           side="right"
@@ -1378,7 +1396,7 @@ function ProjectRepositoryRow({
           maxHeight={380}
           onDismiss={() => {
             if (!working) {
-              setMenuOpen(false);
+              setMenu(null);
               anchor.current?.focus();
             }
           }}
@@ -1387,9 +1405,9 @@ function ProjectRepositoryRow({
           className="flex flex-col overflow-hidden"
         >
           <WorktreePanel
-            key={managePath.current ?? ""}
-            initialCreate={false}
-            initialPath={managePath.current}
+            key={`${menu.create}:${menu.path ?? ""}`}
+            initialCreate={menu.create}
+            initialPath={menu.path}
             activeCwd={cwd}
             cwd={
               family?.worktrees.find(
@@ -1397,7 +1415,7 @@ function ProjectRepositoryRow({
               )?.path ?? repo.anchor
             }
             onClose={() => {
-              setMenuOpen(false);
+              setMenu(null);
               anchor.current?.focus();
             }}
             onOpen={onSelect}
@@ -1499,7 +1517,6 @@ function ProjectFamilyCard(
   const project = props.item.project;
   const multiRepo = (project?.repositories.length ?? 0) > 1;
   const anchor = useRef<HTMLButtonElement>(null);
-  const managePath = useRef<string | undefined>(undefined);
   const [menu, setMenu] = useState<{ create: boolean; path?: string } | null>(
     null,
   );
@@ -1578,7 +1595,14 @@ function ProjectFamilyCard(
             ? {
                 expanded: visible,
                 toggle: () => setExpanded(!visible),
-                create: (event) => { anchor.current = event.currentTarget; managePath.current = undefined; setMenu({ create: true }); },
+                ...(multiRepo
+                  ? {}
+                  : {
+                      create: (event) => {
+                        anchor.current = event.currentTarget;
+                        setMenu({ create: true });
+                      },
+                    }),
               }
             : undefined
         }
@@ -1631,7 +1655,6 @@ function ProjectFamilyCard(
             onSelect={onSelect}
             onManage={(event, path) => {
               anchor.current = event.currentTarget;
-              managePath.current = path;
               setMenu({ create: false, path });
             }}
           />
@@ -1641,7 +1664,7 @@ function ProjectFamilyCard(
         <button
           type="button"
           className="w-full rounded px-2 py-1 text-left text-[10px] text-content/50 hover:bg-content/5"
-          onClick={(event) => { anchor.current = event.currentTarget; managePath.current = undefined; setMenu({ create: false }); }}
+          onClick={(event) => { anchor.current = event.currentTarget; setMenu({ create: false }); }}
         >
           {allChildren.length - children.length} hidden · Manage worktrees
         </button>
@@ -1701,7 +1724,9 @@ function ProjectCard({
   worktreeControls?: {
     expanded: boolean;
     toggle: () => void;
-    create: (event: MouseEvent<HTMLButtonElement>) => void;
+    /** Worktree creation lives on repository rows for multi-repo projects —
+     * a project-level + would silently target only the anchor repo. */
+    create?: (event: MouseEvent<HTMLButtonElement>) => void;
   };
   selected: boolean;
   busy: boolean;
@@ -1795,7 +1820,7 @@ function ProjectCard({
         title={cardTitle}
         aria-label={cardAriaLabel}
         aria-current={selected ? "true" : undefined}
-        className={`flex min-w-0 flex-1 cursor-default items-center gap-2 text-left ${worktreeControls ? "group-hover:pr-9" : "group-hover:pr-6"}`}
+        className={`flex min-w-0 flex-1 cursor-default items-center gap-2 text-left ${worktreeControls?.create ? "group-hover:pr-9" : "group-hover:pr-6"}`}
       >
         <div className="grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0">
           {logoPath && !busy ? (
@@ -1831,7 +1856,7 @@ function ProjectCard({
         <WslBadge cwd={item.path} compact />
       </span>
       <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
-        {worktreeControls && (
+        {worktreeControls?.create && (
           <button
             type="button"
             data-no-drag
