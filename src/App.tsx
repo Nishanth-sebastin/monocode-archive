@@ -370,7 +370,7 @@ import { InboxView } from "./surfaces/InboxView";
 import type { InboxSessionPortal } from "./surfaces/InboxDiscussionPanel";
 import { inboxAskKey, inboxAskPrompt } from "./lib/inboxAsk";
 import { NotesView } from "./surfaces/NotesView";
-import { inboxComposerCard, type InboxItem } from "./lib/githubTasks";
+import type { InboxItem } from "./lib/githubTasks";
 import {
   linkedWorkItemFromInboxItem,
   OPEN_INBOX_WORK_ITEM,
@@ -1649,74 +1649,6 @@ export default function App({
       pendingPersist.current.set(sessionId, next);
     }
   };
-  const onStartInboxItem = useCallback(
-    async (item: InboxItem, body?: string, context?: import("./lib/githubTasks").InboxComposerCard) => {
-      const start = (description?: string) => {
-        setInboxViewOpen(false);
-        setNotesViewOpen(false);
-        setSidebarTab("sessions");
-        const cwd =
-          item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
-        const ref =
-          item.provider === "linear" || item.provider === "jira" || item.provider === "azure"
-            ? item.identifier?.trim() || `#${item.number}`
-            : `#${item.number}`;
-        const linkedWorkItem = linkedWorkItemFromInboxItem(item);
-        const session = {
-          ...newDefaultSession(cwd, sessionDefaults?.runtimeMode),
-          title: `${ref} ${item.title}`,
-          inboxCard: context ?? inboxComposerCard(item, description),
-          ...(linkedWorkItem ? { linkedWorkItem } : {}),
-        };
-        const tab = newTab(session.id);
-        setSessions((prev) => [...prev, session]);
-        appendTab(tab, cwd);
-        setActiveTabId(tab.id);
-        setComposerFocused(true);
-      };
-
-      if (context) {
-        setContextRequest({ context: contextFromTickets([item], context), tickets: [item], cwd: item.projectPath || active?.cwd });
-        return;
-      }
-      if (item.provider === "azure") {
-        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
-        start(body ?? (peekAzureDetails(item) ?? await azureDetails(item)).body);
-        return;
-      }
-      if (item.provider === "jira") {
-        if (!item.projectPath) throw new Error("Choose a local project before sending to an agent");
-        start(body ?? (peekJiraDetails(item) ?? await jiraDetails(item)).body);
-        return;
-      }
-      if (item.provider !== "linear") {
-        start();
-        return;
-      }
-      if (!item.id) {
-        throw new Error("Missing Linear issue");
-      }
-      if (body !== undefined) {
-        start(body);
-        return;
-      }
-      const cached = peekLinearIssueDetails(item.id);
-      if (cached) {
-        start(cached.body);
-        return;
-      }
-      const details = await linearIssueDetails(item.id);
-      start(details.body);
-    },
-    [
-      active?.cwd,
-      appendTab,
-      sessionDefaults?.cwd,
-      sessionDefaults?.runtimeMode,
-      projectCwd,
-    ],
-  );
-
   const onAddNoteToChat = useCallback(
     (card: NoteComposerCard) => {
       if (!card.id) return;
@@ -4721,7 +4653,8 @@ export default function App({
             getVerifiedFamilies().get(pathKey(path)),
           )
         : undefined;
-      if (!project) return;
+      if (!project)
+        throw new Error("Choose a local project before sending to an agent");
       setInboxViewOpen(false);
       setTaskSheet({
         projectId: project.id,
@@ -6353,7 +6286,6 @@ export default function App({
             besideRail={projectRailOpen}
             onClose={onLeaveInbox}
             onToggleSidebar={onToggleSidebar}
-            onStart={onStartInboxItem}
             onStartTask={onStartItemToTask}
             onOpenSettings={() => openSettings("inbox")}
             onAsk={onAskInboxItem}

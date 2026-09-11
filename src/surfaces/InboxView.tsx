@@ -1,7 +1,7 @@
 import { ACTION_FILLED, ACTION_OUTLINE, ACTION_GHOST } from "../chrome/inboxActions";
 import { AzureInboxDetail } from "../chrome/AzureInboxDetail";
 import { Select } from "../chrome/Select";
-import { inboxComposerCard } from "../lib/githubTasks";
+
 import { contextTicketKey } from "../lib/agentContext";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -338,7 +338,6 @@ type Props = {
   onClose?: () => void;
   onToggleSidebar?: () => void;
   onOpenSettings?: () => void;
-  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onStartTask?: (item: InboxItem, taskId: string | null) => void;
   sessions?: readonly SessionSummary[];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
@@ -366,7 +365,6 @@ export function InboxView({
   onClose,
   onToggleSidebar,
   onOpenSettings,
-  onStart,
   onStartTask,
   sessions = [],
   onOpenSession,
@@ -1197,7 +1195,6 @@ export function InboxView({
                 await onAsk(selected, context);
                 setDiscussionOpen(true);
               }}
-              onStart={onStart}
               onStartTask={onStartTask}
               onOpenDelivery={onOpenDelivery}
               onOpenSession={id => { setPreviewingTicket(false); return onOpenSession?.(id); }}
@@ -1229,7 +1226,6 @@ function InboxDetailBody({
   revision = 0,
   relatedSessions,
   onDiscuss,
-  onStart,
   onStartTask,
   onOpenSession,
   onOpenDelivery,
@@ -1240,7 +1236,6 @@ function InboxDetailBody({
   revision?: number;
   relatedSessions: readonly SessionSummary[];
   onDiscuss?: (context: InboxComposerCard) => void | Promise<void>;
-  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onStartTask?: (item: InboxItem, taskId: string | null) => void;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   onOpenDelivery?: (sessionId: string, kind: "pr" | "ci", current: () => boolean, provider: "github" | "azure", prUrl?: string) => Promise<void>;
@@ -1263,7 +1258,6 @@ function InboxDetailBody({
       revision={revision}
       relatedSessions={relatedSessions}
       onDiscuss={onDiscuss}
-      onStart={onStart}
       onStartTask={onStartTask}
       onOpenSession={onOpenSession}
       onOpenDelivery={onOpenDelivery}
@@ -1434,7 +1428,6 @@ export function InboxDetail({
   revision,
   relatedSessions,
   onDiscuss,
-  onStart,
   onStartTask,
   onOpenSession,
   onOpenDelivery,
@@ -1445,7 +1438,6 @@ export function InboxDetail({
   revision: number;
   relatedSessions: readonly SessionSummary[];
   onDiscuss?: (context: InboxComposerCard) => void | Promise<void>;
-  onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onStartTask?: (item: InboxItem, taskId: string | null) => void;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   onOpenDelivery?: (sessionId: string, kind: "pr" | "ci", current: () => boolean, provider: "github" | "azure", prUrl?: string) => Promise<void>;
@@ -1967,7 +1959,7 @@ export function InboxDetail({
         {deliveryBusy ? <p role="status" className="text-[11px] text-content/50">Opening review…</p> : null}
         {deliveryError ? <p role="alert" className="text-[12px] text-content/70">{deliveryError}</p> : null}
         <div className="flex flex-wrap items-center gap-2 pt-1">
-          {onStart && item.kind !== "pr" ? (
+          {onStartTask && item.kind !== "pr" ? (
             <>
               <button
                 type="button"
@@ -1976,26 +1968,24 @@ export function InboxDetail({
                 }
                 onClick={() => {
                   setSendError("");
-                  void Promise.resolve(onStart(ticket ? { ...item, projectPath: startProject } : item, undefined, inboxComposerCard(item))).catch(reason => setSendError(String(reason)));
+                  void Promise.resolve(onStartTask(ticket ? { ...item, projectPath: startProject } : item, null)).catch(reason => setSendError(String(reason)));
                 }}
                 className={`${ACTION_FILLED} disabled:cursor-default disabled:opacity-40`}
               >
                 Send to agent
               </button>
-              {onStartTask ? (
-                <button
-                  ref={sendAnchor}
-                  type="button"
-                  disabled={context.busy}
-                  title="Send to a task"
-                  aria-label="Send to a task"
-                  aria-expanded={sendMenu}
-                  onClick={() => setSendMenu(true)}
-                  className={`${ACTION_FILLED} -ml-1.5 !px-1.5 disabled:cursor-default disabled:opacity-40`}
-                >
-                  <ChevronDown className="size-3.5" strokeWidth={1.75} />
-                </button>
-              ) : null}
+              <button
+                ref={sendAnchor}
+                type="button"
+                disabled={context.busy}
+                title="Send to a task"
+                aria-label="Send to a task"
+                aria-expanded={sendMenu}
+                onClick={() => setSendMenu(true)}
+                className={`${ACTION_FILLED} -ml-1.5 !px-1.5 disabled:cursor-default disabled:opacity-40`}
+              >
+                <ChevronDown className="size-3.5" strokeWidth={1.75} />
+              </button>
               {ticket ? <InboxProjectPicker projects={projects} value={startProject} onChange={setStartProject} /> : null}
               {sendMenu ? (
                 <SendTargetMenu
@@ -2041,9 +2031,8 @@ export function InboxDetail({
         {sendError ? <p role="alert" className="text-[12px] text-red-400">{sendError}</p> : null}
         <InboxContextPicker context={context}
           destination={ticket ? <InboxProjectPicker projects={projects} value={startProject} onChange={setStartProject} /> : <span className="truncate" title={item.projectPath}>{projectName(item.projectPath)}</span>}
-          onConfirm={async (card, action) => {
-            if (action === "ask") await onDiscuss?.(card);
-            else await onStart?.(ticket ? { ...item, projectPath: startProject } : item, undefined, card);
+          onConfirm={async (card) => {
+            await onDiscuss?.(card);
           }} />
         {(jira || azure) && error && details ? <p role="status" className="text-[12px] text-content/50">{error} <button type="button" className={ACTION_GHOST} onClick={() => setRetry(value => value + 1)}>Retry</button></p> : null}
       </header>
@@ -2327,7 +2316,7 @@ function SendTargetMenu({
 }: {
   anchor: React.RefObject<HTMLButtonElement | null>;
   tasks: readonly TaskWorkspace[];
-  onPick: (taskId: string | null) => void;
+  onPick: (taskId: string) => void;
   onClose: () => void;
 }) {
   const itemClass =
@@ -2337,49 +2326,41 @@ function SendTargetMenu({
       anchor={anchor}
       onDismiss={onClose}
       role="menu"
-      aria-label="Send to agent"
+      aria-label="Send to a task"
       className="w-64 overflow-hidden"
     >
       <div className="px-1.5 py-1.5">
-        <button
-          type="button"
-          role="menuitem"
-          className={itemClass}
-          onClick={() => onPick(null)}
-        >
-          <Plus className="size-3.5 shrink-0 text-content/50" strokeWidth={1.75} />
-          <span className="truncate">New task…</span>
-        </button>
         {tasks.length ? (
-          <>
-            <div className="mx-2 my-1 border-t border-content/10" />
-            {tasks.map((task) => {
-              const project = projectForTask(task);
-              const projectLabel = project
-                ? project.name?.trim() ||
-                  (project.anchor ? projectName(project.anchor) : "Project")
-                : "";
-              return (
-                <button
-                  type="button"
-                  role="menuitem"
-                  key={task.id}
-                  className={itemClass}
-                  onClick={() => onPick(task.id)}
-                >
-                  <CircleDot
-                    className="size-3.5 shrink-0 text-content/50"
-                    strokeWidth={1.75}
-                  />
-                  <span className="min-w-0 flex-1 truncate">{task.name}</span>
-                  <span className="shrink-0 truncate text-[10px] text-content/40">
-                    {projectLabel}
-                  </span>
-                </button>
-              );
-            })}
-          </>
-        ) : null}
+          tasks.map((task) => {
+            const project = projectForTask(task);
+            const projectLabel = project
+              ? project.name?.trim() ||
+                (project.anchor ? projectName(project.anchor) : "Project")
+              : "";
+            return (
+              <button
+                type="button"
+                role="menuitem"
+                key={task.id}
+                className={itemClass}
+                onClick={() => onPick(task.id)}
+              >
+                <CircleDot
+                  className="size-3.5 shrink-0 text-content/50"
+                  strokeWidth={1.75}
+                />
+                <span className="min-w-0 flex-1 truncate">{task.name}</span>
+                <span className="shrink-0 truncate text-[10px] text-content/40">
+                  {projectLabel}
+                </span>
+              </button>
+            );
+          })
+        ) : (
+          <p className="px-2 py-1.5 text-[12px] text-content/45">
+            No tasks yet — Send to agent opens the task sheet.
+          </p>
+        )}
       </div>
     </Popover>
   );
