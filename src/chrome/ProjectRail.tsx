@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
+  Folder,
   FolderOpen,
   FolderTree,
   GitBranch,
@@ -1105,7 +1106,7 @@ function WorkingCopyRows({
               disabled={child.missing || !!child.prunable}
               title={`${prettyCwd(child.path)}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
               aria-current={active ? "true" : undefined}
-              className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 pr-6 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+              className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pl-2 pr-7 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
               onClick={() => onSelect(child.path)}
             >
               <GitBranch
@@ -1130,7 +1131,7 @@ function WorkingCopyRows({
               type="button"
               title="Worktree details and cleanup"
               aria-label={`Manage worktree ${name}`}
-              className="absolute right-0 rounded p-1 text-content/40 opacity-0 hover:bg-content/10 hover:text-content group-hover/working-copy:opacity-100 group-focus-within/working-copy:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-content/30"
+              className="absolute right-1 top-1/2 hidden size-5 -translate-y-1/2 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/working-copy:grid group-focus-within/working-copy:grid focus-visible:ring-1 focus-visible:ring-content/30"
               onClick={(event) => onManage(event, child.path)}
             >
               <MoreHorizontal className="size-3" />
@@ -1197,15 +1198,17 @@ function ProjectRepositoryRow({
               className={`size-3 ${visible ? "" : "-rotate-90"}`}
             />
           </button>
-        ) : null}
+        ) : (
+          <span className="w-4 shrink-0" />
+        )}
         <button
           type="button"
           title={prettyCwd(repo.anchor)}
           aria-current={active ? "true" : undefined}
-          className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 pr-6 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+          className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pl-2 pr-7 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
           onClick={openRepository}
         >
-          <FolderTree
+          <Folder
             className="size-3 shrink-0 text-content/40"
             strokeWidth={1.5}
           />
@@ -1224,7 +1227,7 @@ function ProjectRepositoryRow({
           type="button"
           title="Repository worktrees"
           aria-label={`Manage ${name} worktrees`}
-          className="absolute right-0 rounded p-1 text-content/40 opacity-0 hover:bg-content/10 hover:text-content group-hover/repository:opacity-100 group-focus-within/repository:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-content/30"
+          className="absolute right-1 top-1/2 hidden size-5 -translate-y-1/2 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/repository:grid group-focus-within/repository:grid focus-visible:ring-1 focus-visible:ring-content/30"
           onClick={(event) => {
             anchor.current = event.currentTarget;
             setMenuOpen(true);
@@ -1234,7 +1237,7 @@ function ProjectRepositoryRow({
         </button>
       </div>
       {visible && family ? (
-        <div className="my-0.5 ml-3">
+        <div className="my-0.5 ml-5">
           <WorkingCopyRows
             family={family}
             hidden={hidden}
@@ -1386,7 +1389,7 @@ function ProjectFamilyCard(
         }
       />
       {visible && multiRepo && project && (
-        <div className="my-0.5 ml-3">
+        <div className="my-0.5 ml-5">
           {project.repositories.map((repo) => (
             <ProjectRepositoryRow
               key={repo.id}
@@ -1402,7 +1405,7 @@ function ProjectFamilyCard(
         </div>
       )}
       {visible && !multiRepo && family && (
-        <div className="my-0.5 ml-3">
+        <div className="my-0.5 ml-5">
           <WorkingCopyRows
             family={family}
             hidden={hidden}
@@ -1576,7 +1579,7 @@ function ProjectCard({
         title={cardTitle}
         aria-label={cardAriaLabel}
         aria-current={selected ? "true" : undefined}
-        className={`flex min-w-0 flex-1 cursor-default items-center gap-2 text-left ${worktreeControls ? "" : "group-hover:pr-6"}`}
+        className={`flex min-w-0 flex-1 cursor-default items-center gap-2 text-left ${worktreeControls ? "group-hover:pr-9" : "group-hover:pr-6"}`}
       >
         <div className="grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0">
           {logoPath && !busy ? (
@@ -1608,34 +1611,38 @@ function ProjectCard({
           </span>
         ) : null}
       </button>
-      <WslBadge cwd={item.path} compact />
-      {worktreeControls && (
+      <span className="group-hover:hidden">
+        <WslBadge cwd={item.path} compact />
+      </span>
+      <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+        {worktreeControls && (
+          <button
+            type="button"
+            data-no-drag
+            title="New worktree"
+            aria-label={`New worktree in ${name}`}
+            onClick={worktreeControls.create}
+            className="hidden size-6 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
+          >
+            <Plus className="size-3.5" strokeWidth={1.75} />
+          </button>
+        )}
         <button
           type="button"
           data-no-drag
-          title="New worktree"
-          aria-label={`New worktree in ${name}`}
-          onClick={worktreeControls.create}
-          className="shrink-0 rounded px-1 text-content/45 hover:bg-content/8 hover:text-content"
+          title="Project options"
+          aria-label="Project options"
+          aria-haspopup="menu"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenMenu(item, event.clientX, event.clientY);
+          }}
+          className="hidden size-6 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
         >
-          <Plus className="size-3.5" />
+          <MoreHorizontal className="size-4" strokeWidth={1.75} />
         </button>
-      )}
-      <button
-        type="button"
-        data-no-drag
-        title="Project options"
-        aria-label="Project options"
-        aria-haspopup="menu"
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          onOpenMenu(item, event.clientX, event.clientY);
-        }}
-        className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
-      >
-        <MoreHorizontal className="size-4" strokeWidth={1.75} />
-      </button>
+      </div>
       <button
         type="button"
         data-no-drag
