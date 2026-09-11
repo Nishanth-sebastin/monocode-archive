@@ -85,6 +85,9 @@ type Props = {
   initialName?: string;
   /** Prepared change context summarized for the shared brief. */
   initialBrief?: string;
+  /** Preselected children — e.g. the worktree holding selected changes,
+   * added in "existing" mode so the task points at it unchanged. */
+  initialChildren?: TaskChildDraft[];
   onClose: () => void;
   onCreated?: (taskId: string) => void;
 };
@@ -112,6 +115,7 @@ export function TaskCreateSheet({
   initialTickets,
   initialName,
   initialBrief,
+  initialChildren,
   onClose,
   onCreated,
 }: Props) {
@@ -139,7 +143,10 @@ export function TaskCreateSheet({
   const [name, setName] = useState(editingTask?.name ?? initialName ?? "");
   const [brief, setBrief] = useState(editingTask?.brief ?? initialBrief ?? "");
   const [selected, setSelected] = useState<string[]>(
-    () => editingTask?.children.map((child) => child.repositoryId) ?? [],
+    () =>
+      editingTask?.children.map((child) => child.repositoryId) ??
+      initialChildren?.map((child) => child.repositoryId) ??
+      [],
   );
   const [tickets, setTickets] = useState<LinkedWorkItem[]>(() => {
     const first = editingTask?.ticket;
@@ -156,7 +163,23 @@ export function TaskCreateSheet({
           .map((child) => [child.id, child.responsibility ?? ""]),
       ),
   );
-  const [drafts, setDrafts] = useState<Map<string, ChildDraftState>>(new Map());
+  const [drafts, setDrafts] = useState<Map<string, ChildDraftState>>(
+    () =>
+      new Map(
+        (initialChildren ?? []).map((child) => [
+          child.repositoryId,
+          {
+            mode:
+              child.mode === "worktree"
+                ? "worktree"
+                : child.mode === "later"
+                  ? "later"
+                  : "existing",
+            ...(child.workingCopy ? { existingPath: child.workingCopy } : {}),
+          } satisfies ChildDraftState,
+        ]),
+      ),
+  );
   const [error, setError] = useState("");
   const refsCache = useRef(new Map<string, Ref[]>());
   const [refsLoading, setRefsLoading] = useState<Set<string>>(new Set());

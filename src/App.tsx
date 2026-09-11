@@ -222,6 +222,7 @@ import {
 import { removeProjectData } from "./lib/projectData";
 import { TaskCreateSheet } from "./chrome/TaskCreateSheet";
 import {
+  addTaskChildren,
   composeTaskPrompt,
   composeTaskSessionPrompt,
   linkTicketToTask,
@@ -230,9 +231,11 @@ import {
   recordTaskActiveChild,
   updateTask,
   updateTaskChild,
+  type TaskChildDraft,
 } from "./lib/taskWorkspaces";
 import {
   ensureProjectForPath,
+  familyForRepository,
   isProjectRailKey,
   loadProjects,
   projectContainsPath,
@@ -4415,6 +4418,7 @@ export default function App({
     initialTickets?: LinkedWorkItem[];
     initialName?: string;
     initialBrief?: string;
+    initialChildren?: TaskChildDraft[];
   } | null>(null);
   const onNewTask = useCallback(
     (path: string, projectId?: string) => {
@@ -4692,13 +4696,43 @@ export default function App({
           setContextRequest((current) => current ?? request);
           return;
         }
+        // The changes live in request.cwd — that working copy becomes the
+        // task's child so the work stays where the files already changed.
+        const families = getVerifiedFamilies();
+        const cwdKey = request.cwd ? pathKey(request.cwd) : "";
+        const changedRepo = cwdKey
+          ? project.repositories.find((repo) => {
+              if (pathKey(repo.anchor) === cwdKey) return true;
+              const family = familyForRepository(repo, families);
+              return (
+                family &&
+                (pathKey(family.checkout) === cwdKey ||
+                  family.worktrees.some(
+                    (entry) => pathKey(entry.path) === cwdKey,
+                  ))
+              );
+            })
+          : undefined;
         const files = request.context.entries
           .map((entry) => `- ${entry.title}`)
           .join("\n");
         setTaskSheet({
           projectId: project.id,
           ...(files
-            ? { initialBrief: `Selected changes:\n${files}` }
+            ? {
+                initialBrief: `Selected changes${request.cwd ? ` in ${prettyCwd(request.cwd)}` : ""}:\n${files}`,
+              }
+            : {}),
+          ...(changedRepo && request.cwd
+            ? {
+                initialChildren: [
+                  {
+                    repositoryId: changedRepo.id,
+                    mode: "existing" as const,
+                    workingCopy: request.cwd,
+                  },
+                ],
+              }
             : {}),
         });
         done();
@@ -4708,6 +4742,42 @@ export default function App({
         (entry) => entry.id === request.taskId && !entry.archived,
       );
       if (!task) return;
+      // Record the worktree holding the changes on the task when its
+      // repository isn't a child yet — the task then lists where the
+      // selected change actually lives.
+      const changedRepo = request.cwd
+        ? projectForTask(task)?.repositories.find((repo) => {
+            const cwdKey = pathKey(request.cwd!);
+            if (pathKey(repo.anchor) === cwdKey) return true;
+            const family = familyForRepository(repo, getVerifiedFamilies());
+            return (
+              family &&
+              (pathKey(family.checkout) === cwdKey ||
+                family.worktrees.some(
+                  (entry) => pathKey(entry.path) === cwdKey,
+                ))
+            );
+          })
+        : undefined;
+      if (
+        changedRepo &&
+        !task.children.some(
+          (child) => child.repositoryId === changedRepo.id,
+        )
+      ) {
+        try {
+          addTaskChildren(task.id, [
+            {
+              repositoryId: changedRepo.id,
+              mode: "existing",
+              workingCopy: request.cwd,
+            },
+          ]);
+        } catch {
+          // A conflicting copy claim — the staged context still carries
+          // the change, so the send continues without a new child.
+        }
+      }
       let sessionId =
         task.sessionIds?.[0] ??
         task.children.find((entry) => entry.sessionIds.length)
@@ -6213,6 +6283,7 @@ export default function App({
           initialTickets={taskSheet.initialTickets}
           initialName={taskSheet.initialName}
           initialBrief={taskSheet.initialBrief}
+          initialChildren={taskSheet.initialChildren}
           onCreated={(taskId) => {
             setFocusTaskId(taskId);
             setProjectRailOpen((open) => {
