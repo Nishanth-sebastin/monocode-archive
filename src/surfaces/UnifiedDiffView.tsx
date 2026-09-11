@@ -60,6 +60,8 @@ export type UnifiedDiffFileModel = {
   blocks: UnifiedBlock[];
   canStage?: boolean;
   canDiscard?: boolean;
+  /** Remote snapshots use their owning review surface for identity-checked handoff. */
+  contextActions?: boolean;
   canStageHunk?: boolean;
 };
 
@@ -482,6 +484,7 @@ function equalFileModel(
       (previous.blocks.length === 0 && next.blocks.length === 0)) &&
     previous.canStage === next.canStage &&
     previous.canDiscard === next.canDiscard &&
+    previous.contextActions === next.contextActions &&
     previous.canStageHunk === next.canStageHunk
   );
 }
@@ -517,6 +520,7 @@ function FileBody({
       near={near}
       tokens={tokens}
       canStageHunk={file.canStageHunk}
+      contextActions={file.contextActions !== false}
       scrollerRef={scrollerRef}
       onReveal={onReveal}
       onStageHunk={onStageHunk}
@@ -532,6 +536,7 @@ function VirtualRows({
   near,
   tokens,
   canStageHunk,
+  contextActions,
   scrollerRef,
   onReveal,
   onStageHunk,
@@ -543,6 +548,7 @@ function VirtualRows({
   near: boolean;
   tokens: Map<UnifiedLine, SyntaxToken[]> | null;
   canStageHunk?: boolean;
+  contextActions: boolean;
   scrollerRef: React.RefObject<HTMLDivElement | null>;
   onReveal: (foldId: string, direction: "up" | "down" | "all") => void;
   onStageHunk?: (id: string, pos: number) => void;
@@ -749,7 +755,7 @@ function VirtualRows({
               : undefined
           }
           onComment={
-            lane === "gutter" && row.type === "line" && row.line.kind !== "hunk"
+            contextActions && lane === "gutter" && row.type === "line" && row.line.kind !== "hunk"
               ? (anchor) => setCommentTarget({ key, line: row.line, anchor })
               : undefined
           }
@@ -761,8 +767,9 @@ function VirtualRows({
     <>
       <div
         ref={bodyRef}
-        title="Right-click a diff line for hunk actions"
+        title={contextActions ? "Right-click a diff line for hunk actions" : undefined}
         onContextMenu={(event) => {
+          if (!contextActions) return;
           let y = event.clientY - event.currentTarget.getBoundingClientRect().top - range.padTop;
           for (let index = range.start; index < range.end; index++) {
             const row = rows[index];
@@ -778,6 +785,7 @@ function VirtualRows({
           }
         }}
         onKeyDown={(event) => {
+          if (!contextActions) return;
           if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
           const element = (event.target as HTMLElement).closest<HTMLElement>("[data-diff-row]");
           if (!element) return;

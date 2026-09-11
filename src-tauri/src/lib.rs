@@ -3,6 +3,7 @@ mod wsl;
 use tauri::Manager;
 
 mod azure;
+mod azure_repos;
 mod chat_background;
 mod checkpoint;
 mod cursor_store;
@@ -269,6 +270,10 @@ pub fn run() {
             azure::azure_options,
             azure::azure_item_content,
             azure::azure_image,
+            azure_repos::azure_pr_list,
+            azure_repos::azure_pr_remotes,
+            azure_repos::azure_pr_story_links,
+            azure_repos::azure_pr_read,
             linear::linear_set_token,
             linear::linear_list_teams,
             linear::linear_list_issues,

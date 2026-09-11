@@ -1,5 +1,7 @@
+import type { LinkedWorkItem } from "../lib/session";
 import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
 import { ContextCheckbox } from "./InboxContextPicker";
+import { AzurePrReview } from "./AzurePrReview";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -92,6 +94,7 @@ const indexByCwd = new Map<string, GitDiffIndex>();
 const prByCwd = new Map<string, GitPr | null>();
 
 type Props = {
+  linkedWorkItem?: LinkedWorkItem;
   sourceSessionId?: string;
   cwd: string;
   enabled: boolean;
@@ -106,6 +109,7 @@ type Props = {
 
 export function GitChangesPanel({
   sourceSessionId,
+  linkedWorkItem,
   cwd,
   enabled,
   textHarness,
@@ -164,6 +168,7 @@ export function GitChangesPanel({
           <span className="ml-auto" />
         )}
       </header>
+      <AzurePrReview linkedWorkItem={linkedWorkItem} key={JSON.stringify([cwd, index?.branch, sourceSessionId])} cwd={cwd} branch={index?.branch ?? ""} sourceSessionId={sourceSessionId} enabled={enabled} />
       <ChangedFiles
         cwd={cwd}
         textHarness={textHarness}

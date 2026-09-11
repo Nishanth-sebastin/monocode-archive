@@ -11,12 +11,18 @@ pub(crate) struct AzureConfig {
     pub project: String,
     pub account: String,
     pub account_id: String,
+    #[serde(default = "legacy_capabilities")]
+    capabilities: Vec<String>,
     token: String,
+}
+
+fn legacy_capabilities() -> Vec<String> {
+    vec!["Boards".into()]
 }
 
 impl AzureConfig {
     fn status(&self) -> Value {
-        json!({"connected":true,"site":self.site,"project":self.project,"account":self.account,"accountId":self.account_id,"capabilities":["Boards"]})
+        json!({"connected":true,"site":self.site,"project":self.project,"account":self.account,"accountId":self.account_id,"capabilities":self.capabilities})
     }
     pub(crate) fn authorization(&self) -> String {
         format!(
@@ -196,6 +202,7 @@ pub async fn azure_set_config(
             token: token.trim().into(),
             account: String::new(),
             account_id: String::new(),
+            capabilities: Vec::new(),
         };
         let project = project_path(&config.project)?;
         let viewer = request(
@@ -216,13 +223,29 @@ pub async fn azure_set_config(
             .as_str()
             .unwrap_or(&config.account_id)
             .into();
-        // Verify Boards read access before replacing a working connection.
-        request(
+        // The shared connection may serve Boards, Repos, or both. One denied capability
+        // must not prevent connecting the other, or overwrite a working connection.
+        let boards = request(
             &config,
             &format!("{project}/_apis/wit/workitemtypes"),
             &version(),
             None,
-        )?;
+        );
+        if boards.is_ok() {
+            config.capabilities.push("Boards".into());
+        }
+        let repos = request(
+            &config,
+            &format!("{project}/_apis/git/repositories"),
+            &version(),
+            None,
+        );
+        if repos.is_ok() {
+            config.capabilities.push("Repos".into());
+        }
+        if config.capabilities.is_empty() {
+            return Err("Azure account authenticated, but no read capability was verified. Check the project and grant Work Items (Read) for Boards or Code (Read) for Repos. Existing connection was preserved.".into());
+        }
         fs::create_dir_all(path.parent().ok_or("Cannot locate Azure settings")?)
             .map_err(|_| "Cannot create Azure settings")?;
         let temporary = path.with_extension("tmp");
@@ -614,6 +637,18 @@ pub async fn azure_image(
 mod tests {
     use super::*;
     #[test]
+    fn existing_connections_keep_boards_and_repos_capabilities_are_explicit() {
+        let old = json!({"site":"https://dev.azure.com/team","project":"Project","account":"Ada","account_id":"ada","token":"secret"});
+        let legacy: AzureConfig = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(legacy.status()["capabilities"], json!(["Boards"]));
+        let mut current = old;
+        current["capabilities"] = json!(["Repos"]);
+        let repos: AzureConfig = serde_json::from_value(current).unwrap();
+        assert_eq!(repos.status()["capabilities"], json!(["Repos"]));
+        assert!(!repos.status().to_string().contains("secret"));
+    }
+
+    #[test]
     fn identity_queries_and_response_bounds() {
         assert_eq!(
             normalize_site("https://dev.azure.com/Team/").unwrap(),
@@ -689,6 +724,7 @@ mod tests {
             project: "Product".into(),
             account: "Ada".into(),
             account_id: "ada-id".into(),
+            capabilities: legacy_capabilities(),
             token: "private-token".into(),
         };
         assert!(!config.status().to_string().contains("private-token"));

@@ -50,6 +50,7 @@ export type AgentContextRequest = {
   sourceSessionId?: string;
   cwd?: string;
   prepareInSource?: boolean;
+  requireDestinationSelection?: boolean;
   onPrepared?: () => void;
 };
 

@@ -350,6 +350,7 @@ import {
   loadDiffViewer,
   loadFollowUpBehavior,
   loadSettingsSection,
+  isSettingsSectionId,
   saveSettingsSection,
   subscribeLiveAgentsEnabled,
   subscribeNotesEnabled,
@@ -5421,7 +5422,7 @@ export default function App({
       listen("open_search", () => actions.current.onOpenSearch()),
       listen("open_inbox", () => actions.current.onOpenInbox()),
       listen("open_notes", () => actions.current.onOpenNotes()),
-      listen("open_settings", () => actions.current.openSettings()),
+      listen<{ section?: string }>("open_settings", ({ payload }) => actions.current.openSettings(isSettingsSectionId(payload?.section) ? payload.section : undefined)),
       listen("check_for_updates", () => {
         void runUpdateFlow(true);
       }),
