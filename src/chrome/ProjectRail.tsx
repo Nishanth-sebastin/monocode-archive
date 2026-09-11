@@ -669,6 +669,7 @@ export function ProjectRail({
                 onOpenMenu={openProjectMenu}
                 tasksByProject={tasksByProject}
                 needsInputSessionIds={needsInputSessionIds}
+                onNewTask={onNewTask}
                 onOpenTask={onOpenTask}
                 onTaskMenu={openTaskMenu}
                 groupLabels={groupLabels}
@@ -698,6 +699,7 @@ export function ProjectRail({
               onOpenMenu={openProjectMenu}
               tasksByProject={tasksByProject}
               needsInputSessionIds={needsInputSessionIds}
+              onNewTask={onNewTask}
               onOpenTask={onOpenTask}
               onTaskMenu={openTaskMenu}
               groupLabels={groupLabels}
@@ -1159,6 +1161,7 @@ function ProjectSection({
   onOpenMenu,
   tasksByProject,
   needsInputSessionIds,
+  onNewTask,
   onOpenTask,
   onTaskMenu,
   groupLabels,
@@ -1187,6 +1190,7 @@ function ProjectSection({
   ) => void;
   tasksByProject: ReadonlyMap<string, TaskWorkspace[]>;
   needsInputSessionIds?: ReadonlySet<string>;
+  onNewTask?: (path: string, projectId?: string) => void;
   onOpenTask?: (taskId: string) => void;
   onTaskMenu: (task: TaskWorkspace, x: number, y: number) => void;
   groupLabels: Record<string, string>;
@@ -1238,6 +1242,7 @@ function ProjectSection({
             onOpenMenu={onOpenMenu}
             tasks={item.project ? (tasksByProject.get(item.project.id) ?? []) : []}
             needsInputSessionIds={needsInputSessionIds}
+            onNewTask={onNewTask}
             onOpenTask={onOpenTask}
             onTaskMenu={onTaskMenu}
             groupLabels={groupLabels}
@@ -1623,6 +1628,7 @@ function ProjectFamilyCard(
     busyPaths: Set<string>;
     tasks: TaskWorkspace[];
     needsInputSessionIds?: ReadonlySet<string>;
+    onNewTask?: (path: string, projectId?: string) => void;
     onOpenTask?: (taskId: string) => void;
     onTaskMenu: (task: TaskWorkspace, x: number, y: number) => void;
   },
@@ -1635,6 +1641,7 @@ function ProjectFamilyCard(
     onSelect,
     tasks,
     needsInputSessionIds,
+    onNewTask,
     onOpenTask,
     onTaskMenu,
   } = props;
@@ -1739,24 +1746,45 @@ function ProjectFamilyCard(
         }
       />
       {visible && tasks.length ? (
-        <div className="my-1 ml-5 overflow-hidden rounded-lg bg-content/5 p-1">
-          {tasks.map((task) => (
-            <TaskRailRow
-              key={task.id}
-              task={task}
-              needsInput={task.children.some((entry) =>
-                entry.sessionIds.some(
-                  (id) => needsInputSessionIds?.has(id),
-                ),
-              )}
-              onOpen={() => onOpenTask?.(task.id)}
-              onMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onTaskMenu(task, event.clientX, event.clientY);
-              }}
-            />
-          ))}
+        <div className="my-1 ml-5 overflow-hidden rounded-lg bg-content/5 pb-1">
+          <div className="flex items-center gap-2 px-2.5 pb-1 pt-1.5">
+            <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wide text-content/35">
+              Tasks · {tasks.length}
+            </span>
+            {onNewTask ? (
+              <button
+                type="button"
+                title="New task in this project"
+                aria-label="New task in this project"
+                className="grid size-4 place-items-center rounded text-content/40 hover:bg-content/10 hover:text-content"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onNewTask(props.item.path, project?.id);
+                }}
+              >
+                <Plus className="size-3" strokeWidth={1.75} />
+              </button>
+            ) : null}
+          </div>
+          <div className="px-1">
+            {tasks.map((task) => (
+              <TaskRailRow
+                key={task.id}
+                task={task}
+                needsInput={task.children.some((entry) =>
+                  entry.sessionIds.some(
+                    (id) => needsInputSessionIds?.has(id),
+                  ),
+                )}
+                onOpen={() => onOpenTask?.(task.id)}
+                onMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onTaskMenu(task, event.clientX, event.clientY);
+                }}
+              />
+            ))}
+          </div>
         </div>
       ) : null}
       {visible && (multiRepo || isGroup) && project && (
