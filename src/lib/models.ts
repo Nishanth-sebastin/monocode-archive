@@ -171,6 +171,14 @@ export const MODELS: AgentModel[] = [
     name: "GLM 5.2 Fast",
     nativeId: "zai/glm-5.2-fast",
   },
+  // Devin advertises its real catalog over ACP at session start; this entry is
+  // only the pre-probe placeholder that selects Devin's own default model.
+  {
+    id: "devin:default",
+    harness: "devin",
+    name: "Default",
+    nativeId: "",
+  },
 ];
 
 export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
@@ -182,6 +190,7 @@ export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
   pi: "pi:default",
   omp: "omp:default",
   fx: "fx:zai/glm-5.2-fast",
+  devin: "devin:default",
 };
 
 const FAVORITES_KEY = "monocode.favoriteModels";
@@ -207,6 +216,7 @@ const HARNESS_ORDER: HarnessId[] = [
   "pi",
   "omp",
   "fx",
+  "devin",
 ];
 
 const EMPTY_MODELS: AgentModel[] = [];
