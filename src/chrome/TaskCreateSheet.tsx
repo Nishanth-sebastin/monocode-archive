@@ -84,6 +84,7 @@ type Props = {
   initialTickets?: LinkedWorkItem[];
   initialName?: string;
   onClose: () => void;
+  onCreated?: (taskId: string) => void;
 };
 
 const inputClass =
@@ -109,6 +110,7 @@ export function TaskCreateSheet({
   initialTickets,
   initialName,
   onClose,
+  onCreated,
 }: Props) {
   const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
   const projects = useMemo(() => loadProjects(), [projectsRaw]);
@@ -504,7 +506,7 @@ export function TaskCreateSheet({
         onClose();
         return;
       }
-      createTask({
+      const task = createTask({
         projectId,
         name,
         ...(linked ? { ticket: linked } : {}),
@@ -512,6 +514,7 @@ export function TaskCreateSheet({
         children: buildDrafts(),
       });
       // Prepared only — sessions start when the task is opened.
+      onCreated?.(task.id);
       onClose();
     } catch (err) {
       setError(String(err));

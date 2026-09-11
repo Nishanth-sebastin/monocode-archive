@@ -197,6 +197,9 @@ type Props = {
   onOpenProject: () => void;
   onNewTask?: (path: string, projectId?: string) => void;
   onOpenTask?: (taskId: string) => void;
+  /** Just-created task — highlighted as current until a task session takes
+   * over. Purely presentational; never launches work. */
+  focusTaskId?: string;
   onEditTask?: (taskId: string) => void;
   /** Sessions currently needing input (approval or question) — per-child dots. */
   needsInputSessionIds?: ReadonlySet<string>;
@@ -235,6 +238,7 @@ export function ProjectRail({
   onOpenProject,
   onNewTask,
   onOpenTask,
+  focusTaskId,
   onEditTask,
   needsInputSessionIds,
   onRemoveProject,
@@ -316,6 +320,9 @@ export function ProjectRail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeSessionId, tasksRaw],
   );
+  // The session's task wins; a just-created task fills the gap so it reads
+  // as current in the rail before any session exists.
+  const currentTaskId = activeTask?.id ?? focusTaskId;
   const scopeRepoIds = useMemo(
     () =>
       new Set(activeTask?.children.map((entry) => entry.repositoryId) ?? []),
@@ -341,7 +348,7 @@ export function ProjectRail({
   const railTasks = useMemo(() => {
     const live = loadTaskWorkspaces().filter((task) => !task.archived);
     const rank = (task: TaskWorkspace) =>
-      task.id === activeTask?.id
+      task.id === currentTaskId
         ? 0
         : taskBusyIds.has(task.id)
           ? 1
@@ -351,7 +358,7 @@ export function ProjectRail({
     );
     // tasksRaw changes on every store write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasksRaw, activeTask?.id, taskBusyIds]);
+  }, [tasksRaw, currentTaskId, taskBusyIds]);
   const taskBySessionId = useMemo(() => {
     const map = new Map<string, { task: TaskWorkspace; child: TaskChild }>();
     for (const agent of liveAgents) {
@@ -722,7 +729,7 @@ export function ProjectRail({
                 onNewTask={onNewTask}
                 onOpenTask={onOpenTask}
                 onTaskMenu={openTaskMenu}
-                activeTaskId={activeTask?.id}
+                activeTaskId={currentTaskId}
                 scopeRepoIds={scopeRepoIds}
                 taskBusyIds={taskBusyIds}
                 groupLabels={groupLabels}
@@ -755,7 +762,7 @@ export function ProjectRail({
               onNewTask={onNewTask}
               onOpenTask={onOpenTask}
               onTaskMenu={openTaskMenu}
-              activeTaskId={activeTask?.id}
+              activeTaskId={currentTaskId}
               scopeRepoIds={scopeRepoIds}
               taskBusyIds={taskBusyIds}
               groupLabels={groupLabels}
@@ -767,7 +774,7 @@ export function ProjectRail({
           </div>
           <TasksPreview
             tasks={railTasks}
-            activeTaskId={activeTask?.id}
+            activeTaskId={currentTaskId}
             busyIds={taskBusyIds}
             needsInputIds={needsInputSessionIds}
             onOpen={onOpenTask}
@@ -1890,7 +1897,10 @@ function ProjectFamilyCard(
       !hidden.some((path) => sameProjectPath(path, child.path)),
   );
   const visible =
-    expanded ?? (isGroup || (!multiRepo && children.length > 1));
+    expanded ??
+    (isGroup ||
+      (!multiRepo && children.length > 1) ||
+      tasks.some((task) => task.id === activeTaskId));
   const selected =
     multiRepo || isGroup
       ? !!project && projectContainsPath(project, cwd, families)

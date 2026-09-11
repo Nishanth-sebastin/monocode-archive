@@ -239,6 +239,8 @@ type Props = {
   onOpenProject?: () => void;
   onNewTask?: (path: string, projectId?: string) => void;
   onOpenTask?: (taskId: string) => void;
+  /** Just-created task — the rail's current task until a session takes over. */
+  focusTaskId?: string;
   onEditTask?: (taskId: string) => void;
   needsInputSessionIds?: ReadonlySet<string>;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
@@ -319,6 +321,7 @@ function SidebarComponent({
   onOpenProject,
   onNewTask,
   onOpenTask,
+  focusTaskId,
   onEditTask,
   needsInputSessionIds,
   onRemoveProject,
@@ -1613,6 +1616,7 @@ function SidebarComponent({
           onOpenProject={onOpenProject}
           onNewTask={onNewTask}
           onOpenTask={onOpenTask}
+          focusTaskId={focusTaskId}
           onEditTask={onEditTask}
           needsInputSessionIds={needsInputSessionIds}
           onRemoveProject={onRemoveProject}

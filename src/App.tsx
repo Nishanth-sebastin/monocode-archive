@@ -4402,6 +4402,9 @@ export default function App({
     return () => window.removeEventListener(OPEN_REPAIR, open);
   }, [onSelectHistorySession]);
 
+  // The task just created — the rail's "current" task until a task session
+  // takes over. Never launches work on its own.
+  const [focusTaskId, setFocusTaskId] = useState<string>();
   const [taskSheet, setTaskSheet] = useState<{
     projectId: string;
     editingTaskId?: string;
@@ -6096,6 +6099,7 @@ export default function App({
         onOpenProject={pickProject}
         onNewTask={onNewTask}
         onOpenTask={onOpenTask}
+        focusTaskId={focusTaskId}
         onEditTask={onEditTask}
         needsInputSessionIds={needsInputSessionIds}
         onRemoveProject={onRemoveProject}
@@ -6131,6 +6135,7 @@ export default function App({
           editingTaskId={taskSheet.editingTaskId}
           initialTickets={taskSheet.initialTickets}
           initialName={taskSheet.initialName}
+          onCreated={setFocusTaskId}
           onClose={() => setTaskSheet(null)}
         />
       )}
