@@ -64,9 +64,11 @@ export function TaskScopeChip({
   const anchor = useRef<HTMLButtonElement>(null);
   if (!scope) return null;
   const { task, child } = scope;
-  const anyNeedsInput = task.children.some((entry) =>
-    entry.sessionIds.some((id) => needsInputIds?.has(id)),
-  );
+  const anyNeedsInput =
+    task.sessionIds?.some((id) => needsInputIds?.has(id)) ||
+    task.children.some((entry) =>
+      entry.sessionIds.some((id) => needsInputIds?.has(id)),
+    );
   return (
     <div className="flex h-8 shrink-0 items-center gap-2 border-b border-content/10 px-3 text-[12px]">
       <button
@@ -112,10 +114,15 @@ export function TaskScopeChip({
           <div className="max-h-56 overflow-y-auto overscroll-none px-1.5 py-1.5">
             {task.children.map((entry) => {
               const current = entry.id === child.id;
-              const needsInput = entry.sessionIds.some((id) =>
-                needsInputIds?.has(id),
-              );
-              const ready = entry.sessionIds.length > 0;
+              const needsInput =
+                (current &&
+                  task.sessionIds?.some((id) => needsInputIds?.has(id))) ||
+                entry.sessionIds.some((id) => needsInputIds?.has(id));
+              // "Ready" = the copy is prepared (or a legacy per-child
+              // session exists); the task's own session is separate.
+              const ready =
+                entry.sessionIds.length > 0 ||
+                entry.launch.state === "ready";
               const failed = entry.launch.state === "failed";
               return (
                 <div key={entry.id} className="flex items-center gap-1">

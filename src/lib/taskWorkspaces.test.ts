@@ -10,6 +10,7 @@ import {
   addTaskChildren,
   archiveTask,
   composeTaskPrompt,
+  composeTaskSessionPrompt,
   createTask,
   loadTaskWorkspaces,
   recordTaskActiveChild,
@@ -20,6 +21,7 @@ import {
   taskForSession,
   taskHostConflict,
   tasksForProject,
+  updateTask,
   updateTaskChild,
 } from "./taskWorkspaces";
 
@@ -352,6 +354,24 @@ describe("taskForSession", () => {
     expect(taskForSession("s1")?.task.id).toBe(task.id);
     expect(taskForSession("unknown")).toBeNull();
   });
+
+  it("resolves a task-level session to its host child", () => {
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo, lib] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id), later(lib.id)],
+    });
+    updateTask(task.id, (current) => ({
+      ...current,
+      sessionIds: ["task-session"],
+      lastActiveChildId: lib.id ? current.children[1].id : undefined,
+    }));
+    const found = taskForSession("task-session");
+    expect(found?.task.id).toBe(task.id);
+    expect(found?.child.repositoryId).toBe(lib.id);
+  });
 });
 
 describe("taskChildrenForWorkingCopy", () => {
@@ -429,6 +449,35 @@ describe("composeTaskPrompt", () => {
     const second_prompt = composeTaskPrompt(task, second, lib);
     expect(second_prompt).not.toContain("UI only");
     expect(second_prompt).toContain("out of scope");
+  });
+
+  it("task session prompt names every repository's copy and job", () => {
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo, lib] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "Checkout",
+      brief: "Rebuild the checkout flow.",
+      children: [
+        {
+          repositoryId: repo.id,
+          mode: "worktree",
+          baseRef: "refs/heads/main",
+          baseCommit: "abc1234567",
+          branch: "checkout",
+          path: "/tmp/app-checkout",
+          responsibility: "UI only",
+        },
+        later(lib.id),
+      ],
+    });
+    const prompt = composeTaskSessionPrompt(task, project);
+    expect(prompt).toContain("working copy: /tmp/app-checkout");
+    expect(prompt).toContain("branch: checkout (from main @ abc1234567)");
+    expect(prompt).toContain("Responsibility: UI only");
+    // The sibling child is listed too — one session covers all repos.
+    expect(prompt).toContain("no working copy prepared yet");
+    expect(prompt).toContain("separate checkouts");
   });
 });
 

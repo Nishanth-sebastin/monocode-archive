@@ -52,6 +52,10 @@ export type TaskWorkspace = {
   ticket?: LinkedWorkItem;
   brief?: string;
   children: TaskChild[];
+  /** The task's session — one conversation roots at the primary child's
+   * working copy and can work every child. Legacy tasks may instead carry
+   * per-child `sessionIds`. */
+  sessionIds?: string[];
   lastActiveChildId?: string;
   createdAt: number;
   archived?: boolean;
@@ -150,6 +154,7 @@ function sanitizeTask(value: unknown): TaskWorkspace | null {
       : {}),
     ...(cleanString(value.brief) ? { brief: cleanString(value.brief) } : {}),
     children,
+    sessionIds: cleanStrings(value.sessionIds, 20),
     ...(children.some((child) => child.id === lastActiveChildId)
       ? { lastActiveChildId }
       : {}),
@@ -324,6 +329,7 @@ export function createTask(input: {
     ...(input.ticket ? { ticket: input.ticket } : {}),
     ...(cleanString(input.brief) ? { brief: cleanString(input.brief) } : {}),
     children,
+    sessionIds: [],
     createdAt: Date.now(),
   };
   saveTaskWorkspaces([...loadTaskWorkspaces(), task]);
@@ -427,6 +433,17 @@ export function taskForSession(
       entry.sessionIds.includes(sessionId),
     );
     if (child) return { task, child };
+    // A task-level session displays its host child — the repository the
+    // conversation is rooted at.
+    if (task.sessionIds?.includes(sessionId)) {
+      const host =
+        task.children.find(
+          (entry) => entry.id === task.lastActiveChildId,
+        ) ??
+        task.children.find((entry) => entry.workingCopy) ??
+        task.children[0];
+      return { task, child: host };
+    }
   }
   return null;
 }
@@ -470,9 +487,59 @@ function repositoryDisplay(repository: ProjectRepository): string {
   );
 }
 
+/** The one task session's prompt — names every repository's working copy,
+ * branch and responsibility so the agent can work across them. */
+export function composeTaskSessionPrompt(
+  task: TaskWorkspace,
+  project: ProjectRecord | undefined,
+): string {
+  const lines = [`# ${task.name}`, ""];
+  const tickets = [
+    task.ticket,
+    ...(task.ticket?.additionalItems ?? []),
+  ].filter((ticket): ticket is LinkedWorkItem => Boolean(ticket));
+  if (tickets.length) {
+    const labels = tickets.map((ticket) =>
+      [ticket.identifier, ticket.title, ticket.url]
+        .filter(Boolean)
+        .join(" — "),
+    );
+    if (labels.length === 1) lines.push(`Ticket: ${labels[0]}`, "");
+    else lines.push("Tickets:", ...labels.map((label) => `- ${label}`), "");
+  }
+  if (task.brief?.trim()) lines.push(task.brief.trim(), "");
+  lines.push("Repositories:");
+  for (const child of task.children) {
+    const repository = project
+      ? repositoryOf(project, child.repositoryId)
+      : undefined;
+    const name = repository
+      ? repositoryDisplay(repository)
+      : child.repositoryId;
+    const parts = [`- ${name}`];
+    if (child.workingCopy) parts.push(`working copy: ${child.workingCopy}`);
+    else parts.push("no working copy prepared yet");
+    if (child.branch) {
+      const base = child.baseRef
+        ? ` (from ${child.baseRef.replace(/^refs\/(heads|remotes)\//, "")}${child.baseCommit ? ` @ ${child.baseCommit.slice(0, 10)}` : ""})`
+        : "";
+      parts.push(`branch: ${child.branch}${base}`);
+      if (child.mergeTarget) parts.push(`merge target: ${child.mergeTarget}`);
+    }
+    lines.push(parts.join(" — "));
+    if (child.responsibility?.trim())
+      lines.push(`  Responsibility: ${child.responsibility.trim()}`);
+  }
+  lines.push(
+    "",
+    "Work in each repository's own working copy — they are separate checkouts, not copies of each other.",
+  );
+  return lines.join("\n").trim();
+}
+
 /**
- * One session's prompt: shared brief + this child's responsibility + exact
- * identity. It deliberately never references sibling working copies.
+ * Legacy per-child prompt: shared brief + this child's responsibility + exact
+ * identity. Kept for children of pre-existing per-repo-session tasks.
  */
 export function composeTaskPrompt(
   task: TaskWorkspace,

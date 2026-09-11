@@ -222,9 +222,11 @@ import { removeProjectData } from "./lib/projectData";
 import { TaskCreateSheet } from "./chrome/TaskCreateSheet";
 import {
   composeTaskPrompt,
+  composeTaskSessionPrompt,
   loadTaskWorkspaces,
   projectForTask,
   recordTaskActiveChild,
+  updateTask,
   updateTaskChild,
 } from "./lib/taskWorkspaces";
 import {
@@ -233,7 +235,6 @@ import {
   loadProjects,
   projectContainsPath,
   projectRailKey,
-  repositoryDisplayName,
 } from "./lib/projects";
 import { getVerifiedFamilies } from "./lib/repositoryFamilies";
 import { probeRepositoryFamily } from "./hooks/useRepositoryFamilies";
@@ -4471,12 +4472,18 @@ export default function App({
    * are skipped so Retry never replays successful Git or agent operations.
    */
   const taskLaunching = useRef(new Set<string>());
+  /**
+   * Prepares each unresolved child's working copy — creating the reviewed
+   * worktree or re-verifying an existing one — then ensures the task's
+   * single session exists, rooted at the host child's copy. The prompt
+   * names every repository's copy, branch and responsibility; the agent
+   * works across them from one conversation.
+   */
   const launchTaskChildren = useCallback(
     async (taskId: string, childIds?: readonly string[]) => {
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       if (!task) return;
       const project = projectForTask(task);
-      let firstTab: { tabId: string; childId: string } | null = null;
       for (const child of task.children) {
         if (childIds && !childIds.includes(child.id)) continue;
         const launchKey = `${taskId}:${child.id}`;
@@ -4485,16 +4492,15 @@ export default function App({
           .find((entry) => entry.id === taskId)
           ?.children.find((entry) => entry.id === child.id);
         if (!current) continue;
-        if (current.launch.state === "ready" && current.sessionIds.length)
-          continue;
+        if (current.launch.state === "ready") continue;
         taskLaunching.current.add(launchKey);
         updateTaskChild(taskId, child.id, { launch: { state: "working" } });
         try {
           const repo = project?.repositories.find(
             (entry) => entry.id === child.repositoryId,
           );
-          // A retry after a failed submit reuses the existing session —
-          // worktrees and sessions are never replayed.
+          // A legacy child may own a session already — retry just resubmits
+          // its brief; worktrees and sessions are never replayed.
           if (current.sessionIds.length) {
             const sent = await onSubmit(
               current.sessionIds[0],
@@ -4507,7 +4513,6 @@ export default function App({
             });
             continue;
           }
-          let cwd = current.workingCopy;
           if (current.baseRef && current.baseCommit && current.branch) {
             // Creating in the project anchor would target the wrong
             // repository — the member record is required.
@@ -4517,7 +4522,7 @@ export default function App({
               );
             const anchor = repo.anchor;
             try {
-              const created = await invoke<string>("git_worktree_create", {
+              await invoke<string>("git_worktree_create", {
                 cwd: anchor,
                 base: current.baseRef,
                 commit: current.baseCommit,
@@ -4525,7 +4530,6 @@ export default function App({
                 // Host-qualified path — the backend resolves WSL internally.
                 path: current.workingCopy,
               });
-              cwd = created || current.workingCopy;
             } catch (error) {
               // A partial earlier attempt may already have created the copy —
               // re-probe and reuse it rather than failing on "already exists".
@@ -4537,13 +4541,12 @@ export default function App({
                   !entry.missing,
               );
               if (!exists) throw error;
-              cwd = current.workingCopy;
             }
             notifyGitChanged(anchor);
-          } else if (cwd) {
+          } else if (current.workingCopy) {
             // Existing/main copy: re-verify it still exists before starting a
             // session at a path that may have been moved or deleted.
-            const target = cwd;
+            const target = current.workingCopy;
             const family = await probeRepositoryFamily(
               repo?.anchor ?? target,
             );
@@ -4560,39 +4563,16 @@ export default function App({
               throw new Error(
                 "Working copy is no longer on disk — choose a replacement or remove this repository from the task.",
               );
-          }
-          if (!cwd) {
-            // Prepare-later child — stays actionable with no session.
+          } else {
+            // Prepare-later child — stays actionable with no copy.
             updateTaskChild(taskId, child.id, {
               launch: { state: "pending" },
             });
             continue;
           }
-          const session = {
-            ...newDefaultSession(cwd, sessionDefaults?.runtimeMode),
-            title: repo
-              ? `${task.name} · ${repositoryDisplayName(repo)}`
-              : task.name,
-            ...(task.ticket ? { linkedWorkItem: task.ticket } : {}),
-          };
-          const next = [...sessionsRef.current, session];
-          sessionsRef.current = next;
-          setSessions(next);
-          const tab = newTab(session.id);
-          appendTab(tab, cwd);
-          if (!firstTab) firstTab = { tabId: tab.id, childId: child.id };
-          setRecents(rememberProject(cwd));
           updateTaskChild(taskId, child.id, {
-            workingCopy: cwd,
-            sessionIds: [...current.sessionIds, session.id],
             launch: { state: "ready" },
           });
-          const sent = await onSubmit(
-            session.id,
-            composeTaskPrompt(task, child, repo),
-          );
-          if (sent === false)
-            throw new Error("The session did not accept the brief.");
         } catch (error) {
           updateTaskChild(taskId, child.id, {
             launch: { state: "failed", error: String(error) },
@@ -4601,14 +4581,54 @@ export default function App({
           taskLaunching.current.delete(launchKey);
         }
       }
-      // Activating the first child's session lands the user on the task; the
-      // remaining sessions stay reachable as ordinary tabs/history entries.
-      if (firstTab && !childIds) {
-        setActiveTabId(firstTab.tabId);
-        recordTaskActiveChild(taskId, firstTab.childId);
+      // One session per task — rooted at the host child's working copy.
+      const fresh = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+      if (!fresh) return;
+      const taskSessionId =
+        fresh.sessionIds?.[0] ??
+        fresh.children.find((entry) => entry.sessionIds.length)
+          ?.sessionIds[0];
+      if (taskSessionId) {
+        if (!childIds) void onSelectHistorySession(taskSessionId);
+        return;
       }
+      const host =
+        fresh.children.find(
+          (entry) =>
+            entry.id === fresh.lastActiveChildId && entry.workingCopy,
+        ) ??
+        fresh.children.find(
+          (entry) => entry.launch.state === "ready" && entry.workingCopy,
+        ) ??
+        fresh.children.find((entry) => entry.workingCopy);
+      if (!host?.workingCopy) return;
+      const session = {
+        ...newDefaultSession(host.workingCopy, sessionDefaults?.runtimeMode),
+        title: fresh.name,
+        ...(fresh.ticket ? { linkedWorkItem: fresh.ticket } : {}),
+      };
+      const next = [...sessionsRef.current, session];
+      sessionsRef.current = next;
+      setSessions(next);
+      const tab = newTab(session.id);
+      appendTab(tab, host.workingCopy);
+      setRecents(rememberProject(host.workingCopy));
+      updateTask(taskId, (current) => ({
+        ...current,
+        sessionIds: [session.id],
+        lastActiveChildId: host.id,
+      }));
+      setActiveTabId(tab.id);
+      // The brief lands as the session's first message; if it can't be sent
+      // yet the session stays so opening the task retries by hand.
+      await onSubmit(session.id, composeTaskSessionPrompt(fresh, project));
     },
-    [appendTab, onSubmit, sessionDefaults?.runtimeMode],
+    [
+      appendTab,
+      onSelectHistorySession,
+      onSubmit,
+      sessionDefaults?.runtimeMode,
+    ],
   );
 
   /** Sessions whose pending approval or question needs the user now. */
@@ -4635,13 +4655,17 @@ export default function App({
       const child = task?.children.find((entry) => entry.id === childId);
       if (!task || !child) return;
       recordTaskActiveChild(taskId, childId);
-      if (child.sessionIds.length) {
-        await onSelectHistorySession(child.sessionIds[0]);
+      // The task's single session wins; a legacy child may own its own.
+      const sessionId = task.sessionIds?.[0] ?? child.sessionIds[0];
+      if (sessionId) {
+        await onSelectHistorySession(sessionId);
         return;
       }
-      if (child.workingCopy) onSelectProject(child.workingCopy);
+      // No session yet — prepare this child's copy; that also creates the
+      // task session when it becomes the host.
+      void launchTaskChildren(taskId, [childId]);
     },
-    [onSelectHistorySession, onSelectProject],
+    [launchTaskChildren, onSelectHistorySession],
   );
 
   /** Opens a task's last active child, or its first session-owning child. */
@@ -4650,8 +4674,16 @@ export default function App({
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       if (!task) return;
       // No sessions yet — opening the task is what starts the work.
-      if (!task.children.some((entry) => entry.sessionIds.length)) {
+      if (
+        !task.sessionIds?.length &&
+        !task.children.some((entry) => entry.sessionIds.length)
+      ) {
         void launchTaskChildren(taskId);
+        return;
+      }
+      // The task's own session wins over per-child lookups.
+      if (task.sessionIds?.length) {
+        void onSelectHistorySession(task.sessionIds[0]);
         return;
       }
       const child =
@@ -4664,7 +4696,7 @@ export default function App({
         task.children[0];
       if (child) void onOpenTaskChild(taskId, child.id);
     },
-    [launchTaskChildren, onOpenTaskChild],
+    [launchTaskChildren, onOpenTaskChild, onSelectHistorySession],
   );
 
   const onUpdatePlan = useCallback(

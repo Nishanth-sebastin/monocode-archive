@@ -1771,11 +1771,16 @@ function ProjectFamilyCard(
               <TaskRailRow
                 key={task.id}
                 task={task}
-                needsInput={task.children.some((entry) =>
-                  entry.sessionIds.some(
-                    (id) => needsInputSessionIds?.has(id),
-                  ),
-                )}
+                needsInput={
+                  task.sessionIds?.some((id) =>
+                    needsInputSessionIds?.has(id),
+                  ) ||
+                  task.children.some((entry) =>
+                    entry.sessionIds.some(
+                      (id) => needsInputSessionIds?.has(id),
+                    ),
+                  )
+                }
                 onOpen={() => onOpenTask?.(task.id)}
                 onMenu={(event) => {
                   event.preventDefault();
