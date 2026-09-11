@@ -28,6 +28,7 @@ import {
   WandSparkles,
 } from "./icons";
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -97,6 +98,7 @@ let changesView: ChangesView = loadChangesView();
 const collapsedDirs = new Set<string>();
 const indexByCwd = new Map<string, GitDiffIndex>();
 const prByCwd = new Map<string, GitPr | null>();
+const EMPTY_FILES: GitChangedFile[] = [];
 
 type Props = {
   sourceSessionId?: string;
@@ -125,8 +127,8 @@ export function GitChangesPanel({
   onOpenDelivery,
   onOpenCommit,
 }: Props) {
-  const { index, reload } = useDiffIndex(cwd, enabled);
-  const files = index?.files ?? [];
+  const { index, patch } = useDiffIndex(cwd, enabled);
+  const files = index?.files ?? EMPTY_FILES;
   const [, refreshDelivery] = useState(0);
   useEffect(() => {
     const refresh = () => refreshDelivery(value => value + 1);
@@ -291,8 +293,8 @@ export function GitChangesPanel({
         fill
         onOpenFile={onOpenFile}
         onOpenAllChanges={onOpenAllChanges}
-        onMutated={(paths) => {
-          reload();
+        onMutated={(paths, apply) => {
+          if (apply) patch(apply);
           notifyGitChanged(cwd);
           invalidateWatchedFiles(paths);
           window.setTimeout(() => invalidateWatchedFiles(paths), 150);
@@ -360,7 +362,10 @@ function ChangedFiles({
   fill: boolean;
   onOpenFile: (path: string, kind: GitFileDiffKind) => void;
   onOpenAllChanges: () => void;
-  onMutated: (paths?: string[]) => void;
+  onMutated: (
+    paths?: string[],
+    apply?: (index: GitDiffIndex) => GitDiffIndex,
+  ) => void;
 }) {
   const [selectingContext, setSelectingContext] = useState(false);
   const [contextSelected, setContextSelected] = useState<Set<string>>(
@@ -369,27 +374,34 @@ function ChangedFiles({
   const [contextBusy, setContextBusy] = useState(false);
   const [contextError, setContextError] = useState("");
   const contextGeneration = useRef(0);
+  const contextBusyRef = useRef(contextBusy);
+  contextBusyRef.current = contextBusy;
   useEffect(() => {
     setContextSelected(new Set());
     return () => {
       contextGeneration.current++;
     };
   }, [cwd]);
-  const contextSelection = selectingContext
-    ? {
-        selected: contextSelected,
-        toggle: (relative: string, kind: GitFileDiffKind) => {
-          if (contextBusy) return;
-          const key = JSON.stringify([relative, kind]);
-          setContextSelected((previous) => {
-            const next = new Set(previous);
-            if (next.has(key)) next.delete(key);
-            else if (next.size < 20) next.add(key);
-            return next;
-          });
-        },
-      }
-    : undefined;
+  const toggleContext = useCallback(
+    (relative: string, kind: GitFileDiffKind) => {
+      if (contextBusyRef.current) return;
+      const key = JSON.stringify([relative, kind]);
+      setContextSelected((previous) => {
+        const next = new Set(previous);
+        if (next.has(key)) next.delete(key);
+        else if (next.size < 20) next.add(key);
+        return next;
+      });
+    },
+    [],
+  );
+  const contextSelection = useMemo(
+    () =>
+      selectingContext
+        ? { selected: contextSelected, toggle: toggleContext }
+        : undefined,
+    [selectingContext, contextSelected, toggleContext],
+  );
   const toggleContextSelection = () => {
     contextGeneration.current++;
     setContextSelected(new Set());
@@ -407,7 +419,28 @@ function ChangedFiles({
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const menuRef = useRef<HTMLDivElement>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusyState] = useState<string | null>(null);
+  // Ref mirror keeps action callbacks stable so memoized rows do not
+  // re-render when an unrelated row starts or finishes a git operation.
+  const busyRef = useRef<string | null>(null);
+  const setBusy = (value: string | null) => {
+    busyRef.current = value;
+    setBusyState(value);
+  };
+  const onMutatedRef = useRef(onMutated);
+  onMutatedRef.current = onMutated;
+  const mutated = useCallback(
+    (paths?: string[], apply?: (index: GitDiffIndex) => GitDiffIndex) =>
+      onMutatedRef.current(paths, apply),
+    [],
+  );
+  const onOpenFileRef = useRef(onOpenFile);
+  onOpenFileRef.current = onOpenFile;
+  const openFile = useCallback(
+    (path: string, kind: GitFileDiffKind) =>
+      onOpenFileRef.current(path, kind),
+    [],
+  );
   const [message, setMessage] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [stagedExpanded, setStagedExpanded] = useState(stagedOpen);
@@ -483,37 +516,42 @@ function ChangedFiles({
     );
   };
 
-  const run = async (
-    file: GitChangedFile,
-    action: "stage" | "unstage" | "discard",
-  ) => {
-    if (busy) return;
-    if (action === "discard") {
-      const name = basename(file.relative);
-      const untracked = file.status === "untracked";
-      const ok = await confirmNative(
-        untracked
-          ? `Delete untracked file ${name}?`
-          : `Discard changes in ${name}? This cannot be undone.`,
-        untracked ? "Delete" : "Discard",
-      );
-      if (!ok) return;
-    }
-    setBusy(file.relative);
-    try {
-      if (action === "stage") await gitStageFile(cwd, file.relative);
-      else if (action === "unstage") await gitUnstageFile(cwd, file.relative);
-      else await gitDiscardFile(cwd, file.relative);
-      onMutated([file.path]);
-    } catch (error) {
-      fail(error);
-    } finally {
-      setBusy(null);
-    }
-  };
+  const run = useCallback(
+    async (
+      file: GitChangedFile,
+      action: "stage" | "unstage" | "discard",
+    ) => {
+      if (busyRef.current) return;
+      if (action === "discard") {
+        const name = basename(file.relative);
+        const untracked = file.status === "untracked";
+        const ok = await confirmNative(
+          untracked
+            ? `Delete untracked file ${name}?`
+            : `Discard changes in ${name}? This cannot be undone.`,
+          untracked ? "Delete" : "Discard",
+        );
+        if (!ok) return;
+      }
+      setBusy(file.relative);
+      try {
+        if (action === "stage") await gitStageFile(cwd, file.relative);
+        else if (action === "unstage") await gitUnstageFile(cwd, file.relative);
+        else await gitDiscardFile(cwd, file.relative);
+        mutated([file.path], (index) =>
+          indexAfterFileAction(index, file.relative, action),
+        );
+      } catch (error) {
+        fail(error);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [cwd, mutated],
+  );
 
   const runAll = async (action: "stage" | "unstage" | "discard") => {
-    if (busy) return;
+    if (busyRef.current) return;
     if (action === "discard") {
       const n = unstaged.length;
       if (n === 0) return;
@@ -534,8 +572,9 @@ function ChangedFiles({
       if (action === "stage") await gitStageAll(cwd);
       else if (action === "unstage") await gitUnstageAll(cwd);
       else await gitDiscardAll(cwd);
-      onMutated(
+      mutated(
         action === "discard" ? unstaged.map((file) => file.path) : undefined,
+        (index) => indexAfterAllAction(index, action),
       );
     } catch (error) {
       fail(error);
@@ -570,14 +609,14 @@ function ChangedFiles({
       await gitCommit(cwd, message);
       if (push || createPr) await gitPush(cwd);
       setMessage("");
-      onMutated();
+      mutated();
       if (createPr) {
         await openCreatedPr();
         reloadPr();
       }
     } catch (error) {
       fail(error);
-      onMutated();
+      mutated();
     } finally {
       setBusy(null);
     }
@@ -588,11 +627,11 @@ function ChangedFiles({
     setBusy("sync");
     try {
       await gitSync(cwd);
-      onMutated();
+      mutated();
       reloadPr();
     } catch (error) {
       fail(error);
-      onMutated();
+      mutated();
     } finally {
       setBusy(null);
     }
@@ -618,11 +657,11 @@ function ChangedFiles({
     try {
       if ((index?.ahead ?? 0) > 0) await gitPush(cwd);
       await openCreatedPr();
-      onMutated();
+      mutated();
       reloadPr();
     } catch (error) {
       fail(error);
-      onMutated();
+      mutated();
     } finally {
       setBusy(null);
     }
@@ -868,7 +907,7 @@ function ChangedFiles({
                   selected={selected}
                   selectedKind={selectedKind}
                   busy={busy}
-                  onOpenFile={onOpenFile}
+                  onOpenFile={openFile}
                   onAction={run}
                 />
               </FileSection>
@@ -911,7 +950,7 @@ function ChangedFiles({
                   selected={selected}
                   selectedKind={selectedKind}
                   busy={busy}
-                  onOpenFile={onOpenFile}
+                  onOpenFile={openFile}
                   onAction={run}
                 />
               </FileSection>
@@ -1225,7 +1264,11 @@ type ChangeRowProps = {
   ) => void;
 };
 
-function ChangeList({ files, view, ...rest }: ChangeRowProps) {
+const ChangeList = memo(function ChangeList({
+  files,
+  view,
+  ...rest
+}: ChangeRowProps) {
   const tree = useMemo(() => buildChangeTree(files), [files]);
   if (view === "tree") {
     return <ChangeDirChildren dir={tree} depth={0} {...rest} />;
@@ -1241,12 +1284,19 @@ function ChangeList({ files, view, ...rest }: ChangeRowProps) {
           kind={rest.kind}
           onOpenFile={rest.onOpenFile}
           onAction={rest.onAction}
-          contextSelection={rest.contextSelection}
+          contextChecked={
+            rest.contextSelection
+              ? rest.contextSelection.selected.has(
+                  JSON.stringify([file.relative, rest.kind]),
+                )
+              : undefined
+          }
+          onToggleContext={rest.contextSelection?.toggle}
         />
       ))}
     </>
   );
-}
+});
 
 function ChangeDirChildren({
   dir,
@@ -1288,14 +1338,21 @@ function ChangeDirChildren({
           depth={depth}
           onOpenFile={onOpenFile}
           onAction={onAction}
-          contextSelection={contextSelection}
+          contextChecked={
+            contextSelection
+              ? contextSelection.selected.has(
+                  JSON.stringify([file.relative, kind]),
+                )
+              : undefined
+          }
+          onToggleContext={contextSelection?.toggle}
         />
       ))}
     </>
   );
 }
 
-function ChangeDirRow({
+const ChangeDirRow = memo(function ChangeDirRow({
   dir,
   depth,
   kind,
@@ -1353,7 +1410,7 @@ function ChangeDirRow({
       ) : null}
     </li>
   );
-}
+});
 
 function isActive(
   file: GitChangedFile,
@@ -1373,15 +1430,17 @@ function buildChangeTree(files: GitChangedFile[]): ChangeDir {
     files: [],
     status: null,
   };
+  const dirByPath = new Map<string, ChangeDir>([["", root]]);
   for (const file of files) {
     const segments = file.relative.split("/");
     let node = root;
     for (const segment of segments.slice(0, -1)) {
       const path = node.path ? `${node.path}/${segment}` : segment;
-      let next = node.dirs.find((dir) => dir.path === path);
+      let next = dirByPath.get(path);
       if (!next) {
         next = { name: segment, path, dirs: [], files: [], status: null };
         node.dirs.push(next);
+        dirByPath.set(path, next);
       }
       node = next;
     }
@@ -1410,54 +1469,69 @@ function sortChangeDir(dir: ChangeDir): string | null {
   return dir.status;
 }
 
-function ChangeRow({
-  file,
-  active,
-  busy,
-  kind,
-  depth,
-  onOpenFile,
-  onAction,
-  contextSelection,
-}: {
-  contextSelection?: ContextSelection;
-  file: GitChangedFile;
-  active: boolean;
-  busy: boolean;
-  kind: GitFileDiffKind;
-  /** Set in tree view: nesting level, and the folder path moves to the tree. */
-  depth?: number;
-  onOpenFile: (path: string, kind: GitFileDiffKind) => void;
-  onAction: (
-    file: GitChangedFile,
-    action: "stage" | "unstage" | "discard",
-  ) => void;
-}) {
-  const name = basename(file.relative);
-  const tree = depth !== undefined;
-  const dir = tree ? "" : dirname(file.relative);
-  const canOpen = file.status !== "deleted";
+function sameChangedFile(a: GitChangedFile, b: GitChangedFile): boolean {
   return (
-    <li>
-      <div
-        style={tree ? { paddingLeft: 8 + depth * 12 } : undefined}
-        className={`group flex h-7 w-full items-center gap-1 pr-2 leading-none ${
-          tree ? "" : "pl-2"
-        } ${
-          active
-            ? "bg-content/10 text-content"
-            : "text-content hover:bg-content/5"
-        }`}
-      >
-        {contextSelection ? (
-          <ContextCheckbox
-            label={`Select ${kind} ${file.relative}`}
-            checked={contextSelection.selected.has(
-              JSON.stringify([file.relative, kind]),
-            )}
-            onChange={() => contextSelection.toggle(file.relative, kind)}
-          />
-        ) : null}
+    a === b ||
+    (a.path === b.path &&
+      a.relative === b.relative &&
+      a.status === b.status &&
+      a.staged === b.staged &&
+      a.unstaged === b.unstaged &&
+      a.additions === b.additions &&
+      a.deletions === b.deletions)
+  );
+}
+
+const ChangeRow = memo(
+  function ChangeRow({
+    file,
+    active,
+    busy,
+    kind,
+    depth,
+    onOpenFile,
+    onAction,
+    contextChecked,
+    onToggleContext,
+  }: {
+    /** Selection-mode state for this file; undefined hides the checkbox. */
+    contextChecked?: boolean;
+    onToggleContext?: (relative: string, kind: GitFileDiffKind) => void;
+    file: GitChangedFile;
+    active: boolean;
+    busy: boolean;
+    kind: GitFileDiffKind;
+    /** Set in tree view: nesting level, and the folder path moves to the tree. */
+    depth?: number;
+    onOpenFile: (path: string, kind: GitFileDiffKind) => void;
+    onAction: (
+      file: GitChangedFile,
+      action: "stage" | "unstage" | "discard",
+    ) => void;
+  }) {
+    const name = basename(file.relative);
+    const tree = depth !== undefined;
+    const dir = tree ? "" : dirname(file.relative);
+    const canOpen = file.status !== "deleted";
+    return (
+      <li>
+        <div
+          style={tree ? { paddingLeft: 8 + depth * 12 } : undefined}
+          className={`group flex h-7 w-full items-center gap-1 pr-2 leading-none ${
+            tree ? "" : "pl-2"
+          } ${
+            active
+              ? "bg-content/10 text-content"
+              : "text-content hover:bg-content/5"
+          }`}
+        >
+          {contextChecked !== undefined ? (
+            <ContextCheckbox
+              label={`Select ${kind} ${file.relative}`}
+              checked={contextChecked}
+              onChange={() => onToggleContext?.(file.relative, kind)}
+            />
+          ) : null}
         <button
           type="button"
           title={file.relative}
@@ -1515,7 +1589,18 @@ function ChangeRow({
       </div>
     </li>
   );
-}
+  },
+  (prev, next) =>
+    prev.active === next.active &&
+    prev.busy === next.busy &&
+    prev.kind === next.kind &&
+    prev.depth === next.depth &&
+    prev.contextChecked === next.contextChecked &&
+    prev.onOpenFile === next.onOpenFile &&
+    prev.onAction === next.onAction &&
+    prev.onToggleContext === next.onToggleContext &&
+    sameChangedFile(prev.file, next.file),
+);
 
 function IconAction({
   title,
@@ -1566,15 +1651,27 @@ function useDiffIndex(
   enabled: boolean,
 ): {
   index: GitDiffIndex | null;
-  reload: () => void;
+  patch: (update: (index: GitDiffIndex) => GitDiffIndex) => void;
 } {
   const [index, setIndex] = useState<GitDiffIndex | null>(() =>
     cachedIndex(cwd),
   );
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((value) => value + 1), []);
   const indexRef = useRef(index);
   indexRef.current = index;
+
+  // Apply a local mutation result instantly; the next load still reconciles.
+  const patch = useCallback(
+    (update: (index: GitDiffIndex) => GitDiffIndex) => {
+      const prev = indexRef.current;
+      if (!prev) return;
+      const next = update(prev);
+      if (next === prev) return;
+      indexByCwd.set(cwd, next);
+      indexRef.current = next;
+      setIndex(next);
+    },
+    [cwd],
+  );
 
   useEffect(() => {
     if (!enabled || !cwd || cwd === "~") {
@@ -1594,7 +1691,7 @@ function useDiffIndex(
         pending = true;
         return;
       }
-      if (document.hidden && nonce === 0) return;
+      if (document.hidden) return;
       inFlight = true;
       try {
         const next = await gitDiffIndex(cwd);
@@ -1643,9 +1740,9 @@ function useDiffIndex(
       document.removeEventListener("visibilitychange", onResume);
       unsubGit();
     };
-  }, [cwd, enabled, nonce]);
+  }, [cwd, enabled]);
 
-  return { index, reload };
+  return { index, patch };
 }
 
 function cachedIndex(cwd: string | undefined): GitDiffIndex | null {
@@ -1678,6 +1775,90 @@ function changedFilePaths(prev: GitDiffIndex, next: GitDiffIndex): string[] {
     }
   }
   return paths;
+}
+
+/**
+ * Local result of a row mutation applied before the refreshed index lands.
+ * Only section membership (staged/unstaged flags) is predicted; status,
+ * stats, and anything unexpected get corrected by the next `load()`.
+ */
+function indexAfterFileAction(
+  index: GitDiffIndex,
+  relative: string,
+  action: "stage" | "unstage" | "discard",
+): GitDiffIndex {
+  const files: GitChangedFile[] = [];
+  for (const file of index.files) {
+    if (file.relative !== relative) {
+      files.push(file);
+      continue;
+    }
+    if (action === "stage") {
+      if (file.staged && !file.unstaged) return index;
+      files.push({
+        ...file,
+        staged: true,
+        unstaged: false,
+        status: file.status === "untracked" ? "added" : file.status,
+      });
+    } else if (action === "unstage") {
+      if (!file.staged && file.unstaged) return index;
+      files.push({
+        ...file,
+        staged: false,
+        unstaged: true,
+        status: file.status === "added" ? "untracked" : file.status,
+      });
+    } else if (file.staged) {
+      files.push({ ...file, unstaged: false });
+    }
+  }
+  return { ...index, files };
+}
+
+function indexAfterAllAction(
+  index: GitDiffIndex,
+  action: "stage" | "unstage" | "discard",
+): GitDiffIndex {
+  let changed = false;
+  const files: GitChangedFile[] = [];
+  for (const file of index.files) {
+    if (action === "stage") {
+      if (file.staged && !file.unstaged) {
+        files.push(file);
+      } else {
+        changed = true;
+        files.push({
+          ...file,
+          staged: true,
+          unstaged: false,
+          status: file.status === "untracked" ? "added" : file.status,
+        });
+      }
+    } else if (action === "unstage") {
+      if (!file.staged && file.unstaged) {
+        files.push(file);
+      } else {
+        changed = true;
+        files.push({
+          ...file,
+          staged: false,
+          unstaged: true,
+          status: file.status === "added" ? "untracked" : file.status,
+        });
+      }
+    } else if (file.staged) {
+      if (file.unstaged) {
+        changed = true;
+        files.push({ ...file, unstaged: false });
+      } else {
+        files.push(file);
+      }
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? { ...index, files } : index;
 }
 
 function sameIndex(prev: GitDiffIndex | null, next: GitDiffIndex): boolean {

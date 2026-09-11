@@ -90,6 +90,7 @@ import {
   type SlashToken,
 } from "../lib/skills";
 import { AccessPicker } from "./AccessPicker";
+import { AttachPicker } from "./AttachPicker";
 import { ComposerRunner } from "./ComposerRunner";
 import { ContextMeter } from "./ContextMeter";
 import { AttachmentChip } from "./AttachmentChip";
@@ -501,6 +502,9 @@ export function Composer({
   const [notes, setNotes] = useState<Note[]>(() => peekNotes() ?? []);
   const [mention, setMention] = useState<MentionToken | null>(null);
   const [mentionActive, setMentionActive] = useState(0);
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [attachQuery, setAttachQuery] = useState("");
+  const [attachActive, setAttachActive] = useState(0);
   const [runnerEnabled, setRunnerEnabled] = useState(loadComposerRunner);
   const [runnerLive, setRunnerLive] = useState(
     () => busy && loadComposerRunner(),
@@ -522,7 +526,7 @@ export function Composer({
     !noteCard &&
     !handoffCard;
   const skillPickerOpen = creatingSkill || slash !== null;
-  const pickerOpen = skillPickerOpen || sessionFolderOpen;
+  const pickerOpen = skillPickerOpen || sessionFolderOpen || attachOpen;
   const skillCatalog = useComposerSkills({
     harness,
     executionCwd,
@@ -575,6 +579,12 @@ export function Composer({
     const seen = new Set(noteHits.map((file) => file.path));
     return [...noteHits, ...fileHits.filter((file) => !seen.has(file.path))];
   }, [cwd, files, mention?.query, mentionOpen, notes, notesEnabled]);
+  const attachRanked = useMemo(() => {
+    if (!attachOpen || !looksLikeProject(cwd)) return [];
+    return rankMentionFiles(files, attachQuery, recentOpenedFiles(cwd)).filter(
+      (file) => !file.isDir,
+    );
+  }, [attachOpen, files, attachQuery, cwd]);
 
   const syncHasValue = useCallback(
     (text: string, files: Attachment[]) => {
@@ -648,6 +658,7 @@ export function Composer({
   useEffect(() => {
     setSessionFolderOpen(false);
     setSessionFolderSelected(false);
+    setAttachOpen(false);
   }, [cwd]);
 
   useEffect(() => {
@@ -663,7 +674,7 @@ export function Composer({
     };
     const cached = peekProjectFiles(cwd);
     if (cached) apply(cached);
-    void loadProjectFiles(cwd, mentionOpen)
+    void loadProjectFiles(cwd, mentionOpen || attachOpen)
       .then(apply)
       .catch(() => undefined);
     const unsub = subscribeProjectFiles(() => {
@@ -674,7 +685,7 @@ export function Composer({
       cancelled = true;
       unsub();
     };
-  }, [cwd, mentionOpen]);
+  }, [cwd, mentionOpen, attachOpen]);
 
   useEffect(() => {
     if (!mentionOpen || !notesEnabled) return;
@@ -696,6 +707,18 @@ export function Composer({
       rankedFiles.length === 0 ? 0 : Math.min(index, rankedFiles.length - 1),
     );
   }, [rankedFiles.length]);
+
+  useEffect(() => {
+    setAttachActive(0);
+  }, [attachQuery, cwd]);
+
+  useEffect(() => {
+    setAttachActive((index) =>
+      attachRanked.length === 0
+        ? 0
+        : Math.min(index, attachRanked.length - 1),
+    );
+  }, [attachRanked.length]);
 
   const resizeTextarea = (el: HTMLTextAreaElement) => {
     el.style.height = "auto";
@@ -856,7 +879,7 @@ export function Composer({
     if (!focused) return;
     if (
       document.querySelector(
-        "[data-model-picker], [data-access-picker], [data-model-settings], [data-file-picker], [data-branch-picker], [data-skill-picker], [data-session-folder-picker], [data-mention-picker], [data-composer-plus]",
+        "[data-model-picker], [data-access-picker], [data-model-settings], [data-file-picker], [data-branch-picker], [data-skill-picker], [data-session-folder-picker], [data-mention-picker], [data-attach-picker], [data-composer-plus]",
       )
     )
       return;
@@ -866,6 +889,7 @@ export function Composer({
   useEffect(() => {
     if (!enabled) {
       setFileDrag(false);
+      setAttachOpen(false);
       return;
     }
     const dropRoot = () =>
@@ -1028,6 +1052,7 @@ export function Composer({
     setPlusOpen(false);
     setSlash(null);
     setMention(null);
+    setAttachOpen(false);
     setCreatingSkill(false);
     setCreateError(null);
     syncHasValue("", []);
@@ -1156,12 +1181,57 @@ export function Composer({
     void attachmentsFromFiles(files).then(addAttachments);
   };
 
-  const attachFromPicker = () => {
+  const openAttachPicker = () => {
     if (!attachmentsSupported) return;
-    void pickAttachments().then((files) => {
-      addAttachments(files);
-      ref.current?.focus();
-    });
+    setAttachQuery("");
+    setAttachActive(0);
+    setMention(null);
+    setAttachOpen(true);
+  };
+
+  const closeAttachPicker = useCallback(() => {
+    setAttachOpen(false);
+    ref.current?.focus();
+  }, []);
+
+  const attachedPaths = new Set(
+    allAttachments
+      .map((file) => file.path)
+      .filter((path): path is string => Boolean(path)),
+  );
+
+  const toggleAttach = (file: ProjectFile) => {
+    const existing = allAttachments.find((item) => item.path === file.path);
+    if (existing) {
+      if (contextFiles.some((item) => item.id === existing.id)) {
+        onInboxCardDismiss?.(existing.id);
+      } else {
+        removeAttachment(existing.id);
+      }
+      return;
+    }
+    setAttachmentError("");
+    void attachmentsFromPaths([file.path])
+      .then(addAttachments)
+      .catch((error: unknown) =>
+        setAttachmentError(
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
+  };
+
+  const browseAttachments = () => {
+    setAttachOpen(false);
+    void pickAttachments()
+      .then((files) => {
+        addAttachments(files);
+        ref.current?.focus();
+      })
+      .catch((error: unknown) =>
+        setAttachmentError(
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
   };
 
   return (
@@ -1271,6 +1341,24 @@ export function Composer({
                   })
                   .finally(() => setCreateBusy(false));
               }}
+            />
+          </div>
+        ) : null}
+        {attachOpen ? (
+          <div className="absolute inset-x-0 bottom-full z-30 mb-1">
+            <AttachPicker
+              files={attachRanked}
+              query={attachQuery}
+              active={attachActive}
+              loading={
+                looksLikeProject(cwd) && peekProjectFiles(cwd) == null
+              }
+              attached={attachedPaths}
+              onQuery={setAttachQuery}
+              onActive={setAttachActive}
+              onToggle={toggleAttach}
+              onBrowse={browseAttachments}
+              onClose={closeAttachPicker}
             />
           </div>
         ) : null}
@@ -1467,16 +1555,16 @@ export function Composer({
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       setPlusOpen(false);
-                      attachFromPicker();
+                      openAttachPicker();
                     }}
                     className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <FilePlus className="mt-0.5 size-4 shrink-0" />
                     <span className="min-w-0">
-                      <span className="block text-[13px]">Upload file</span>
+                      <span className="block text-[13px]">Attach files</span>
                       <span className="block text-[11px] leading-4 text-content/45">
                         {attachmentsSupported
-                          ? "Attach files or images to this message"
+                          ? "Pick project files or browse for others"
                           : `${HARNESS_TITLE[harness]} does not support attachments`}
                       </span>
                     </span>
