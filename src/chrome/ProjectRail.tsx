@@ -109,6 +109,7 @@ import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { ProjectBackgroundDialog } from "./ProjectBackgroundDialog";
 import { ProjectMascot } from "./ProjectMascot";
 import { RailAction, RailSearch } from "./RailAction";
+import { NewProjectGroupDialog } from "./NewProjectGroupDialog";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
 import { DevModeSlot, TabVisitNav } from "./TitleBar";
 import { SidebarUpdateFooter } from "./SidebarUpdate";
@@ -418,20 +419,15 @@ export function ProjectRail({
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
-  const [groupName, setGroupName] = useState("");
   const [namingGroup, setNamingGroup] = useState(false);
 
-  const closeAddMenu = () => {
-    setAddMenu(null);
-    setNamingGroup(false);
-    setGroupName("");
-  };
+  const closeAddMenu = () => setAddMenu(null);
 
   /** A pathless project — a pure group; opens its repositories sheet so the
    * user can add members right away. */
-  const submitGroup = () => {
-    const project = createProjectGroup(groupName || undefined);
-    closeAddMenu();
+  const submitGroup = (name: string) => {
+    const project = createProjectGroup(name);
+    setNamingGroup(false);
     setRepositoriesProject({
       path: projectRailKey(project.id),
       projectId: project.id,
@@ -818,57 +814,41 @@ export function ProjectRail({
         <Popover
           anchor={{ x: addMenu.x, y: addMenu.y }}
           onDismiss={closeAddMenu}
-          role={namingGroup ? "dialog" : "menu"}
-          aria-label={namingGroup ? "New project" : "Add project"}
+          role="menu"
+          aria-label="Add project"
           className="overflow-hidden"
         >
-          {namingGroup ? (
-            <form
-              className="flex w-56 flex-col gap-1.5 px-1.5 py-1.5"
-              onSubmit={(event) => {
-                event.preventDefault();
-                submitGroup();
+          <div className="px-1.5 py-1.5">
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+              onClick={() => {
+                closeAddMenu();
+                onOpenProject();
               }}
             >
-              <input
-                autoFocus
-                value={groupName}
-                onChange={(event) => setGroupName(event.target.value)}
-                placeholder="Project name"
-                aria-label="Project name"
-                className="w-full rounded-lg border border-content/10 bg-content/5 px-2.5 py-1.5 text-[13px] text-content outline-none ring-accent/40 focus:ring-1"
-              />
-              <button
-                type="submit"
-                className="w-full rounded-lg bg-content/10 px-2.5 py-1.5 text-left text-[12px] text-content hover:bg-content/15"
-              >
-                Create project
-              </button>
-            </form>
-          ) : (
-            <div className="px-1.5 py-1.5">
-              <button
-                type="button"
-                role="menuitem"
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
-                onClick={() => {
-                  closeAddMenu();
-                  onOpenProject();
-                }}
-              >
-                Open folder…
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
-                onClick={() => setNamingGroup(true)}
-              >
-                New project group…
-              </button>
-            </div>
-          )}
+              Open folder…
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+              onClick={() => {
+                closeAddMenu();
+                setNamingGroup(true);
+              }}
+            >
+              New project group…
+            </button>
+          </div>
         </Popover>
+      ) : null}
+      {namingGroup ? (
+        <NewProjectGroupDialog
+          onCancel={() => setNamingGroup(false)}
+          onCreate={submitGroup}
+        />
       ) : null}
       {taskMenu ? (
         <Popover
