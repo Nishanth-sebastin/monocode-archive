@@ -37,6 +37,12 @@ import {
   type TaskWorkspace,
 } from "../lib/taskWorkspaces";
 import { basename } from "../lib/fs";
+import {
+  listInboxItems,
+  type InboxItem,
+} from "../lib/githubTasks";
+import { linkedWorkItemFromInboxItem } from "../lib/sessionWorkItem";
+import type { LinkedWorkItem } from "../lib/session";
 import { pathKey, prettyCwd, wslLocation, wslPath } from "../lib/paths";
 import { ContextCheckbox } from "./InboxContextPicker";
 import { Modal } from "./Modal";
@@ -48,7 +54,6 @@ import {
   Folder,
   GitBranch,
   Loader,
-  RefreshCw,
   Search,
 } from "./icons";
 
@@ -73,7 +78,6 @@ type Props = {
   editingTaskId?: string;
   /** Launches all unresolved children, or just the given ones (retry). */
   onLaunchChildren: (taskId: string, childIds?: readonly string[]) => void;
-  onOpenPath: (path: string) => void;
   onClose: () => void;
 };
 
@@ -98,7 +102,6 @@ export function TaskCreateSheet({
   projectId,
   editingTaskId,
   onLaunchChildren,
-  onOpenPath,
   onClose,
 }: Props) {
   const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
@@ -127,6 +130,10 @@ export function TaskCreateSheet({
   const [selected, setSelected] = useState<string[]>(
     () => editingTask?.children.map((child) => child.repositoryId) ?? [],
   );
+  const [tickets, setTickets] = useState<LinkedWorkItem[]>(() => {
+    const first = editingTask?.ticket;
+    return first ? [first, ...(first.additionalItems ?? [])] : [];
+  });
   /** Editable responsibilities for children that already exist — keyed by
    * child id, since existing children are not drafts. */
   const [childResp, setChildResp] = useState<Map<string, string>>(
@@ -139,17 +146,9 @@ export function TaskCreateSheet({
   );
   const [drafts, setDrafts] = useState<Map<string, ChildDraftState>>(new Map());
   const [error, setError] = useState("");
-  const [taskId, setTaskId] = useState<string | null>(null);
   const refsCache = useRef(new Map<string, Ref[]>());
   const [refsLoading, setRefsLoading] = useState<Set<string>>(new Set());
   const [refsTick, bumpRefs] = useState(0);
-
-  const task: TaskWorkspace | undefined = useMemo(
-    () => loadTaskWorkspaces().find((entry) => entry.id === taskId),
-    // tasksRaw changes whenever the store writes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [taskId, tasksRaw],
-  );
 
   const repositories = useMemo(
     () => project?.repositories ?? [],
@@ -315,6 +314,25 @@ export function TaskCreateSheet({
     }
   };
 
+  const selectAll = (on: boolean) => {
+    setError("");
+    if (on) {
+      setSelected(repositories.map((repo) => repo.id));
+      setDrafts((prev) => {
+        const next = new Map(prev);
+        for (const repo of repositories)
+          if (!existingByRepo.has(repo.id) && !next.has(repo.id))
+            next.set(repo.id, defaultDraft(repo));
+        return next;
+      });
+      for (const repo of repositories)
+        if (!existingByRepo.has(repo.id)) loadRefs(repo);
+      return;
+    }
+    setSelected([]);
+    setDrafts(new Map());
+  };
+
   const updateDraft = (repoId: string, patch: Partial<ChildDraftState>) =>
     setDrafts((prev) => {
       const next = new Map(prev);
@@ -376,7 +394,6 @@ export function TaskCreateSheet({
   });
 
   const canSubmit =
-    !taskId &&
     Boolean(name.trim()) &&
     selected.length > 0 &&
     !hostConflict &&
@@ -411,6 +428,14 @@ export function TaskCreateSheet({
 
   const submit = () => {
     setError("");
+    const linked: LinkedWorkItem | undefined = tickets.length
+      ? {
+          ...tickets[0],
+          ...(tickets.length > 1
+            ? { additionalItems: tickets.slice(1) }
+            : {}),
+        }
+      : undefined;
     try {
       if (editingTask) {
         const clean = brief.trim();
@@ -421,6 +446,7 @@ export function TaskCreateSheet({
           return {
             ...current,
             name: name.trim(),
+            ...(linked ? { ticket: linked } : { ticket: undefined }),
             ...(clean ? { brief: clean } : { brief: undefined }),
             children: kept.map((child) => {
               const resp = childResp.get(child.id)?.trim();
@@ -436,25 +462,24 @@ export function TaskCreateSheet({
           };
         });
         const added = addTaskChildren(editingTask.id, buildDrafts());
-        if (added.length) {
-          setTaskId(editingTask.id);
+        if (added.length)
           onLaunchChildren(
             editingTask.id,
             added.map((child) => child.id),
           );
-        } else {
-          onClose();
-        }
+        onClose();
         return;
       }
       const created = createTask({
         projectId,
         name,
+        ...(linked ? { ticket: linked } : {}),
         brief,
         children: buildDrafts(),
       });
-      setTaskId(created.id);
+      // Work starts immediately — close straight into the sessions.
       onLaunchChildren(created.id);
+      onClose();
     } catch (err) {
       setError(String(err));
     }
@@ -463,9 +488,7 @@ export function TaskCreateSheet({
   return (
     <Modal
       onClose={onClose}
-      title={
-        task ? task.name : editingTask ? `Edit · ${editingTask.name}` : "New task"
-      }
+      title={editingTask ? `Edit · ${editingTask.name}` : "New task"}
       description={
         project
           ? (project.name ??
@@ -475,8 +498,7 @@ export function TaskCreateSheet({
       size="lg"
     >
       <div className="flex max-h-[70vh] flex-col gap-3 overflow-y-auto overscroll-none px-4 pb-4 pt-1">
-        {!task ? (
-          <>
+        <>
             <div>
               <p className="mb-1 text-[11px] text-content/50">Task name</p>
               <input
@@ -490,7 +512,22 @@ export function TaskCreateSheet({
             </div>
 
             <div>
-              <p className="mb-1 text-[11px] text-content/50">Repositories</p>
+              <div className="mb-1 flex items-center justify-between">
+                <p className="text-[11px] text-content/50">Repositories</p>
+                {repositories.length > 1 ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      selectAll(selected.length !== repositories.length)
+                    }
+                    className="text-[11px] text-content/45 hover:text-content/80"
+                  >
+                    {selected.length === repositories.length
+                      ? "Deselect all"
+                      : "Select all"}
+                  </button>
+                ) : null}
+              </div>
               {project?.sets.length ? (
                 <div className="mb-1.5 flex flex-wrap gap-1">
                   {project.sets.map((set) => (
@@ -586,6 +623,12 @@ export function TaskCreateSheet({
               );
             })}
 
+            <IssuePicker
+              tickets={tickets}
+              repositories={repositories}
+              onChange={setTickets}
+            />
+
             <div>
               <p className="mb-1 text-[11px] text-content/50">Shared brief</p>
               <textarea
@@ -632,15 +675,6 @@ export function TaskCreateSheet({
               </button>
             </div>
           </>
-        ) : (
-          <LaunchReview
-            task={task}
-            repositories={repositories}
-            onRetry={(childId) => onLaunchChildren(task.id, [childId])}
-            onOpenPath={onOpenPath}
-            onClose={onClose}
-          />
-        )}
       </div>
     </Modal>
   );
@@ -943,109 +977,161 @@ function ExistingChildCard({
   );
 }
 
-function LaunchReview({
-  task,
+/** Picked issues plus a searchable inbox picker — the selected items become
+ * the task's linked ticket (first) and additionalItems (rest). */
+function IssuePicker({
+  tickets,
   repositories,
-  onRetry,
-  onOpenPath,
-  onClose,
+  onChange,
 }: {
-  task: TaskWorkspace;
+  tickets: LinkedWorkItem[];
   repositories: readonly ProjectRepository[];
-  onRetry: (childId: string) => void;
-  onOpenPath: (path: string) => void;
-  onClose: () => void;
+  onChange: (next: LinkedWorkItem[]) => void;
 }) {
-  const pending = task.children.filter(
-    (child) => child.launch.state === "pending" && !child.workingCopy,
-  );
+  const anchor = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<InboxItem[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    if (!open || items !== null || busy) return;
+    setBusy(true);
+    setError("");
+    void listInboxItems(
+      repositories.map((repo) => ({ path: repo.anchor })),
+      { assignedToMe: false, state: "open", search: "" },
+    )
+      .then((result) =>
+        setItems(
+          result.items.filter((item) => item.kind === "issue"),
+        ),
+      )
+      .catch((reason) => setError(String(reason)))
+      .finally(() => setBusy(false));
+  }, [open, items, busy, repositories]);
+
+  const picked = new Set(tickets.map((ticket) => ticket.url));
+  const query = search.trim().toLowerCase();
+  const shown = (items ?? [])
+    .filter(
+      (item) =>
+        !query ||
+        [item.identifier, item.title, item.repo].some((field) =>
+          field?.toLowerCase().includes(query),
+        ),
+    )
+    .slice(0, 80);
+
+  const toggle = (item: InboxItem) => {
+    const linked = linkedWorkItemFromInboxItem(item);
+    if (!linked) return;
+    onChange(
+      picked.has(linked.url)
+        ? tickets.filter((ticket) => ticket.url !== linked.url)
+        : [...tickets, linked],
+    );
+  };
+
+  const label = (ticket: LinkedWorkItem) =>
+    ticket.identifier ?? `${ticket.repo}#${ticket.number}`;
+
   return (
-    <>
-      <p className="text-[12px] leading-4 text-content/55">
-        Sessions start independently per repository. Successful children stay
-        usable when one fails — retry touches only unresolved children.
-      </p>
-      <ul className="flex flex-col gap-px">
-        {task.children.map((child) => {
-          const repo = repositories.find(
-            (entry) => entry.id === child.repositoryId,
-          );
-          const state = child.launch.state;
-          return (
-            <li
-              key={child.id}
-              className="flex items-center gap-2 rounded-lg px-1.5 py-1.5"
-            >
-              {state === "ready" ? (
-                <Check
-                  className="size-3.5 shrink-0 text-emerald-400"
-                  strokeWidth={2}
-                />
-              ) : state === "working" ? (
-                <Loader className="size-3.5 shrink-0 animate-spin text-content/50" />
-              ) : state === "failed" ? (
-                <CircleAlert className="size-3.5 shrink-0 text-red-400" />
-              ) : (
-                <CircleAlert className="size-3.5 shrink-0 text-content/30" />
-              )}
-              <span className="min-w-0 flex-1 truncate text-[13px] text-content">
-                {repo ? repositoryDisplayName(repo) : "Removed repository"}
-              </span>
-              <span className="shrink-0 truncate text-[11px] text-content/45">
-                {child.workingCopy
-                  ? child.branch ?? prettyCwd(child.workingCopy)
-                  : "Prepare later"}
-              </span>
-              {state === "failed" ? (
-                <button
-                  type="button"
-                  onClick={() => onRetry(child.id)}
-                  className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-content/60 hover:bg-content/8 hover:text-content"
-                >
-                  <RefreshCw className="size-3" strokeWidth={1.75} />
-                  Retry
-                </button>
-              ) : null}
-              {child.workingCopy && state === "ready" ? (
-                <button
-                  type="button"
-                  onClick={() => onOpenPath(child.workingCopy!)}
-                  className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-content/60 hover:bg-content/8 hover:text-content"
-                >
-                  Open
-                </button>
-              ) : null}
-            </li>
-          );
-        })}
-      </ul>
-      {task.children
-        .filter((child) => child.launch.state === "failed" && child.launch.error)
-        .map((child) => (
-          <p
-            key={child.id}
-            role="alert"
-            className="break-words rounded-lg border border-red-400/20 bg-red-400/5 px-2.5 py-2 text-[11px] leading-4 text-red-300"
+    <div>
+      <p className="mb-1 text-[11px] text-content/50">Issues</p>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {tickets.map((ticket) => (
+          <span
+            key={ticket.url}
+            className="inline-flex items-center gap-1 rounded-full border border-content/10 bg-content/5 py-0.5 pl-2 pr-1 text-[11px] text-content/80"
           >
-            {child.launch.error}
-          </p>
+            <span className="min-w-0 max-w-56 truncate">
+              {label(ticket)}
+              {ticket.title ? ` — ${ticket.title}` : ""}
+            </span>
+            <button
+              type="button"
+              aria-label={`Remove ${label(ticket)}`}
+              className="grid size-4 place-items-center rounded-full text-content/40 hover:bg-content/10 hover:text-content"
+              onClick={() =>
+                onChange(
+                  tickets.filter((entry) => entry.url !== ticket.url),
+                )
+              }
+            >
+              ×
+            </button>
+          </span>
         ))}
-      {pending.length ? (
-        <p className="text-[11px] text-content/45">
-          {pending.length} {pending.length === 1 ? "repository is" : "repositories are"} prepared
-          later — no session started.
-        </p>
-      ) : null}
-      <div className="flex justify-end border-t border-content/10 pt-3">
         <button
+          ref={anchor}
           type="button"
-          onClick={onClose}
-          className="rounded-md bg-content/10 px-3 py-1.5 text-[12px] font-medium text-content hover:bg-content/15"
+          onClick={() => setOpen(true)}
+          className="rounded-full border border-dashed border-content/15 px-2 py-0.5 text-[11px] text-content/50 hover:bg-content/5 hover:text-content"
         >
-          Done
+          {tickets.length ? "Add more…" : "Add issues…"}
         </button>
       </div>
-    </>
+      {open ? (
+        <Popover
+          anchor={anchor}
+          onDismiss={() => setOpen(false)}
+          role="dialog"
+          aria-label="Select issues"
+          className="flex w-[21rem] flex-col overflow-hidden"
+        >
+          <div className="flex items-center gap-1.5 border-b border-content/8 px-2 py-1.5">
+            <Search
+              className="size-3.5 shrink-0 text-content/40"
+              strokeWidth={1.75}
+            />
+            <input
+              autoFocus
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search open issues…"
+              aria-label="Search open issues"
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/35"
+            />
+          </div>
+          <div className="max-h-64 overflow-y-auto px-1.5 py-1.5">
+            {busy ? (
+              <p className="px-2 py-2 text-[11px] text-content/45">
+                Loading issues…
+              </p>
+            ) : error ? (
+              <p className="px-2 py-2 text-[11px] text-red-400">{error}</p>
+            ) : shown.length ? (
+              shown.map((item) => (
+                <button
+                  key={item.url || `${item.provider}:${item.id}`}
+                  type="button"
+                  onClick={() => toggle(item)}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-content/5"
+                >
+                  <ContextCheckbox
+                    label={item.title}
+                    checked={picked.has(item.url)}
+                    onChange={() => toggle(item)}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-content">
+                    {item.identifier ?? `#${item.number}`} {item.title}
+                  </span>
+                  <span className="shrink-0 truncate text-[10px] text-content/40">
+                    {item.repo || item.provider}
+                  </span>
+                </button>
+              ))
+            ) : (
+              <p className="px-2 py-2 text-[11px] text-content/45">
+                No open issues found
+              </p>
+            )}
+          </div>
+        </Popover>
+      ) : null}
+    </div>
   );
 }
 

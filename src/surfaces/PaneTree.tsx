@@ -88,6 +88,7 @@ type Shared = {
   onResumeQueue: (sessionId: string) => void;
   onAddIssues?: (sessionId: string) => void;
   onOpenTaskChild?: (taskId: string, childId: string) => void;
+  onRetryTaskChild?: (taskId: string, childId: string) => void;
   needsInputSessionIds?: ReadonlySet<string>;
   onInboxCardDismiss?: (sessionId: string, fileId?: string) => void;
   onNoteCardDismiss?: (sessionId: string) => void;
@@ -180,6 +181,7 @@ function PaneTreeComponent({
   onResumeQueue,
   onAddIssues,
   onOpenTaskChild,
+  onRetryTaskChild,
   needsInputSessionIds,
   onInboxCardDismiss,
   onNoteCardDismiss,
@@ -399,6 +401,7 @@ function PaneTreeComponent({
                 onResumeQueue={onResumeQueue}
                 onAddIssues={onAddIssues}
                 onOpenTaskChild={onOpenTaskChild}
+                onRetryTaskChild={onRetryTaskChild}
                 needsInputSessionIds={needsInputSessionIds}
                 onInboxCardDismiss={onInboxCardDismiss}
                 onNoteCardDismiss={onNoteCardDismiss}

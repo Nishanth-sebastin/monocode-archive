@@ -103,6 +103,7 @@ type Props = {
   onResumeQueue: (sessionId: string) => void;
   onAddIssues?: (sessionId: string) => void;
   onOpenTaskChild?: (taskId: string, childId: string) => void;
+  onRetryTaskChild?: (taskId: string, childId: string) => void;
   needsInputSessionIds?: ReadonlySet<string>;
   onInboxCardDismiss?: (sessionId: string, fileId?: string) => void;
   onNoteCardDismiss?: (sessionId: string) => void;
@@ -173,6 +174,7 @@ export const SessionPane = memo(function SessionPane({
   onResumeQueue,
   onAddIssues,
   onOpenTaskChild,
+  onRetryTaskChild,
   needsInputSessionIds,
   onInboxCardDismiss,
   onNoteCardDismiss,
@@ -447,6 +449,7 @@ export const SessionPane = memo(function SessionPane({
         sessionId={session.id}
         needsInputIds={needsInputSessionIds}
         onOpenChild={onOpenTaskChild}
+        onRetryChild={onRetryTaskChild}
       />
       <SessionIssues session={session} onAdd={onAddIssues ? () => onAddIssues(session.id) : undefined} />
       <div ref={transcriptScope} className="@container relative min-h-0 flex-1">

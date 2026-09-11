@@ -4622,6 +4622,13 @@ export default function App({
 
   /** Opens one task child: its ordinary session, focused like any session
    * pick. Children without a session fall back to their working copy. */
+  const onRetryTaskChild = useCallback(
+    (taskId: string, childId: string) => {
+      void launchTaskChildren(taskId, [childId]);
+    },
+    [launchTaskChildren],
+  );
+
   const onOpenTaskChild = useCallback(
     async (taskId: string, childId: string) => {
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
@@ -5920,6 +5927,7 @@ export default function App({
     onResumeQueue,
     onAddIssues: async (sessionId: string) => { await onOpenInboxSession(sessionId); setInboxSelectionRevision(value => value + 1); },
     onOpenTaskChild,
+    onRetryTaskChild,
     needsInputSessionIds,
     onInboxCardDismiss,
     onNoteCardDismiss,
@@ -6039,7 +6047,6 @@ export default function App({
           onLaunchChildren={(taskId, childIds) =>
             void launchTaskChildren(taskId, childIds)
           }
-          onOpenPath={onSelectProject}
           onClose={() => setTaskSheet(null)}
         />
       )}

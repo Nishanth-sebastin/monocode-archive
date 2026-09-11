@@ -480,15 +480,18 @@ export function composeTaskPrompt(
   repository: ProjectRepository | undefined,
 ): string {
   const lines = [`# ${task.name}`, ""];
-  if (task.ticket?.title || task.ticket?.identifier || task.ticket?.url) {
-    const ticket = [
-      task.ticket.identifier,
-      task.ticket.title,
-      task.ticket.url,
-    ]
-      .filter(Boolean)
-      .join(" — ");
-    lines.push(`Ticket: ${ticket}`, "");
+  const tickets = [
+    task.ticket,
+    ...(task.ticket?.additionalItems ?? []),
+  ].filter((ticket): ticket is LinkedWorkItem => Boolean(ticket));
+  if (tickets.length) {
+    const labels = tickets.map((ticket) =>
+      [ticket.identifier, ticket.title, ticket.url]
+        .filter(Boolean)
+        .join(" — "),
+    );
+    if (labels.length === 1) lines.push(`Ticket: ${labels[0]}`, "");
+    else lines.push("Tickets:", ...labels.map((label) => `- ${label}`), "");
   }
   if (task.brief?.trim()) lines.push(task.brief.trim(), "");
   const name = repository ? repositoryDisplay(repository) : child.repositoryId;

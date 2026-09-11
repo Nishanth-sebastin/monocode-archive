@@ -42,10 +42,12 @@ export function TaskScopeChip({
   sessionId,
   needsInputIds,
   onOpenChild,
+  onRetryChild,
 }: {
   sessionId: string;
   needsInputIds?: ReadonlySet<string>;
   onOpenChild?: (taskId: string, childId: string) => void;
+  onRetryChild?: (taskId: string, childId: string) => void;
 }) {
   const tasksRaw = useSyncExternalStore(
     subscribeTaskWorkspaces,
@@ -114,17 +116,18 @@ export function TaskScopeChip({
                 needsInputIds?.has(id),
               );
               const ready = entry.sessionIds.length > 0;
+              const failed = entry.launch.state === "failed";
               return (
-                <button
-                  type="button"
-                  key={entry.id}
-                  disabled={!ready}
-                  onClick={() => {
-                    setOpen(false);
-                    onOpenChild?.(task.id, entry.id);
-                  }}
-                  className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/5 disabled:opacity-50"
-                >
+                <div key={entry.id} className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={!ready}
+                    onClick={() => {
+                      setOpen(false);
+                      onOpenChild?.(task.id, entry.id);
+                    }}
+                    className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/5 disabled:opacity-50"
+                  >
                   {entry.launch.state === "failed" ? (
                     <CircleAlert
                       className="size-3.5 shrink-0 text-red-400"
@@ -155,7 +158,21 @@ export function TaskScopeChip({
                           ? prettyCwd(entry.workingCopy)
                           : "Prepare later"}
                   </span>
-                </button>
+                  </button>
+                  {failed && onRetryChild ? (
+                    <button
+                      type="button"
+                      title={entry.launch.error ?? "Retry launch"}
+                      onClick={() => {
+                        setOpen(false);
+                        onRetryChild(task.id, entry.id);
+                      }}
+                      className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-content/60 hover:bg-content/8 hover:text-content"
+                    >
+                      Retry
+                    </button>
+                  ) : null}
+                </div>
               );
             })}
           </div>
