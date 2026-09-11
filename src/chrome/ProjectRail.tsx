@@ -346,6 +346,14 @@ export function ProjectRail({
     // tasksRaw changes on every store write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasksRaw, currentTaskId, taskBusyIds]);
+  const archivedTasks = useMemo(
+    () =>
+      loadTaskWorkspaces()
+        .filter((task) => task.archived)
+        .sort((a, b) => b.createdAt - a.createdAt),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tasksRaw],
+  );
   const taskBySessionId = useMemo(() => {
     const map = new Map<string, { task: TaskWorkspace; child: TaskChild }>();
     for (const agent of liveAgents) {
@@ -699,6 +707,7 @@ export function ProjectRail({
           >
             <TasksSection
               tasks={railTasks}
+              archivedTasks={archivedTasks}
               currentTaskId={currentTaskId}
               busyIds={taskBusyIds}
               needsInputIds={needsInputSessionIds}
@@ -944,18 +953,24 @@ export function ProjectRail({
               role="menuitem"
               className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
               onClick={() => {
-                archiveTask(taskMenu.task.id);
+                archiveTask(taskMenu.task.id, !taskMenu.task.archived);
                 setTaskMenu(null);
               }}
             >
-              Archive task
+              {taskMenu.task.archived ? "Unarchive task" : "Archive task"}
             </button>
             <button
               type="button"
               role="menuitem"
               className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-red-400 hover:bg-content/5"
               onClick={() => {
-                removeTask(taskMenu.task.id);
+                // Sessions and working copies survive — only the record goes.
+                if (
+                  window.confirm(
+                    `Delete task “${taskMenu.task.name}”? Its sessions and working copies stay.`,
+                  )
+                )
+                  removeTask(taskMenu.task.id);
                 setTaskMenu(null);
               }}
             >
@@ -1593,10 +1608,14 @@ function ProjectRepositoryRow({
   );
 }
 
+const TASK_RAIL_CAP = 8;
+
 /** The rail's one home for tasks — a dedicated section listing every active
- * task with live status, instead of rows buried inside each project. */
+ * task with live status, instead of rows buried inside each project.
+ * Archived tasks collapse under a toggle so they stay recoverable. */
 function TasksSection({
   tasks,
+  archivedTasks,
   currentTaskId,
   busyIds,
   needsInputIds,
@@ -1605,6 +1624,7 @@ function TasksSection({
   onNewTask,
 }: {
   tasks: TaskWorkspace[];
+  archivedTasks: TaskWorkspace[];
   currentTaskId?: string;
   busyIds: ReadonlySet<string>;
   needsInputIds?: ReadonlySet<string>;
@@ -1612,7 +1632,39 @@ function TasksSection({
   onMenu: (task: TaskWorkspace, x: number, y: number) => void;
   onNewTask?: () => void;
 }) {
-  if (!tasks.length) return null;
+  const [showArchived, setShowArchived] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  if (!tasks.length && !archivedTasks.length) return null;
+  // The rail stays compact — current and working tasks sort first, the
+  // long tail hides behind a toggle like the archived list.
+  const visibleTasks =
+    showAll || tasks.length <= TASK_RAIL_CAP ? tasks : tasks.slice(0, TASK_RAIL_CAP);
+  const row = (task: TaskWorkspace, archived = false) => {
+    const project = projectForTask(task);
+    return (
+      <TaskRailRow
+        key={task.id}
+        task={task}
+        archived={archived}
+        active={task.id === currentTaskId}
+        busy={busyIds.has(task.id)}
+        needsInput={
+          task.sessionIds?.some((id) => needsInputIds?.has(id)) ||
+          task.children.some((entry) =>
+            entry.sessionIds.some((id) => needsInputIds?.has(id)),
+          ) ||
+          false
+        }
+        project={project}
+        onOpen={() => onOpen?.(task.id)}
+        onMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onMenu(task, event.clientX, event.clientY);
+        }}
+      />
+    );
+  };
   return (
     <div className="mb-2 shrink-0">
       <div className="flex items-center gap-1 px-3 pb-1.5 pt-1">
@@ -1632,37 +1684,38 @@ function TasksSection({
         ) : null}
       </div>
       <div className="flex flex-col gap-px px-2">
-        {tasks.map((task) => {
-          const project = projectForTask(task);
-          return (
-            <TaskRailRow
-              key={task.id}
-              task={task}
-              active={task.id === currentTaskId}
-              busy={busyIds.has(task.id)}
-              needsInput={
-                task.sessionIds?.some((id) => needsInputIds?.has(id)) ||
-                task.children.some((entry) =>
-                  entry.sessionIds.some((id) => needsInputIds?.has(id)),
-                ) ||
-                false
-              }
-              projectLabel={
-                project
-                  ? project.name?.trim() ||
-                    (project.anchor ? projectName(project.anchor) : "Project")
-                  : ""
-              }
-              onOpen={() => onOpen?.(task.id)}
-              onMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onMenu(task, event.clientX, event.clientY);
-              }}
-            />
-          );
-        })}
+        {visibleTasks.map((task) => row(task))}
+        {tasks.length > visibleTasks.length ? (
+          <button
+            type="button"
+            onClick={() => setShowAll(true)}
+            className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-content/40 hover:bg-content/5 hover:text-content/60"
+          >
+            {tasks.length - visibleTasks.length} more tasks
+          </button>
+        ) : null}
       </div>
+      {archivedTasks.length ? (
+        <div className="px-2 pt-1">
+          <button
+            type="button"
+            aria-expanded={showArchived}
+            onClick={() => setShowArchived((value) => !value)}
+            className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-content/40 hover:bg-content/5 hover:text-content/60"
+          >
+            <ChevronDown
+              className={`size-3 shrink-0 transition-transform ${showArchived ? "" : "-rotate-90"}`}
+              strokeWidth={1.75}
+            />
+            Archived · {archivedTasks.length}
+          </button>
+          {showArchived ? (
+            <div className="flex flex-col gap-px">
+              {archivedTasks.map((task) => row(task, true))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1673,8 +1726,9 @@ function TaskRailRow({
   task,
   active = false,
   busy = false,
+  archived = false,
   needsInput,
-  projectLabel = "",
+  project,
   onOpen,
   onMenu,
 }: {
@@ -1683,16 +1737,22 @@ function TaskRailRow({
   active?: boolean;
   /** Its agent is mid-turn — pulsing marker. */
   busy?: boolean;
+  /** Dimmed row under the section's archived expander. */
+  archived?: boolean;
   needsInput: boolean;
-  /** Owning project — shown when the row lives outside the project tree. */
-  projectLabel?: string;
+  /** Owning project — already resolved by the caller, shown for context. */
+  project?: ProjectRecord;
   onOpen: () => void;
   onMenu: (event: MouseEvent<HTMLElement>) => void;
 }) {
   const ticket = task.ticket?.identifier;
+  const projectLabel = project
+    ? project.name?.trim() ||
+      (project.anchor ? projectName(project.anchor) : "Project")
+    : "";
   const repoNames = task.children
     .map((entry) => {
-      const repo = repositoryForChild(task, entry);
+      const repo = repositoryForChild(task, entry, project);
       return repo ? repositoryDisplayName(repo) : "Repository";
     })
     .join(" · ");
@@ -1714,7 +1774,7 @@ function TaskRailRow({
         onContextMenu={onMenu}
         className={`flex w-full min-w-0 flex-col rounded-md px-2 py-1.5 pr-7 text-left outline-none hover:bg-content/8 focus-visible:ring-1 focus-visible:ring-content/30 ${
           active ? "bg-content/10" : ""
-        }`}
+        } ${archived ? "opacity-55" : ""}`}
       >
         <span className="flex min-w-0 items-center gap-2">
           <Task

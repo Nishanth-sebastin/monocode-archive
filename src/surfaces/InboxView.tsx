@@ -34,6 +34,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import {
@@ -51,7 +52,8 @@ import { Popover } from "../chrome/Popover";
 import {
   loadTaskWorkspaces,
   projectForTask,
-  type TaskWorkspace,
+  subscribeTaskWorkspaces,
+  taskWorkspacesSnapshot,
 } from "../lib/taskWorkspaces";
 import { WindowControls } from "../chrome/WindowControls";
 import { useDragResize } from "../hooks/useDragResize";
@@ -964,11 +966,9 @@ export function InboxView({
         {selectingTickets ? <>
           <span className="min-w-0 flex-1 text-[12px] text-content/60">{selectionCount} {editingLinks ? "linked" : "selected"}</span>
           {!editingLinks ? <button type="button" disabled={!selectionCount} onClick={() => {
-            try {
-              onSendToTask?.([...selectedTickets.values()]);
-              setSelectedTickets(new Map());
-              setSelectingTickets(false);
-            } catch (error) { setSelectionError(String(error)); }
+            void Promise.resolve(onSendToTask?.([...selectedTickets.values()]))
+              .then(() => { setSelectedTickets(new Map()); setSelectingTickets(false); })
+              .catch((error) => setSelectionError(String(error)));
           }} className="rounded-md bg-content/10 px-2 py-1 text-[11px] disabled:opacity-40">Send to task</button> : null}
           <button type="button" aria-label="Done selecting tickets" onClick={() => { setSelectedTickets(new Map()); setSelectingTickets(false); setSelectionError(""); }} className="rounded-md px-2 py-1 text-[11px] text-content/60 hover:bg-content/5">Done</button>
         </> : <>
@@ -1995,7 +1995,6 @@ export function InboxDetail({
               {sendMenu ? (
                 <SendTargetMenu
                   anchor={sendAnchor}
-                  tasks={loadTaskWorkspaces().filter((entry) => !entry.archived)}
                   onPick={(taskId) => {
                     setSendMenu(false);
                     onStartTask?.(ticket ? { ...item, projectPath: startProject } : item, taskId);
@@ -2311,19 +2310,28 @@ function labelColor(value: string): string | null {
   return `#${hex}`;
 }
 
-/** Send-to-agent task targets: a new task pre-linked to the item, or an
- * existing task the item links onto. `null` pick = new task. */
+/** Send-to-agent task targets — picking one links the item onto it; the
+ * new-task path is the sibling "Send to agent" button. */
 function SendTargetMenu({
   anchor,
-  tasks,
   onPick,
   onClose,
 }: {
   anchor: React.RefObject<HTMLButtonElement | null>;
-  tasks: readonly TaskWorkspace[];
   onPick: (taskId: string) => void;
   onClose: () => void;
 }) {
+  // Subscribed, not a one-shot read — a task created or archived while the
+  // menu is open shows up (or disappears) immediately.
+  const tasksRaw = useSyncExternalStore(
+    subscribeTaskWorkspaces,
+    taskWorkspacesSnapshot,
+  );
+  const tasks = useMemo(
+    () => loadTaskWorkspaces().filter((entry) => !entry.archived),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tasksRaw],
+  );
   const itemClass =
     "flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5";
   return (

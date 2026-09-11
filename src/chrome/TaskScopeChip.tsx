@@ -41,11 +41,15 @@ function childRepoName(task: TaskWorkspace, child: TaskChild): string {
  */
 export function TaskScopeChip({
   sessionId,
+  cwd,
   needsInputIds,
   onOpenChild,
   onRetryChild,
 }: {
   sessionId: string;
+  /** The session's actual working copy — the host child is derived from
+   * it, not from whichever child was last clicked. */
+  cwd?: string;
   needsInputIds?: ReadonlySet<string>;
   onOpenChild?: (taskId: string, childId: string) => void;
   onRetryChild?: (taskId: string, childId: string) => void;
@@ -56,10 +60,10 @@ export function TaskScopeChip({
   );
   const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
   const scope = useMemo(
-    () => taskForSession(sessionId),
+    () => taskForSession(sessionId, cwd),
     // Stores re-read on every write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sessionId, tasksRaw, projectsRaw],
+    [sessionId, cwd, tasksRaw, projectsRaw],
   );
   const [open, setOpen] = useState(false);
   const anchor = useRef<HTMLButtonElement>(null);

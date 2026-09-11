@@ -2247,18 +2247,18 @@ function FolderRenameRow({
   );
 }
 
-/** Task scope for a session, live against the task store. */
-function useTaskScope(sessionId: string) {
+type TaskScope = NonNullable<ReturnType<typeof taskForSession>>;
+
+/** Task scope for a session, live against the task store. `cwd` pins the
+ * displayed host child to the copy the session actually runs in. */
+function useTaskScope(sessionId: string, cwd?: string) {
   useSyncExternalStore(subscribeTaskWorkspaces, taskWorkspacesSnapshot);
-  return taskForSession(sessionId);
+  return taskForSession(sessionId, cwd);
 }
 
 /** Task marker on a session card — the session belongs to a task rather
- * than a bare repository. Resolves against the task store itself so the
- * card needs no extra props. */
-function SessionTaskChip({ sessionId }: { sessionId: string }) {
-  const scope = useTaskScope(sessionId);
-  if (!scope) return null;
+ * than a bare repository. */
+function SessionTaskChip({ scope }: { scope: TaskScope }) {
   return (
     <span
       title={`Task: ${scope.task.name}`}
@@ -2273,9 +2273,7 @@ function SessionTaskChip({ sessionId }: { sessionId: string }) {
 
 /** Sibling repositories of a multi-repo task — a compact branch list under
  * the session's own repo·branch row so every involved copy is visible. */
-function SessionTaskBranches({ sessionId }: { sessionId: string }) {
-  const scope = useTaskScope(sessionId);
-  if (!scope) return null;
+function SessionTaskBranches({ scope }: { scope: TaskScope }) {
   const rest = scope.task.children.filter(
     (child) => child.id !== scope.child?.id,
   );
@@ -2342,6 +2340,7 @@ function SessionCard({
   const [dragging, setDragging] = useState(false);
   const title = sessionDisplayTitle(session.title, session.harness);
   const gitLabel = formatGitLabel(session.repo, session.branch);
+  const taskScope = useTaskScope(session.id, sessionWorkCwd(session));
 
   const time = formatRelative(session.updatedAt, now);
   const model = compact
@@ -2606,17 +2605,19 @@ function SessionCard({
             </span>
           ) : null}
         </span>
-        <span className="relative mt-1 flex flex-wrap items-center gap-1.5">
-          <SessionTaskChip sessionId={session.id} />
-          {workItemBadge.length ? (
-            <span
-              aria-label="Linked tickets"
-              className="flex flex-wrap items-center gap-1.5"
-            >
-              {workItemBadge}
-            </span>
-          ) : null}
-        </span>
+        {taskScope || workItemBadge.length ? (
+          <span className="relative mt-1 flex flex-wrap items-center gap-1.5">
+            {taskScope ? <SessionTaskChip scope={taskScope} /> : null}
+            {workItemBadge.length ? (
+              <span
+                aria-label="Linked tickets"
+                className="flex flex-wrap items-center gap-1.5"
+              >
+                {workItemBadge}
+              </span>
+            ) : null}
+          </span>
+        ) : null}
         <span className="relative mt-1 flex items-center gap-2">
           {gitLabel ? (
             <span className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45">
@@ -2639,7 +2640,7 @@ function SessionCard({
             />
           </span>
         </span>
-        <SessionTaskBranches sessionId={session.id} />
+        {taskScope ? <SessionTaskBranches scope={taskScope} /> : null}
       </div>
       {onArchive ? (
         <button

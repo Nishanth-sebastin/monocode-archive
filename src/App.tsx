@@ -227,8 +227,14 @@ import {
   composeTaskSessionPrompt,
   linkTicketToTask,
   loadTaskWorkspaces,
+  markTaskChildLaunching,
   projectForTask,
+  pruneTaskSession,
   recordTaskActiveChild,
+  subscribeTaskWorkspaces,
+  taskForSession,
+  taskWorkspacesSnapshot,
+  unmarkTaskChildLaunching,
   updateTask,
   updateTaskChild,
   type TaskChildDraft,
@@ -236,6 +242,7 @@ import {
 import {
   ensureProjectForPath,
   familyForRepository,
+  findProjectByCommonDir,
   isProjectRailKey,
   loadProjects,
   projectContainsPath,
@@ -3145,6 +3152,9 @@ export default function App({
               setHistory((current) =>
                 current.filter((entry) => entry.id !== sessionId),
               );
+              // A deleted conversation must not stay referenced by tasks —
+              // a stale id would dead-end "Open task" forever.
+              pruneTaskSession(sessionId);
               void refreshHistory(sidebarCwd);
             }
           },
@@ -4412,6 +4422,24 @@ export default function App({
   // The task just created — the rail's "current" task until a task session
   // takes over. Never launches work on its own.
   const [focusTaskId, setFocusTaskId] = useState<string>();
+  // The just-created highlight lifts once another task's session becomes
+  // the rail's current task, or the task is archived/deleted. Focusing an
+  // unrelated non-task session keeps it — it still marks your current task.
+  const taskStoreSnapshot = useSyncExternalStore(
+    subscribeTaskWorkspaces,
+    taskWorkspacesSnapshot,
+  );
+  useEffect(() => {
+    if (!focusTaskId) return;
+    const task = loadTaskWorkspaces().find(
+      (entry) => entry.id === focusTaskId && !entry.archived,
+    );
+    const activeTask = active?.id
+      ? taskForSession(active.id, sessionWorkCwd(active))
+      : undefined;
+    if (!task || (activeTask && activeTask.task.id !== focusTaskId))
+      setFocusTaskId(undefined);
+  }, [focusTaskId, active?.id, taskStoreSnapshot]);
   const [taskSheet, setTaskSheet] = useState<{
     projectId: string;
     editingTaskId?: string;
@@ -4439,50 +4467,80 @@ export default function App({
     if (task) setTaskSheet({ projectId: task.projectId, editingTaskId: taskId });
   }, []);
 
-  /**
-   * Per-child independent launch: create the reviewed worktree, open one
-   * ordinary single-cwd session, submit the shared brief. `ready` children
-   * are skipped so Retry never replays successful Git or agent operations.
-   */
-  const taskLaunching = useRef(new Set<string>());
+  /** True when a task-linked session can still be opened — open now, or
+   * loadable (archived sessions restore). A deleted id is pruned off the
+   * task so the next open relaunches instead of silently dead-ending. */
+  const taskSessionAlive = useCallback(
+    async (sessionId: string): Promise<boolean> => {
+      if (sessionsRef.current.some((entry) => entry.id === sessionId))
+        return true;
+      const loaded = await getSession(sessionId).catch(() => null);
+      if (loaded) return true;
+      pruneTaskSession(sessionId);
+      return false;
+    },
+    [],
+  );
+
+  /** Full-launch dedupe: concurrent callers share one in-flight launch so a
+   * second open can't create the task session while children still prepare. */
+  const taskLaunchInflight = useRef(
+    new Map<string, Promise<string | undefined>>(),
+  );
   /**
    * Prepares each unresolved child's working copy — creating the reviewed
    * worktree or re-verifying an existing one — then ensures the task's
-   * single session exists, rooted at the host child's copy. The prompt
+   * single session exists, rooted at a ready host child's copy. The prompt
    * names every repository's copy, branch and responsibility; the agent
    * works across them from one conversation.
    */
   const launchTaskChildren = useCallback(
-    async (
+    (
       taskId: string,
       childIds?: readonly string[],
     ): Promise<string | undefined> => {
+      if (!childIds) {
+        const inflight = taskLaunchInflight.current.get(taskId);
+        if (inflight) return inflight;
+      }
+      const run = (async (): Promise<string | undefined> => {
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       if (!task) return undefined;
       const project = projectForTask(task);
       for (const child of task.children) {
         if (childIds && !childIds.includes(child.id)) continue;
-        const launchKey = `${taskId}:${child.id}`;
-        if (taskLaunching.current.has(launchKey)) continue;
         const current = loadTaskWorkspaces()
           .find((entry) => entry.id === taskId)
           ?.children.find((entry) => entry.id === child.id);
         if (!current) continue;
         if (current.launch.state === "ready") continue;
-        taskLaunching.current.add(launchKey);
-        updateTaskChild(taskId, child.id, { launch: { state: "working" } });
+        if (!markTaskChildLaunching(taskId, child.id)) continue;
+        if (
+          !updateTaskChild(taskId, child.id, {
+            launch: { state: "working" },
+          })
+        ) {
+          unmarkTaskChildLaunching(taskId, child.id);
+          continue;
+        }
         try {
           const repo = project?.repositories.find(
             (entry) => entry.id === child.repositoryId,
           );
           // A legacy child may own a session already — retry just resubmits
-          // its brief; worktrees and sessions are never replayed.
-          if (current.sessionIds.length) {
+          // its brief; worktrees and sessions are never replayed. A deleted
+          // session is pruned off the child so the copy relaunches cleanly.
+          if (
+            current.sessionIds.length &&
+            (await taskSessionAlive(current.sessionIds[0]))
+          ) {
             const sent = await onSubmit(
               current.sessionIds[0],
               composeTaskPrompt(task, child, repo),
             );
-            if (sent === false)
+            // `onSubmit` returns undefined when the session can't take it
+            // (deleted mid-flight counts) — only `true` means delivered.
+            if (sent !== true)
               throw new Error("The session did not accept the brief.");
             updateTaskChild(taskId, child.id, {
               launch: { state: "ready" },
@@ -4554,29 +4612,49 @@ export default function App({
             launch: { state: "failed", error: String(error) },
           });
         } finally {
-          taskLaunching.current.delete(launchKey);
+          unmarkTaskChildLaunching(taskId, child.id);
         }
       }
       // One session per task — rooted at the host child's working copy.
       const fresh = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       if (!fresh) return undefined;
-      const taskSessionId =
+      const recorded =
         fresh.sessionIds?.[0] ??
         fresh.children.find((entry) => entry.sessionIds.length)
           ?.sessionIds[0];
+      // A deleted conversation is pruned and replaced, not reused.
+      const taskSessionId =
+        recorded && (await taskSessionAlive(recorded)) ? recorded : undefined;
       if (taskSessionId) {
+        // Redeliver the shared brief when it never landed on this session —
+        // e.g. the first submit failed, or this session replaced a deleted
+        // one. Retries (`childIds`) only resubmit their own child briefs.
+        if (!childIds && fresh.briefSentFor !== taskSessionId) {
+          const sent = await onSubmit(
+            taskSessionId,
+            composeTaskSessionPrompt(fresh, project),
+          );
+          if (sent === true)
+            updateTask(taskId, (current) => ({
+              ...current,
+              briefSentFor: taskSessionId,
+            }));
+        }
         if (!childIds) void onSelectHistorySession(taskSessionId);
         return taskSessionId;
       }
+      // The session only exists once a child is verifiably ready — never
+      // rooted at a failed or not-yet-created working copy.
       const host =
         fresh.children.find(
           (entry) =>
-            entry.id === fresh.lastActiveChildId && entry.workingCopy,
+            entry.id === fresh.lastActiveChildId &&
+            entry.launch.state === "ready" &&
+            entry.workingCopy,
         ) ??
         fresh.children.find(
           (entry) => entry.launch.state === "ready" && entry.workingCopy,
-        ) ??
-        fresh.children.find((entry) => entry.workingCopy);
+        );
       if (!host?.workingCopy) return undefined;
       const session = {
         ...newDefaultSession(host.workingCopy, sessionDefaults?.runtimeMode),
@@ -4595,16 +4673,34 @@ export default function App({
         lastActiveChildId: host.id,
       }));
       setActiveTabId(tab.id);
-      // The brief lands as the session's first message; if it can't be sent
-      // yet the session stays so opening the task retries by hand.
-      await onSubmit(session.id, composeTaskSessionPrompt(fresh, project));
+      // The brief lands as the session's first message; a failed send is
+      // recorded by leaving briefSentFor unset so a later open resends it.
+      const sent = await onSubmit(
+        session.id,
+        composeTaskSessionPrompt(fresh, project),
+      );
+      if (sent === true)
+        updateTask(taskId, (current) => ({
+          ...current,
+          briefSentFor: session.id,
+        }));
       return session.id;
+      })();
+      if (!childIds) {
+        taskLaunchInflight.current.set(taskId, run);
+        void run.finally(() => {
+          if (taskLaunchInflight.current.get(taskId) === run)
+            taskLaunchInflight.current.delete(taskId);
+        });
+      }
+      return run;
     },
     [
       appendTab,
       onSelectHistorySession,
       onSubmit,
       sessionDefaults?.runtimeMode,
+      taskSessionAlive,
     ],
   );
 
@@ -4631,18 +4727,22 @@ export default function App({
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       const child = task?.children.find((entry) => entry.id === childId);
       if (!task || !child) return;
-      recordTaskActiveChild(taskId, childId);
       // The task's single session wins; a legacy child may own its own.
       const sessionId = task.sessionIds?.[0] ?? child.sessionIds[0];
-      if (sessionId) {
+      // Only re-attribute the active child when it actually owns the
+      // session we're opening — the shared task session stays rooted at
+      // its host's copy regardless of which child was clicked.
+      if (!task.sessionIds?.length && child.sessionIds.length)
+        recordTaskActiveChild(taskId, childId);
+      if (sessionId && (await taskSessionAlive(sessionId))) {
         await onSelectHistorySession(sessionId);
         return;
       }
-      // No session yet — prepare this child's copy; that also creates the
-      // task session when it becomes the host.
+      // No usable session — prepare this child's copy; that also creates
+      // the task session when it becomes the host.
       void launchTaskChildren(taskId, [childId]);
     },
-    [launchTaskChildren, onSelectHistorySession],
+    [launchTaskChildren, onSelectHistorySession, taskSessionAlive],
   );
 
   /** Opens a task's last active child, or its first session-owning child. */
@@ -4650,17 +4750,22 @@ export default function App({
     (taskId: string) => {
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       if (!task) return;
-      // No sessions yet — opening the task is what starts the work.
-      if (
-        !task.sessionIds?.length &&
-        !task.children.some((entry) => entry.sessionIds.length)
-      ) {
-        void launchTaskChildren(taskId);
+      // The task's own session wins over per-child lookups — but a dead id
+      // (deleted conversation) must not dead-end the task: prune it and
+      // fall through to relaunch.
+      if (task.sessionIds?.length) {
+        void (async () => {
+          if (await taskSessionAlive(task.sessionIds![0])) {
+            void onSelectHistorySession(task.sessionIds![0]);
+            return;
+          }
+          void launchTaskChildren(taskId);
+        })();
         return;
       }
-      // The task's own session wins over per-child lookups.
-      if (task.sessionIds?.length) {
-        void onSelectHistorySession(task.sessionIds[0]);
+      // No sessions yet — opening the task is what starts the work.
+      if (!task.children.some((entry) => entry.sessionIds.length)) {
+        void launchTaskChildren(taskId);
         return;
       }
       const child =
@@ -4673,8 +4778,30 @@ export default function App({
         task.children[0];
       if (child) void onOpenTaskChild(taskId, child.id);
     },
-    [launchTaskChildren, onOpenTaskChild, onSelectHistorySession],
+    [launchTaskChildren, onOpenTaskChild, onSelectHistorySession, taskSessionAlive],
   );
+
+  /** Resolves the owning project for a send-to-task path without inventing
+   * rows: unverified worktree/subdirectory paths are probed so the real
+   * project is found by `commonDir`, and a path that isn't a Git repository
+   * yields no project rather than a junk anchor. */
+  const ensureTaskProject = useCallback(async (path: string | undefined) => {
+    if (!path || !looksLikeProject(path)) return undefined;
+    const keyed = pathKey(path);
+    let family = getVerifiedFamilies().get(keyed);
+    if (!family)
+      family = (await probeRepositoryFamily(path)) ?? undefined;
+    const existing = family
+      ? findProjectByCommonDir(family.commonDir)?.project
+      : loadProjects().find(
+          (entry) => entry.anchor && pathKey(entry.anchor) === keyed,
+        );
+    if (existing) return existing;
+    if (!family) return undefined;
+    // Anchor at the real checkout, not a worktree or subdirectory the send
+    // happened to originate from.
+    return ensureProjectForPath(family.checkout || path, family);
+  }, []);
 
   /** Prepared change/file context routed to a task: stage it on the task's
    * session — starting the task first when it has none — or open the create
@@ -4685,12 +4812,7 @@ export default function App({
       if (request.newTask || !request.taskId) {
         const path =
           request.cwd || active?.cwd || sessionDefaults?.cwd || projectCwd;
-        const project = path
-          ? ensureProjectForPath(
-              path,
-              getVerifiedFamilies().get(pathKey(path)),
-            )
-          : undefined;
+        const project = await ensureTaskProject(path);
         if (!project) {
           // Nothing to hang the task on — fall back to the context picker.
           setContextRequest((current) => current ?? request);
@@ -4741,12 +4863,17 @@ export default function App({
       const task = loadTaskWorkspaces().find(
         (entry) => entry.id === request.taskId && !entry.archived,
       );
-      if (!task) return;
+      if (!task) {
+        // Target vanished — release the selection rather than stranding it.
+        done();
+        return;
+      }
       // Record the worktree holding the changes on the task when its
       // repository isn't a child yet — the task then lists where the
       // selected change actually lives.
+      const taskProject = projectForTask(task);
       const changedRepo = request.cwd
-        ? projectForTask(task)?.repositories.find((repo) => {
+        ? taskProject?.repositories.find((repo) => {
             const cwdKey = pathKey(request.cwd!);
             if (pathKey(repo.anchor) === cwdKey) return true;
             const family = familyForRepository(repo, getVerifiedFamilies());
@@ -4773,18 +4900,39 @@ export default function App({
               workingCopy: request.cwd,
             },
           ]);
-        } catch {
+        } catch (error) {
           // A conflicting copy claim — the staged context still carries
-          // the change, so the send continues without a new child.
+          // the change, but say so instead of silently skipping the repo.
+          request = {
+            ...request,
+            context: {
+              ...request.context,
+              entries: [
+                ...request.context.entries,
+                {
+                  id: crypto.randomUUID(),
+                  title: "Repository not added to the task",
+                  origin: "Send to task",
+                  text: `The working copy holding these changes was not added to "${task.name}": ${String(error)}`,
+                },
+              ],
+            },
+          };
         }
       }
       let sessionId =
         task.sessionIds?.[0] ??
         task.children.find((entry) => entry.sessionIds.length)
           ?.sessionIds[0];
+      // A deleted conversation id must not shadow a relaunch.
+      if (sessionId && !(await taskSessionAlive(sessionId)))
+        sessionId = undefined;
       // No session yet — the send starts the task, then stages the context.
       if (!sessionId) sessionId = await launchTaskChildren(task.id);
-      if (!sessionId) return;
+      if (!sessionId) {
+        done();
+        return;
+      }
       const target = sessionsRef.current.find(
         (session) => session.id === sessionId,
       );
@@ -4801,10 +4949,12 @@ export default function App({
     },
     [
       active?.cwd,
+      ensureTaskProject,
       launchTaskChildren,
       onSelectHistorySession,
       projectCwd,
       sessionDefaults?.cwd,
+      taskSessionAlive,
     ],
   );
   const routeContextToTaskRef = useRef(routeContextToTask);
@@ -4814,7 +4964,7 @@ export default function App({
    * existing task and open it, or open the create sheet with the item
    * pre-linked. `null` taskId means a new task. */
   const onStartItemToTask = useCallback(
-    (item: InboxItem, taskId: string | null) => {
+    async (item: InboxItem, taskId: string | null) => {
       const linked = linkedWorkItemFromInboxItem(item);
       if (taskId) {
         if (linked) {
@@ -4844,12 +4994,7 @@ export default function App({
       }
       const path =
         item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
-      const project = path
-        ? ensureProjectForPath(
-            path,
-            getVerifiedFamilies().get(pathKey(path)),
-          )
-        : undefined;
+      const project = await ensureTaskProject(path);
       if (!project)
         throw new Error("Choose a local project before sending to an agent");
       setInboxViewOpen(false);
@@ -4861,6 +5006,7 @@ export default function App({
     },
     [
       active?.cwd,
+      ensureTaskProject,
       onOpenTask,
       projectCwd,
       sessionDefaults?.cwd,
@@ -4870,7 +5016,7 @@ export default function App({
   /** Inbox multi-select — every picked item links onto the new task; the
    * sheet opens with them all in its Issues row. */
   const onSendItemsToTask = useCallback(
-    (items: InboxItem[]) => {
+    async (items: InboxItem[]) => {
       const linked = items
         .map(linkedWorkItemFromInboxItem)
         .filter((entry): entry is LinkedWorkItem => !!entry);
@@ -4879,12 +5025,7 @@ export default function App({
         active?.cwd ||
         sessionDefaults?.cwd ||
         projectCwd;
-      const project = path
-        ? ensureProjectForPath(
-            path,
-            getVerifiedFamilies().get(pathKey(path)),
-          )
-        : undefined;
+      const project = await ensureTaskProject(path);
       if (!project)
         throw new Error("Choose a local project before sending to an agent");
       setInboxViewOpen(false);
@@ -4894,7 +5035,7 @@ export default function App({
         ...(linked.length ? { initialTickets: linked } : {}),
       });
     },
-    [active?.cwd, projectCwd, sessionDefaults?.cwd],
+    [active?.cwd, ensureTaskProject, projectCwd, sessionDefaults?.cwd],
   );
 
   const onUpdatePlan = useCallback(
@@ -6291,6 +6432,23 @@ export default function App({
               saveProjectRailOpen(true);
               return true;
             });
+          }}
+          onEdited={(task) => {
+            // A rename/ticket change should reach the conversation that
+            // shows the task — otherwise history and pickers keep the
+            // stale title and issue.
+            const ids = new Set([
+              ...(task.sessionIds ?? []),
+              ...task.children.flatMap((child) => child.sessionIds),
+            ]);
+            if (!ids.size) return;
+            const next = sessionsRef.current.map((session) =>
+              ids.has(session.id)
+                ? { ...session, title: task.name, linkedWorkItem: task.ticket }
+                : session,
+            );
+            sessionsRef.current = next;
+            setSessions(next);
           }}
           onClose={() => setTaskSheet(null)}
         />

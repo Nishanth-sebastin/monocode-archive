@@ -23,15 +23,14 @@ import {
   type ProjectRepository,
 } from "../lib/projects";
 import {
-  addTaskChildren,
   createTask,
   loadTaskWorkspaces,
+  reviseTask,
   suggestTaskBranch,
   taskChildrenForWorkingCopy,
   taskHostConflict,
   taskWorkspacesSnapshot,
   subscribeTaskWorkspaces,
-  updateTask,
   type TaskChild,
   type TaskChildDraft,
   type TaskWorkspace,
@@ -90,6 +89,8 @@ type Props = {
   initialChildren?: TaskChildDraft[];
   onClose: () => void;
   onCreated?: (taskId: string) => void;
+  /** Fires after an edit persists — lets callers sync open task sessions. */
+  onEdited?: (task: TaskWorkspace) => void;
 };
 
 const inputClass =
@@ -118,6 +119,7 @@ export function TaskCreateSheet({
   initialChildren,
   onClose,
   onCreated,
+  onEdited,
 }: Props) {
   const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
   const projects = useMemo(() => loadProjects(), [projectsRaw]);
@@ -505,30 +507,17 @@ export function TaskCreateSheet({
       : undefined;
     try {
       if (editingTask) {
-        const clean = brief.trim();
-        updateTask(editingTask.id, (current) => {
-          const kept = current.children.filter((child) =>
-            selected.includes(child.repositoryId),
-          );
-          return {
-            ...current,
-            name: name.trim(),
-            ...(linked ? { ticket: linked } : { ticket: undefined }),
-            ...(clean ? { brief: clean } : { brief: undefined }),
-            children: kept.map((child) => {
-              const resp = childResp.get(child.id)?.trim();
-              return resp
-                ? { ...child, responsibility: resp }
-                : { ...child, responsibility: undefined };
-            }),
-            ...(kept.some(
-              (child) => child.id === current.lastActiveChildId,
-            )
-              ? {}
-              : { lastActiveChildId: undefined }),
-          };
+        // One atomic write: a failed add doesn't leave the rename or the
+        // child removals half-saved.
+        const next = reviseTask(editingTask.id, {
+          name,
+          ticket: linked,
+          brief: brief.trim() || undefined,
+          keepRepositoryIds: selected,
+          responsibilities: childResp,
+          additions: buildDrafts(),
         });
-        addTaskChildren(editingTask.id, buildDrafts());
+        onEdited?.(next);
         onClose();
         return;
       }

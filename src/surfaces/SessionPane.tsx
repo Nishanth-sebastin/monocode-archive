@@ -1,11 +1,17 @@
 import { SessionIssues } from "../chrome/SessionIssues";
 import { TaskScopeChip } from "../chrome/TaskScopeChip";
+import {
+  subscribeTaskWorkspaces,
+  taskForSession,
+  taskWorkspacesSnapshot,
+} from "../lib/taskWorkspaces";
 import { requestAgentContext, contextFromText } from "../lib/agentContext";
 import { ChevronDown, GripVertical, X } from "../chrome/icons";
 import {
   memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -294,6 +300,20 @@ export const SessionPane = memo(function SessionPane({
     return () => window.removeEventListener(ADD_TO_CHAT_EVENT, onAdd);
   }, [addSelectionToChat, addToChatTarget]);
   const workCwd = sessionWorkCwd(session);
+  // A task session's branch and working copy belong to the task child —
+  // the generic pickers could move it out from under the task record, so
+  // scope navigation happens through TaskScopeChip instead.
+  const tasksRaw = useSyncExternalStore(
+    subscribeTaskWorkspaces,
+    taskWorkspacesSnapshot,
+  );
+  const taskScope = useMemo(
+    () => taskForSession(session.id, workCwd),
+    // The store re-reads on every write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session.id, workCwd, tasksRaw],
+  );
+  const taskScoped = Boolean(taskScope);
   const isEmpty = session.blocks.length === 0;
   const showDeckProjectPicker = isEmpty && !looksLikeProject(session.cwd);
   const dockComposer = !isEmpty || inSplit || !!session.inboxAsk;
@@ -315,9 +335,10 @@ export const SessionPane = memo(function SessionPane({
       recents={recents}
       hideProjectPicker={
         !!session.inboxAsk ||
+        taskScoped ||
         (hideProjectPicker ? !showDeckProjectPicker : false)
       }
-      hideBranchPicker={!!session.inboxAsk}
+      hideBranchPicker={!!session.inboxAsk || taskScoped}
       hideTopBar={!!session.inboxAsk}
       context={session.context}
       quoteRequest={quoteRequest}
@@ -447,6 +468,7 @@ export const SessionPane = memo(function SessionPane({
       ) : null}
       <TaskScopeChip
         sessionId={session.id}
+        cwd={workCwd}
         needsInputIds={needsInputSessionIds}
         onOpenChild={onOpenTaskChild}
         onRetryChild={onRetryTaskChild}

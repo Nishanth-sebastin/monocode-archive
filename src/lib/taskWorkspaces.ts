@@ -56,6 +56,9 @@ export type TaskWorkspace = {
    * working copy and can work every child. Legacy tasks may instead carry
    * per-child `sessionIds`. */
   sessionIds?: string[];
+  /** Session the shared brief was delivered to — guards resend after a
+   * failed submit or a replacement session. */
+  briefSentFor?: string;
   lastActiveChildId?: string;
   createdAt: number;
   archived?: boolean;
@@ -78,6 +81,36 @@ export type TaskChildDraft = {
   sharedCopyAccepted?: boolean;
 };
 
+/**
+ * Children currently being launched in this window. A stored `working`
+ * launch state is only honored while one of these markers is live — anything
+ * left over from a closed window (crash, reload) normalizes back to
+ * actionable `pending` on the next read.
+ */
+const launchingChildren = new Set<string>();
+
+/** Marks a child launch as in flight. Returns false when already running. */
+export function markTaskChildLaunching(
+  taskId: string,
+  childId: string,
+): boolean {
+  const key = `${taskId}:${childId}`;
+  if (launchingChildren.has(key)) return false;
+  launchingChildren.add(key);
+  // A marker changes how `working` sanitizes — drop the cached read.
+  invalidateTaskCache();
+  return true;
+}
+
+export function unmarkTaskChildLaunching(taskId: string, childId: string) {
+  launchingChildren.delete(`${taskId}:${childId}`);
+  invalidateTaskCache();
+}
+
+export function isTaskChildLaunching(taskId: string, childId: string) {
+  return launchingChildren.has(`${taskId}:${childId}`);
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
@@ -95,7 +128,7 @@ function cleanStrings(value: unknown, max: number): string[] {
   return out;
 }
 
-function sanitizeChild(value: unknown): TaskChild | null {
+function sanitizeChild(value: unknown, taskId: string): TaskChild | null {
   if (!isRecord(value)) return null;
   const id = cleanString(value.id);
   const repositoryId = cleanString(value.repositoryId);
@@ -121,9 +154,14 @@ function sanitizeChild(value: unknown): TaskChild | null {
       : {}),
     sessionIds: cleanStrings(value.sessionIds, 20),
     launch: {
-      // A `working` launch was interrupted by the reload — it becomes
-      // actionable `pending` again; only `ready`/`failed` persist.
-      state: state === "ready" || state === "failed" ? state : "pending",
+      // `working` survives only while a launch marker is live in this
+      // window; an interrupted launch becomes actionable `pending` again.
+      state:
+        state === "ready" || state === "failed"
+          ? state
+          : state === "working" && isTaskChildLaunching(taskId, id)
+            ? "working"
+            : "pending",
       ...(cleanString(launch.error)
         ? { error: cleanString(launch.error) }
         : {}),
@@ -139,7 +177,7 @@ function sanitizeTask(value: unknown): TaskWorkspace | null {
   if (!id || !projectId || !name) return null;
   const children = Array.isArray(value.children)
     ? value.children
-        .map(sanitizeChild)
+        .map((child) => sanitizeChild(child, id))
         .filter((child): child is TaskChild => child !== null)
         .slice(0, MAX_CHILDREN)
     : [];
@@ -155,6 +193,9 @@ function sanitizeTask(value: unknown): TaskWorkspace | null {
     ...(cleanString(value.brief) ? { brief: cleanString(value.brief) } : {}),
     children,
     sessionIds: cleanStrings(value.sessionIds, 20),
+    ...(cleanString(value.briefSentFor)
+      ? { briefSentFor: cleanString(value.briefSentFor) }
+      : {}),
     ...(children.some((child) => child.id === lastActiveChildId)
       ? { lastActiveChildId }
       : {}),
@@ -166,16 +207,30 @@ function sanitizeTask(value: unknown): TaskWorkspace | null {
   };
 }
 
+/** The parsed store is cached on the raw snapshot — `taskForSession` and
+ * friends run per row per render, and none should re-parse the same JSON.
+ * Marker changes (launch start/finish) invalidate explicitly since they
+ * alter sanitize output without touching storage. */
+let tasksCacheRaw: string | null | undefined;
+let tasksCache: TaskWorkspace[] = [];
+
+function invalidateTaskCache() {
+  tasksCacheRaw = undefined;
+}
+
 export function loadTaskWorkspaces(): TaskWorkspace[] {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map(sanitizeTask)
-      .filter((task): task is TaskWorkspace => task !== null)
-      .slice(0, MAX_TASKS);
+    if (raw === tasksCacheRaw) return tasksCache;
+    const parsed = raw ? JSON.parse(raw) : null;
+    tasksCache = Array.isArray(parsed)
+      ? parsed
+          .map(sanitizeTask)
+          .filter((task): task is TaskWorkspace => task !== null)
+          .slice(0, MAX_TASKS)
+      : [];
+    tasksCacheRaw = raw;
+    return tasksCache;
   } catch {
     return [];
   }
@@ -322,6 +377,10 @@ export function createTask(input: {
     children.map((child) => child.workingCopy),
   );
   if (conflict) throw new Error(conflict);
+  // The store trims to MAX_TASKS from the tail — without this the new task
+  // would be silently dropped instead of saved.
+  if (loadTaskWorkspaces().length >= MAX_TASKS)
+    throw new Error(`You can have up to ${MAX_TASKS} tasks`);
   const task: TaskWorkspace = {
     id: crypto.randomUUID(),
     projectId: input.projectId,
@@ -371,6 +430,70 @@ export function updateTask(
   const next = update(tasks[index]);
   tasks[index] = next;
   saveTaskWorkspaces(tasks);
+  return next;
+}
+
+/** Atomic edit: metadata, kept-child responsibilities and additions are
+ * validated together and persist in one write — a failed add never leaves
+ * removals or a rename half-saved. */
+export function reviseTask(
+  taskId: string,
+  revision: {
+    name: string;
+    ticket?: LinkedWorkItem;
+    brief?: string;
+    /** Repository ids whose existing children stay in the task. */
+    keepRepositoryIds: readonly string[];
+    /** Edited responsibilities for kept children, keyed by child id. */
+    responsibilities: ReadonlyMap<string, string>;
+    /** Drafts for repositories being added. */
+    additions: readonly TaskChildDraft[];
+  },
+): TaskWorkspace {
+  const existing = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+  if (!existing) throw new Error("Task no longer exists");
+  const project = projectForTask(existing);
+  if (!project) throw new Error("Project no longer exists");
+  const name = revision.name.trim();
+  if (!name) throw new Error("Enter a task name");
+  const next = updateTask(taskId, (current) => {
+    const kept = current.children.filter((child) =>
+      revision.keepRepositoryIds.includes(child.repositoryId),
+    );
+    const drafts = revision.additions.filter(
+      (child) => child && child.repositoryId,
+    );
+    const owned = new Set(kept.map((child) => child.repositoryId));
+    for (const draft of drafts)
+      if (owned.has(draft.repositoryId))
+        throw new Error("A selected repository is already in this task");
+    if (!kept.length && !drafts.length)
+      throw new Error("Select at least one repository");
+    if (kept.length + drafts.length > MAX_CHILDREN)
+      throw new Error(`A task supports up to ${MAX_CHILDREN} repositories`);
+    const added = buildTaskChildren(project, drafts);
+    const conflict = taskHostConflict(
+      [...kept, ...added].map((child) => child.workingCopy),
+    );
+    if (conflict) throw new Error(conflict);
+    return {
+      ...current,
+      name,
+      ticket: revision.ticket,
+      brief: cleanString(revision.brief),
+      children: [
+        ...kept.map((child) => {
+          const resp = cleanString(revision.responsibilities.get(child.id));
+          return { ...child, responsibility: resp };
+        }),
+        ...added,
+      ],
+      ...(kept.some((child) => child.id === current.lastActiveChildId)
+        ? {}
+        : { lastActiveChildId: undefined }),
+    };
+  });
+  if (!next) throw new Error("Task no longer exists");
   return next;
 }
 
@@ -447,9 +570,38 @@ export function removeTaskChild(taskId: string, childId: string) {
   }));
 }
 
-/** Reverse lookup — which task child owns an ordinary session. */
+/** Detaches a deleted session from every task — task-level and per-child
+ * references both. Without this a dead id blocks reopening forever. */
+export function pruneTaskSession(sessionId: string) {
+  const tasks = loadTaskWorkspaces();
+  let changed = false;
+  const next = tasks.map((task) => {
+    const sessionIds = (task.sessionIds ?? []).filter(
+      (id) => id !== sessionId,
+    );
+    let childChanged = false;
+    const children = task.children.map((child) => {
+      if (!child.sessionIds.includes(sessionId)) return child;
+      childChanged = true;
+      return {
+        ...child,
+        sessionIds: child.sessionIds.filter((id) => id !== sessionId),
+      };
+    });
+    if (sessionIds.length === (task.sessionIds ?? []).length && !childChanged)
+      return task;
+    changed = true;
+    return { ...task, sessionIds, children };
+  });
+  if (changed) saveTaskWorkspaces(next);
+}
+
+/** Reverse lookup — which task child owns an ordinary session. `cwd` is
+ * the session's actual working copy: a task-level session reports the
+ * child it is rooted in rather than whatever `lastActiveChildId` says. */
 export function taskForSession(
   sessionId: string,
+  cwd?: string,
   tasks: readonly TaskWorkspace[] = loadTaskWorkspaces(),
 ): { task: TaskWorkspace; child: TaskChild } | null {
   for (const task of tasks) {
@@ -461,10 +613,15 @@ export function taskForSession(
     // A task-level session displays its host child — the repository the
     // conversation is rooted at.
     if (task.sessionIds?.includes(sessionId)) {
+      const keyed = cwd ? pathKey(cwd) : undefined;
       const host =
-        task.children.find(
-          (entry) => entry.id === task.lastActiveChildId,
-        ) ??
+        (keyed
+          ? task.children.find(
+              (entry) =>
+                entry.workingCopy && pathKey(entry.workingCopy) === keyed,
+            )
+          : undefined) ??
+        task.children.find((entry) => entry.id === task.lastActiveChildId) ??
         task.children.find((entry) => entry.workingCopy) ??
         task.children[0];
       return { task, child: host };
@@ -500,8 +657,9 @@ export function projectForTask(task: TaskWorkspace): ProjectRecord | undefined {
 export function repositoryForChild(
   task: TaskWorkspace,
   child: TaskChild,
+  project: ProjectRecord | undefined = projectForTask(task),
 ): ProjectRepository | undefined {
-  return repositoryOf(projectForTask(task), child.repositoryId);
+  return repositoryOf(project, child.repositoryId);
 }
 
 /** `repo/branch` display label for a child — repo name falls back to the
@@ -509,8 +667,9 @@ export function repositoryForChild(
 export function taskChildRepoLabel(
   task: TaskWorkspace,
   child: TaskChild,
+  project?: ProjectRecord,
 ): string {
-  const repo = repositoryForChild(task, child);
+  const repo = repositoryForChild(task, child, project);
   const repoName = repo
     ? repositoryDisplay(repo)
     : child.workingCopy
