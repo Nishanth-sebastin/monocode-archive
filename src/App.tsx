@@ -229,7 +229,10 @@ import {
 } from "./lib/taskWorkspaces";
 import {
   ensureProjectForPath,
+  isProjectRailKey,
   loadProjects,
+  projectContainsPath,
+  projectRailKey,
   repositoryDisplayName,
 } from "./lib/projects";
 import { getVerifiedFamilies } from "./lib/repositoryFamilies";
@@ -3486,6 +3489,18 @@ export default function App({
   );
 
   const onSelectProject = useCallback((path: string) => {
+    // Group rows key on `project:<id>` — open their last member copy instead
+    // of treating the key as a folder.
+    if (isProjectRailKey(path)) {
+      const project = loadProjects().find(
+        (entry) => projectRailKey(entry.id) === path,
+      );
+      const target = project?.lastPath;
+      if (target && project && projectContainsPath(project, target)) {
+        onSelectProject(target);
+      }
+      return;
+    }
     wslOpenRequest.current?.abort();
     if (!wslLocation(path)) {
       setWslOpening(null);

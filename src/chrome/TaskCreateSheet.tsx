@@ -389,7 +389,10 @@ export function TaskCreateSheet({
       onClose={onClose}
       title={task ? task.name : "New task"}
       description={
-        project ? (project.name ?? basename(project.anchor)) : "Project"
+        project
+          ? (project.name ??
+            (project.anchor ? basename(project.anchor) : "Project"))
+          : "Project"
       }
       size="lg"
     >

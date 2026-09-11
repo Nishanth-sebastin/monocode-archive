@@ -41,6 +41,9 @@ import {
   subscribeProjects,
   deleteProject,
   familyForRepository,
+  projectRailKey,
+  isProjectRailKey,
+  createProjectGroup,
   renameProject,
   type ProjectRecord,
 } from "../lib/projects";
@@ -135,6 +138,7 @@ const REVEAL_LABEL = IS_MAC
 function projectMenuExtraItems(
   pinned: boolean,
   canRemove: boolean,
+  hasFolder: boolean,
 ): TabGroupMenuExtraItem[] {
   const items: TabGroupMenuExtraItem[] = [
     {
@@ -155,7 +159,9 @@ function projectMenuExtraItems(
     pinned
       ? { id: "unpin", label: "Unpin project", icon: PinOff }
       : { id: "pin", label: "Pin project", icon: Pin },
-    { id: "reveal", label: REVEAL_LABEL, icon: FolderOpen },
+    ...(hasFolder
+      ? [{ id: "reveal", label: REVEAL_LABEL, icon: FolderOpen }]
+      : []),
   ];
   if (canRemove) {
     items.push(
@@ -315,9 +321,12 @@ export function ProjectRail({
     // Stored projects keep a rail row from their anchor even when no member
     // path is a recent; the anchor keys order, pins and appearance.
     for (const project of storedProjects) {
-      const key = pathKey(project.anchor);
+      const key = pathKey(project.anchor ?? projectRailKey(project.id));
       if (!map.has(key))
-        map.set(key, { path: project.anchor, openedAt: 0 });
+        map.set(key, {
+          path: project.anchor ?? projectRailKey(project.id),
+          openedAt: 0,
+        });
     }
     return map;
   }, [cwd, recents, storedProjects]);
@@ -401,6 +410,29 @@ export function ProjectRail({
 
   const openTaskMenu = (task: TaskWorkspace, x: number, y: number) => {
     setTaskMenu({ task, x, y });
+  };
+
+  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const [groupName, setGroupName] = useState("");
+  const [namingGroup, setNamingGroup] = useState(false);
+
+  const closeAddMenu = () => {
+    setAddMenu(null);
+    setNamingGroup(false);
+    setGroupName("");
+  };
+
+  /** A pathless project — a pure group; opens its repositories sheet so the
+   * user can add members right away. */
+  const submitGroup = () => {
+    const project = createProjectGroup(groupName || undefined);
+    closeAddMenu();
+    setRepositoriesProject({
+      path: projectRailKey(project.id),
+      projectId: project.id,
+    });
   };
 
   const onProjectRename = (groupId: string, label: string) => {
@@ -507,7 +539,8 @@ export function ProjectRail({
     const members = memberRecentPaths(project);
     for (const member of members)
       onRemoveProject?.(member, { purgeData });
-    if (!members.includes(path)) onRemoveProject?.(path, { purgeData });
+    if (!members.includes(path) && !isProjectRailKey(path))
+      onRemoveProject?.(path, { purgeData });
   };
 
   const onProjectMenuPick = (action: string) => {
@@ -525,7 +558,9 @@ export function ProjectRail({
         project: projectKey,
         name: displayName,
       });
-    } else if (action === "reveal") void revealPath(path);
+    } else if (action === "reveal") {
+      if (!isProjectRailKey(path)) void revealPath(path);
+    }
     else if (action === "archive") {
       removeProjectEntry(path, projectId, false);
     } else if (action === "delete") {
@@ -646,7 +681,9 @@ export function ProjectRail({
               items={sections.projects}
               families={families}
               emptyLabel="No projects yet"
-              onAdd={onOpenProject}
+              onAdd={(event) =>
+                setAddMenu({ x: event.clientX, y: event.clientY })
+              }
               cwd={cwd}
               busy={busy}
               sortable={projectSortable}
@@ -740,6 +777,7 @@ export function ProjectRail({
               sameProjectPath(pinned, projectMenu.path),
             ),
             Boolean(onRemoveProject),
+            !isProjectRailKey(projectMenu.path),
           )}
           onExtraPick={onProjectMenuPick}
         />
@@ -770,6 +808,62 @@ export function ProjectRail({
           }}
           onClose={() => setRepositoriesProject(null)}
         />
+      ) : null}
+      {addMenu ? (
+        <Popover
+          anchor={{ x: addMenu.x, y: addMenu.y }}
+          onDismiss={closeAddMenu}
+          role={namingGroup ? "dialog" : "menu"}
+          aria-label={namingGroup ? "New project" : "Add project"}
+          className="overflow-hidden"
+        >
+          {namingGroup ? (
+            <form
+              className="flex w-56 flex-col gap-1.5 px-1.5 py-1.5"
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitGroup();
+              }}
+            >
+              <input
+                autoFocus
+                value={groupName}
+                onChange={(event) => setGroupName(event.target.value)}
+                placeholder="Project name"
+                aria-label="Project name"
+                className="w-full rounded-lg border border-content/10 bg-content/5 px-2.5 py-1.5 text-[13px] text-content outline-none ring-accent/40 focus:ring-1"
+              />
+              <button
+                type="submit"
+                className="w-full rounded-lg bg-content/10 px-2.5 py-1.5 text-left text-[12px] text-content hover:bg-content/15"
+              >
+                Create project
+              </button>
+            </form>
+          ) : (
+            <div className="px-1.5 py-1.5">
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+                onClick={() => {
+                  closeAddMenu();
+                  onOpenProject();
+                }}
+              >
+                Open folder…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+                onClick={() => setNamingGroup(true)}
+              >
+                New project group…
+              </button>
+            </div>
+          )}
+        </Popover>
       ) : null}
       {taskMenu ? (
         <Popover
@@ -1063,7 +1157,7 @@ function ProjectSection({
   items: RailProjectItem[];
   families: ReadonlyMap<string, RepositoryFamily>;
   emptyLabel?: string;
-  onAdd?: () => void;
+  onAdd?: (event: MouseEvent<HTMLButtonElement>) => void;
   cwd: string;
   busy: Set<string>;
   sortable: SortableHandle;
@@ -1516,6 +1610,8 @@ function ProjectFamilyCard(
   } = props;
   const project = props.item.project;
   const multiRepo = (project?.repositories.length ?? 0) > 1;
+  /** Anchorless group — no own folder; the row exists to hold members. */
+  const isGroup = !!project && !project.anchor;
   const anchor = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ create: boolean; path?: string } | null>(
     null,
@@ -1537,12 +1633,12 @@ function ProjectFamilyCard(
       sameProjectPath(child.path, cwd) ||
       !hidden.some((path) => sameProjectPath(path, child.path)),
   );
-  const visible = multiRepo
-    ? (expanded ?? false)
-    : (expanded ?? children.length > 1);
-  const selected = multiRepo
-    ? !!project && projectContainsPath(project, cwd, families)
-    : children.some((child) => sameProjectPath(child.path, cwd));
+  const visible =
+    expanded ?? (isGroup || (!multiRepo && children.length > 1));
+  const selected =
+    multiRepo || isGroup
+      ? !!project && projectContainsPath(project, cwd, families)
+      : children.some((child) => sameProjectPath(child.path, cwd));
   const busy =
     props.busy ||
     (!!project &&
@@ -1579,6 +1675,11 @@ function ProjectFamilyCard(
       onSelect(project.lastPath);
       return;
     }
+    // A group has no folder of its own — clicking it just expands.
+    if (isGroup) {
+      setExpanded(!visible);
+      return;
+    }
     onSelect(
       lastWorkingCopyPath(family?.commonDir ?? "", family) ?? props.item.path,
     );
@@ -1591,11 +1692,11 @@ function ProjectFamilyCard(
         busy={busy}
         onSelect={openLast}
         worktreeControls={
-          family || multiRepo
+          family || multiRepo || isGroup
             ? {
                 expanded: visible,
                 toggle: () => setExpanded(!visible),
-                ...(multiRepo
+                ...(multiRepo || isGroup
                   ? {}
                   : {
                       create: (event) => {
@@ -1628,7 +1729,7 @@ function ProjectFamilyCard(
           ))}
         </div>
       ) : null}
-      {visible && multiRepo && project && (
+      {visible && (multiRepo || isGroup) && project && (
         <div className="my-0.5 ml-5">
           {project.repositories.map((repo) => (
             <ProjectRepositoryRow
@@ -1644,7 +1745,7 @@ function ProjectFamilyCard(
           ))}
         </div>
       )}
-      {visible && !multiRepo && family && (
+      {visible && !multiRepo && !isGroup && family && (
         <div className="my-0.5 ml-5">
           <WorkingCopyRows
             family={family}
@@ -1660,7 +1761,7 @@ function ProjectFamilyCard(
           />
         </div>
       )}
-      {visible && !multiRepo && allChildren.length > children.length && (
+      {visible && !multiRepo && !isGroup && allChildren.length > children.length && (
         <button
           type="button"
           className="w-full rounded px-2 py-1 text-left text-[10px] text-content/50 hover:bg-content/5"
@@ -1743,7 +1844,8 @@ function ProjectCard({
   groupLogos: ReturnType<typeof useTabGroupLogos>;
   groupMascots: Record<string, string>;
 }) {
-  const fallbackName = basename(item.path);
+  const groupRow = isProjectRailKey(item.path);
+  const fallbackName = groupRow ? "Project" : basename(item.path);
   const key = projectKey(item.path);
   const seed = projectName(item.path);
   const name =
@@ -1762,13 +1864,19 @@ function ProjectCard({
     sortable.toIndex === index &&
     sortable.fromIndex !== null &&
     sortable.toIndex > sortable.fromIndex;
-  const diffEnabled = Boolean(item.path) && item.path !== "~";
+  const diffEnabled =
+    Boolean(item.path) && item.path !== "~" && !groupRow;
   const stats = useProjectDiffStats(item.path, diffEnabled);
   const files = stats?.files ?? 0;
   const additions = stats?.additions ?? 0;
   const deletions = stats?.deletions ?? 0;
   const hasChanges = files > 0 || additions > 0 || deletions > 0;
-  const cardTitle = projectCardTitle(item.path, name, stats, busy);
+  const cardTitle = projectCardTitle(
+    groupRow ? "" : item.path,
+    name,
+    stats,
+    busy,
+  );
   const cardAriaLabel = projectCardAriaLabel(name, stats, busy);
 
   return (
@@ -1950,7 +2058,7 @@ function projectCardTitle(
   stats: GitDiffStats | null,
   busy: boolean,
 ): string {
-  const parts = [name, path];
+  const parts = [name, path].filter(Boolean);
   if (busy) parts.push("Working");
   const files = stats?.files ?? 0;
   const additions = stats?.additions ?? 0;
