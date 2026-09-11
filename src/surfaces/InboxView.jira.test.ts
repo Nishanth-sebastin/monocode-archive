@@ -40,6 +40,7 @@ it("retains the selected Jira ticket and explicit project through handoff and re
         site: "https://team.atlassian.net",
         account: "Ada",
       };
+    if (cmd === "git_github_status") return { installed: true, connected: true };
     if (cmd.endsWith("_status")) return { connected: false };
     if (cmd === "jira_list_issues") {
       if (failRefresh) throw new Error("Jira permission error");
@@ -99,7 +100,7 @@ it("retains the selected Jira ticket and explicit project through handoff and re
         }),
       );
     });
-    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(5);
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
     await click(
       container.querySelector(
         '[aria-label="In review issue ENG-41: Ticket 41"]',

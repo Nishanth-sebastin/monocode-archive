@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   applyInboxFilters,
   DEFAULT_INBOX_FILTERS,
@@ -13,6 +13,11 @@ import {
   LINEAR_NO_PROJECT,
   linearProjectOptions,
   pruneInboxFilters,
+  connectableInboxSources,
+  loadInboxConnections,
+  resolveInboxSource,
+  saveInboxConnections,
+  visibleInboxSources,
 } from "./inboxFilters";
 import type { InboxItem } from "./githubTasks";
 
@@ -466,3 +471,161 @@ describe("pruneInboxFilters", () => {
     expect(pruned.hiddenProjects).toEqual(["/tmp/web"]);
   });
 });
+
+describe("visibleInboxSources", () => {
+  it("drops sources that are known to be disconnected", () => {
+    expect(
+      visibleInboxSources({ github: false, linear: false, jira: false, azure: false, gitlab: false }),
+    ).toEqual([]);
+    expect(
+      visibleInboxSources({ github: true, linear: false, jira: false, azure: false, gitlab: false }),
+    ).toEqual(["github"]);
+    expect(
+      visibleInboxSources({ github: false, linear: true, jira: false, azure: false, gitlab: false }),
+    ).toEqual(["linear"]);
+    expect(
+      visibleInboxSources({ github: true, linear: true, jira: false, azure: false, gitlab: true }),
+    ).toEqual(["github", "linear", "gitlab"]);
+  });
+
+  it("keeps unresolved sources visible so tabs do not flash away", () => {
+    expect(
+      visibleInboxSources({ github: null, linear: null, jira: null, azure: null, gitlab: null }),
+    ).toEqual(["github", "linear", "gitlab", "jira", "azure"]);
+  });
+});
+
+describe("connectableInboxSources", () => {
+  it("offers only the sources confirmed to be disconnected", () => {
+    expect(
+      connectableInboxSources({ github: true, linear: false, jira: false, azure: false, gitlab: true }),
+    ).toEqual(["linear", "jira", "azure"]);
+    expect(
+      connectableInboxSources({
+        github: false,
+        linear: false,
+        jira: false, azure: false, gitlab: false,
+      }),
+    ).toEqual(["github", "linear", "gitlab", "jira", "azure"]);
+  });
+
+  it("offers nothing while the checks are unresolved", () => {
+    expect(
+      connectableInboxSources({ github: null, linear: null, jira: null, azure: null, gitlab: null }),
+    ).toEqual([]);
+  });
+});
+
+describe("resolveInboxSource", () => {
+  it("falls back to the first visible source when the selection disconnects", () => {
+    expect(
+      resolveInboxSource("linear", {
+        github: true,
+        linear: false,
+        jira: false, azure: false, gitlab: true,
+      }),
+    ).toBe("github");
+    expect(
+      resolveInboxSource("github", {
+        github: false,
+        linear: false,
+        jira: false, azure: false, gitlab: true,
+      }),
+    ).toBe("gitlab");
+  });
+
+  it("keeps GitHub as an internal fallback when every source is disconnected", () => {
+    expect(
+      resolveInboxSource("linear", {
+        github: false,
+        linear: false,
+        jira: false, azure: false, gitlab: false,
+      }),
+    ).toBe("github");
+  });
+
+  it("leaves a still-visible selection alone", () => {
+    expect(
+      resolveInboxSource("linear", {
+        github: false,
+        linear: true,
+        jira: false, azure: false, gitlab: false,
+      }),
+    ).toBe("linear");
+    expect(
+      resolveInboxSource("github", {
+        github: true,
+        linear: false,
+        jira: false, azure: false, gitlab: false,
+      }),
+    ).toBe("github");
+  });
+});
+
+function mockLocalStorage() {
+  const data = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      data.set(key, value);
+    },
+    removeItem: (key: string) => {
+      data.delete(key);
+    },
+    clear: () => {
+      data.clear();
+    },
+    key: (index: number) => [...data.keys()][index] ?? null,
+    get length() {
+      return data.size;
+    },
+  };
+  Object.defineProperty(globalThis, "localStorage", {
+    value: storage,
+    configurable: true,
+  });
+}
+
+describe("inbox connection cache", () => {
+  const KEY = "monocode.inboxConnections";
+  beforeEach(mockLocalStorage);
+
+  it("round-trips the last known connect state", () => {
+    saveInboxConnections({ github: true, linear: true, jira: false, azure: false, gitlab: false });
+    expect(loadInboxConnections()).toEqual({
+      github: true,
+      linear: true,
+      jira: false, azure: false, gitlab: false,
+    });
+  });
+
+  it("reads unknown when nothing is stored", () => {
+    expect(loadInboxConnections()).toEqual({
+      github: null,
+      linear: null,
+      jira: null, azure: null, gitlab: null,
+    });
+  });
+
+  it("reads unknown rather than trusting a malformed value", () => {
+    localStorage.setItem(KEY, "not json");
+    expect(loadInboxConnections()).toEqual({
+      github: null,
+      linear: null,
+      jira: null, azure: null, gitlab: null,
+    });
+    localStorage.setItem(KEY, '{"linear":"yes"}');
+    expect(loadInboxConnections()).toEqual({
+      github: null,
+      linear: null,
+      jira: null, azure: null, gitlab: null,
+    });
+  });
+});
+
+ it("falls back within the selected providers and keeps Jira and Azure independent", () => {
+   const connections = { github: true, linear: false, gitlab: false, jira: true, azure: false };
+   expect(resolveInboxSource("azure", connections, ["jira", "azure"])).toBe("jira");
+   expect(visibleInboxSources(connections)).toEqual(["github", "jira"]);
+   expect(connectableInboxSources(connections)).toEqual(["linear", "gitlab", "azure"]);
+ });

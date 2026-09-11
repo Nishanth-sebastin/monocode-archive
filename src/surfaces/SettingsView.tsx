@@ -1,4 +1,5 @@
 import { Select } from "../chrome/Select";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowDownCircle,
   Check,
@@ -131,7 +132,11 @@ import {
   saveSessionSidebarFilters,
 } from "../lib/sessionFilters";
 import type { SessionSummary } from "../lib/sessionStore";
-import { clearInboxCache } from "../lib/githubTasks";
+import {
+  clearInboxCache,
+  githubStatus,
+  type GithubStatus,
+} from "../lib/githubTasks";
 import {
   disconnectGitlab,
   gitlabConnected,
@@ -193,8 +198,20 @@ import {
 
 import { SkillsPage } from "./SkillsPage";
 
+export type SettingsAnchor = "github" | "gitlab" | "linear" | "jira" | "azure";
+
+const ANCHOR_IDS: Record<SettingsAnchor, string> = {
+  jira: "settings-jira",
+  azure: "settings-azure",
+  github: "settings-github",
+  gitlab: "settings-gitlab",
+  linear: "settings-linear",
+};
+
 type Props = {
   section: SettingsSectionId;
+  /** Card to scroll to; the General page is too long to land at the top. */
+  anchor?: SettingsAnchor | null;
   cwd: string;
   sessions: SessionSummary[];
   besideRail?: boolean;
@@ -209,6 +226,7 @@ type Props = {
 
 export function SettingsView({
   section,
+  anchor = null,
   cwd,
   sessions,
   besideRail = false,
@@ -221,6 +239,12 @@ export function SettingsView({
   onOpenWhatsNew,
 }: Props) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
+  useEffect(() => {
+    if (!anchor) return;
+    document.getElementById(ANCHOR_IDS[anchor])?.scrollIntoView({
+      block: "start",
+    });
+  }, [anchor]);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const appearance = useAppearanceSettings();
@@ -288,6 +312,7 @@ export function SettingsView({
           ) : null}
           {section === "keybindings" ? <KeybindingsPage /> : null}
           {section === "providers" ? <ProvidersPage /> : null}
+          {section === "inbox" ? <InboxPage /> : null}
           {section === "skills" ? <SkillsPage key={cwd} cwd={cwd} /> : null}
           {section === "archive" ? (
             <ArchivePage
@@ -538,17 +563,6 @@ function GeneralPage({
         />
       </Row>
 
-      <Heading title="GitLab" />
-      <GitlabSettings />
-
-      <Heading title="Linear" />
-      <LinearSettings />
-
-      <Heading title={<span className="flex items-center gap-2"><InboxProviderMark provider="jira" className="size-4 shrink-0" />Jira Cloud</span>} />
-      <JiraSettings />
-      <Heading title={<span className="flex items-center gap-2"><InboxProviderMark provider="azure" className="size-4 shrink-0" />Azure DevOps</span>} />
-      <AzureSettings />
-
       <Heading title="About" />
       <UpdateRow onOpenWhatsNew={onOpenWhatsNew} />
     </>
@@ -746,6 +760,99 @@ function JiraSettings() {
         <p role="alert" className="pb-2 text-[12px] text-red-400/90">
           {error}
         </p>
+      ) : null}
+    </>
+  );
+}
+
+function InboxPage() {
+  return (
+    <>
+      <Heading title="GitHub" id={ANCHOR_IDS.github} first />
+      <GithubSettings />
+
+      <Heading title="GitLab" id={ANCHOR_IDS.gitlab} />
+      <GitlabSettings />
+
+      <Heading title="Linear" id={ANCHOR_IDS.linear} />
+      <LinearSettings />
+      <Heading title="Jira Cloud" id={ANCHOR_IDS.jira} />
+      <JiraSettings />
+      <Heading title="Azure DevOps" id={ANCHOR_IDS.azure} />
+      <AzureSettings />
+    </>
+  );
+}
+
+function GithubSettings() {
+  const [status, setStatus] = useState<GithubStatus | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const request = useRef(0);
+
+  const checkStatus = useCallback(async () => {
+    const generation = ++request.current;
+    setChecking(true);
+    setError(null);
+    try {
+      const next = await githubStatus();
+      if (generation === request.current) setStatus(next);
+    } catch (err: unknown) {
+      if (generation === request.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (generation === request.current) setChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void checkStatus();
+    return () => {
+      request.current += 1;
+    };
+  }, [checkStatus]);
+
+  const description = status?.connected
+    ? "GitHub CLI is installed and authenticated. MonoCode uses it for GitHub inbox items."
+    : status?.installed
+      ? "Run gh auth login in a terminal, complete the sign-in flow, then check again."
+      : "Install GitHub CLI from cli.github.com, run gh auth login in a terminal, then check again.";
+  const label = checking
+    ? "Checking"
+    : status?.connected
+      ? "Connected"
+      : status?.installed
+        ? "Sign in required"
+        : "Not installed";
+
+  return (
+    <>
+      <Row
+        label={
+          <span className="flex items-center gap-2">
+            <InboxProviderMark provider="github" className="size-4 shrink-0" />
+            Connection
+          </span>
+        }
+        description={description}
+      >
+        <span className="text-[12px] text-content/50">{label}</span>
+        {!checking && !status?.installed ? (
+          <SecondaryButton
+            onClick={() => {
+              void openUrl("https://cli.github.com/").catch(() => {});
+            }}
+          >
+            Installation guide
+          </SecondaryButton>
+        ) : null}
+        <SecondaryButton onClick={() => void checkStatus()} disabled={checking}>
+          {checking ? "Checking" : "Check again"}
+        </SecondaryButton>
+      </Row>
+      {error ? (
+        <p className="pb-2 text-[12px] text-red-400/90">{error}</p>
       ) : null}
     </>
   );
@@ -1916,9 +2023,18 @@ function PageHeader({
   );
 }
 
-function Heading({ title, first = false }: { title: ReactNode; first?: boolean }) {
+function Heading({
+  title,
+  first = false,
+  id,
+}: {
+  title: ReactNode;
+  first?: boolean;
+  id?: string;
+}) {
   return (
     <h2
+      id={id}
       className={`pb-1 text-[15px] font-semibold text-content ${
         first ? "" : "pt-8"
       }`}

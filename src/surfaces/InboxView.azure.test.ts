@@ -31,6 +31,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
         account: "Ada",
         accountId: "ada",
       };
+    if (cmd === "git_github_status") return { installed: true, connected: true };
     if (cmd.endsWith("_status")) return { connected: false };
     if (cmd === "azure_list_items") {
       if (fail) throw new Error("Azure denied access");

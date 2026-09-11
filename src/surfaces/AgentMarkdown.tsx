@@ -1,16 +1,19 @@
 import { languageFromFileName } from "../lib/editorSelection";
 import { code } from "@streamdown/code";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import {
   createContext,
   isValidElement,
   memo,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
   type ComponentProps,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import { harden } from "rehype-harden";
@@ -22,15 +25,18 @@ import {
   type Components,
 } from "streamdown";
 import type { PluggableList } from "unified";
+import { ExplorerMenu, type ExplorerMenuItem } from "../chrome/ExplorerMenu";
 import { FileTypeIcon } from "../chrome/FileTypeIcon";
 import { createLazyMermaidPlugin } from "./mermaidPlugin";
-import { resolveWorkspacePath } from "../lib/paths";
+import { displayPath, resolveWorkspacePath } from "../lib/paths";
 import { isAtxHeadingLine } from "../lib/markdownSource";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { copyText } from "../lib/clipboard";
+import { revealPath } from "../lib/fs";
 import { INBOX_MEDIA_PREFIXES, isInboxMediaUrl } from "../lib/inboxMedia";
 import { isNoteImagePath } from "../lib/noteImages";
+import { IS_MAC, IS_WIN } from "../lib/platform";
 import { InboxMedia } from "./InboxMedia";
 
 const MERMAID_BASE_CONFIG = {
@@ -79,12 +85,52 @@ const INBOX_MEDIA_REHYPE_PLUGINS: PluggableList = [
   ],
 ];
 
+type FileLinkMenu = {
+  x: number;
+  y: number;
+  path: string;
+};
+
 const FileOpenContext = createContext<{
   cwd?: string;
   onOpenFile?: (path: string) => void;
+  onFileContextMenu?: (event: ReactMouseEvent, path: string) => void;
 }>({});
 
 const RemoteMediaContext = createContext(false);
+
+const REVEAL_LABEL = IS_MAC
+  ? "Reveal in Finder"
+  : IS_WIN
+    ? "Reveal in File Explorer"
+    : "Open Containing Folder";
+
+function fileLinkMenuItems(
+  canOpenInMonoCode: boolean,
+  canCopyRelativePath: boolean,
+): ExplorerMenuItem[] {
+  return [
+    {
+      kind: "item",
+      id: "open-monocode",
+      label: "Open in MonoCode",
+      disabled: !canOpenInMonoCode,
+    },
+    { kind: "item", id: "open-default", label: "Open in Default App" },
+    { kind: "item", id: "reveal", label: REVEAL_LABEL },
+    { kind: "sep" },
+    { kind: "item", id: "copy-path", label: "Copy Path" },
+    ...(canCopyRelativePath
+      ? [
+          {
+            kind: "item" as const,
+            id: "copy-relative-path",
+            label: "Copy Relative Path",
+          },
+        ]
+      : []),
+  ];
+}
 
 const LANGUAGE_FILE_NAMES: Record<string, string> = {
   bash: "code.sh",
@@ -130,11 +176,12 @@ function MarkdownLink({
   className,
   node: _node,
   onClick,
+  onContextMenu,
   dir,
   ...props
 }: MarkdownLinkProps) {
   const allowRemoteMedia = useContext(RemoteMediaContext);
-  const { cwd, onOpenFile } = useContext(FileOpenContext);
+  const { cwd, onOpenFile, onFileContextMenu } = useContext(FileOpenContext);
   const filePath = href ? resolveWorkspacePath(href, cwd) : undefined;
   const label = textContent(children);
   if (allowRemoteMedia && href && isInboxMediaUrl(href)) {
@@ -159,6 +206,11 @@ function MarkdownLink({
           event.preventDefault();
         }
       }}
+      onContextMenu={(event) => {
+        onContextMenu?.(event);
+        if (event.defaultPrevented || !filePath || !onFileContextMenu) return;
+        onFileContextMenu(event, filePath);
+      }}
     >
       {children}
     </a>
@@ -171,6 +223,7 @@ function MarkdownCode({
   children,
   className,
   node,
+  onContextMenu,
   ...props
 }: MarkdownCodeProps) {
   const incomplete = useIsCodeFenceIncomplete();
@@ -178,7 +231,8 @@ function MarkdownCode({
   if (!block) {
     const text = textContent(children);
     const fileName = inlineFileName(text);
-    const { cwd, onOpenFile } = useContext(FileOpenContext);
+    const { cwd, onOpenFile, onFileContextMenu } =
+      useContext(FileOpenContext);
     const filePath = fileName ? resolveWorkspacePath(text, cwd) : undefined;
     const open =
       filePath && onOpenFile ? () => onOpenFile(filePath) : undefined;
@@ -192,6 +246,11 @@ function MarkdownCode({
         role={open ? "link" : undefined}
         tabIndex={open ? 0 : undefined}
         onClick={open}
+        onContextMenu={(event) => {
+          onContextMenu?.(event);
+          if (event.defaultPrevented || !filePath || !onFileContextMenu) return;
+          onFileContextMenu(event, filePath);
+        }}
         onKeyDown={
           open
             ? (event) => {
@@ -370,24 +429,81 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   allowRemoteMedia?: boolean;
   textOnly?: boolean;
 }) {
-  const fileOpen = useMemo(() => ({ cwd, onOpenFile }), [cwd, onOpenFile]);
+  const [fileMenu, setFileMenu] = useState<FileLinkMenu | null>(null);
+  const onFileContextMenu = useCallback(
+    (event: ReactMouseEvent, path: string) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setFileMenu({ x: event.clientX, y: event.clientY, path });
+    },
+    [],
+  );
+  const fileOpen = useMemo(
+    () => ({ cwd, onOpenFile, onFileContextMenu }),
+    [cwd, onOpenFile, onFileContextMenu],
+  );
   const remoteMedia = !!allowRemoteMedia;
+
+  const onFileMenuPick = (id: string) => {
+    if (!fileMenu) return;
+    const path = fileMenu.path;
+    setFileMenu(null);
+
+    if (id === "open-monocode") {
+      onOpenFile?.(path);
+      return;
+    }
+
+    let action: Promise<void>;
+    switch (id) {
+      case "open-default":
+        action = openPath(path);
+        break;
+      case "reveal":
+        action = revealPath(path);
+        break;
+      case "copy-path":
+        action = copyText(path);
+        break;
+      case "copy-relative-path":
+        action = copyText(displayPath(path, cwd));
+        break;
+      default:
+        return;
+    }
+    void action.catch((error) => {
+      console.error(`Failed to run file-link action ${id}:`, error);
+    });
+  };
+
   return (
     <RemoteMediaContext.Provider value={remoteMedia}>
       <FileOpenContext.Provider value={fileOpen}>
-        <Streamdown
-          className={`agent-markdown min-w-0 font-sans text-sm leading-6 ${className ?? ""}`}
-          components={textOnly ? TEXT_ONLY_COMPONENTS : MARKDOWN_COMPONENTS}
-          controls={false}
-          dir="auto"
-          isAnimating={!!streaming}
-          plugins={MARKDOWN_PLUGINS}
-          rehypePlugins={
-            remoteMedia ? INBOX_MEDIA_REHYPE_PLUGINS : MARKDOWN_REHYPE_PLUGINS
-          }
-        >
-          {text}
-        </Streamdown>
+        <>
+          <Streamdown
+            className={`agent-markdown min-w-0 font-sans text-sm leading-6 ${className ?? ""}`}
+            components={textOnly ? TEXT_ONLY_COMPONENTS : MARKDOWN_COMPONENTS}
+            controls={false}
+            dir="auto"
+            isAnimating={!!streaming}
+            plugins={MARKDOWN_PLUGINS}
+            rehypePlugins={
+              remoteMedia ? INBOX_MEDIA_REHYPE_PLUGINS : MARKDOWN_REHYPE_PLUGINS
+            }
+          >
+            {text}
+          </Streamdown>
+          {fileMenu ? (
+            <ExplorerMenu
+              x={fileMenu.x}
+              y={fileMenu.y}
+              items={fileLinkMenuItems(!!onOpenFile, !!cwd)}
+              ariaLabel="File link actions"
+              onPick={onFileMenuPick}
+              onClose={() => setFileMenu(null)}
+            />
+          ) : null}
+        </>
       </FileOpenContext.Provider>
     </RemoteMediaContext.Provider>
   );
@@ -604,7 +720,7 @@ function parseCodeFence(
 }
 
 function MarkdownCodePath({ path }: { path: string }) {
-  const { cwd, onOpenFile } = useContext(FileOpenContext);
+  const { cwd, onOpenFile, onFileContextMenu } = useContext(FileOpenContext);
   const filePath = resolveWorkspacePath(path, cwd);
   if (!filePath || !onOpenFile) {
     return <span className="markdown-code-path">{path}</span>;
@@ -615,6 +731,7 @@ function MarkdownCodePath({ path }: { path: string }) {
       className="markdown-code-path markdown-code-path-link"
       title={filePath}
       onClick={() => onOpenFile(filePath)}
+      onContextMenu={(event) => onFileContextMenu?.(event, filePath)}
     >
       {path}
     </button>

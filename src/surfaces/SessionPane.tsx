@@ -57,6 +57,7 @@ import {
   loadChatBackgroundPath,
   subscribeChatBackgroundPath,
 } from "../lib/appearance";
+import type { SessionFolderTarget } from "../lib/sessionFolders";
 
 type Props = {
   session: Session;
@@ -86,6 +87,10 @@ type Props = {
   ) => void;
   onStop: (sessionId: string) => void;
   onCompactContext: (sessionId: string) => boolean;
+  onPlaceSessionInFolder: (
+    sessionId: string,
+    target: SessionFolderTarget,
+  ) => void;
   onDeleteQueuedMessage: (sessionId: string, messageId: string) => void;
   onEditQueuedMessage: (
     sessionId: string,
@@ -109,6 +114,7 @@ type Props = {
     requestId: number,
     reply: UserQuestionReply,
   ) => void;
+  onQuestionInteraction?: (sessionId: string, requestId: number) => void;
   onOpenFile: (path: string) => void;
   onOpenDiff: (
     path?: string,
@@ -156,6 +162,7 @@ export const SessionPane = memo(function SessionPane({
   onSubmit,
   onStop,
   onCompactContext,
+  onPlaceSessionInFolder,
   onDeleteQueuedMessage,
   onEditQueuedMessage,
   onQueuedMessageEditingChange,
@@ -167,6 +174,7 @@ export const SessionPane = memo(function SessionPane({
   onHandoffCardDismiss,
   onApproval,
   onQuestionReply,
+  onQuestionInteraction,
   onOpenFile,
   onOpenDiff,
   onOpenPlan,
@@ -327,6 +335,7 @@ export const SessionPane = memo(function SessionPane({
       onNoteCardDismiss={() => onNoteCardDismiss?.(session.id)}
       onHandoffCardDismiss={() => onHandoffCardDismiss?.(session.id)}
       onQuestionReply={replyQuestion}
+      onQuestionInteraction={(id) => onQuestionInteraction?.(session.id, id)}
       onFocus={() => onFocus(session.id)}
       onCwdChange={(cwd, fresh) => onCwdChange(session.id, cwd, fresh)}
       onBranchChange={() => onBranchChange(session.id)}
@@ -348,6 +357,7 @@ export const SessionPane = memo(function SessionPane({
       }
       onStop={() => onStop(session.id)}
       onCompactContext={() => onCompactContext(session.id)}
+      onPlaceInFolder={(target) => onPlaceSessionInFolder(session.id, target)}
       queuedMessages={session.queuedMessages}
       queueStatus={session.queueStatus}
       onDeleteQueuedMessage={(messageId) =>

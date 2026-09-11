@@ -19,6 +19,7 @@ import {
   ListFilter,
   LoaderCircle,
   MessageMultiple,
+  Plus,
   RefreshCw,
   Search,
   type IconComponent,
@@ -36,6 +37,7 @@ import {
   InboxFiltersMenu,
   INBOX_FILTER_MENU_WIDTH,
 } from "../chrome/InboxFiltersMenu";
+import { InboxConnectMenu } from "../chrome/InboxConnectMenu";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
 import { ContextCheckbox, InboxContextPicker, useInboxContext } from "../chrome/InboxContextPicker";
 import type { InboxComposerCard } from "../lib/githubTasks";
@@ -47,6 +49,7 @@ import { useDragResize } from "../hooks/useDragResize";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
 import {
+  githubStatus,
   githubPrDiff,
   githubReviewDecisionLabel,
   githubWorkItem,
@@ -76,7 +79,9 @@ import {
 } from "../lib/githubTasks";
 import {
   applyInboxFilters,
+  connectableInboxSources,
   hasActiveInboxFilters,
+  loadInboxConnections,
   linearProjectOptions,
   inboxFetchState,
   loadInboxFilters,
@@ -86,7 +91,11 @@ import {
   INBOX_SOURCE_LABELS,
   pruneInboxFilters,
   saveInboxFilters,
+  resolveInboxSource,
+  saveInboxConnections,
   saveInboxSource,
+  visibleInboxSources,
+  type ConnectableInboxSource,
   type InboxFilters,
   type InboxSource,
 } from "../lib/inboxFilters";
@@ -110,6 +119,7 @@ import {
 } from "../lib/inboxSeen";
 import {
   LINEAR_CHANGE_EVENT,
+  linearConnected,
   linearIssueComment,
   linearIssueDetails,
   linearIssueThread,
@@ -123,6 +133,7 @@ import {
 } from "../lib/linear";
 import {
   GITLAB_CHANGE_EVENT,
+  gitlabConnected,
   gitlabMrDiff,
   gitlabWorkItemComment,
   gitlabWorkItemDetails,
@@ -338,6 +349,8 @@ type Props = {
   onCloseConversation?: () => void;
   onToggleConversationTicket?: (sessionId: string, item: InboxItem, selected: boolean) => Promise<void>;
   onSelectTickets?: (items: InboxItem[]) => void;
+  /** Opens Settings on the card where the given source is connected. */
+  onOpenIntegrations?: (source: ConnectableInboxSource) => void;
 };
 
 export function InboxView({
@@ -362,6 +375,7 @@ export function InboxView({
   onCloseConversation,
   onToggleConversationTicket,
   onSelectTickets,
+  onOpenIntegrations,
 }: Props) {
   const [selectingTickets, setSelectingTickets] = useState(false);
   const [issuesCollapsed, setIssuesCollapsed] = useState(false);
@@ -400,7 +414,6 @@ export function InboxView({
     setDiscussionOpen(false);
   }, [visible]);
   const listLock = useLockOverscroll<HTMLDivElement>();
-  const detailLock = useLockOverscroll<HTMLDivElement>();
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const logos = useTabGroupLogos();
@@ -426,8 +439,13 @@ export function InboxView({
   );
   const [targetItem, setTargetItem] = useState<InboxItem | null>(null);
   const [filters, setFilters] = useState(loadInboxFilters);
-  const [source, setSource] = useState(loadInboxSource);
-  const [visibleSources, setVisibleSources] = useState(loadVisibleInboxSources);
+  const [connections, setConnections] = useState(loadInboxConnections);
+  const [source, setSource] = useState(() =>
+    resolveInboxSource(loadInboxSource(), connections, loadVisibleInboxSources()),
+  );
+  const [connectMenuOpen, setConnectMenuOpen] = useState(false);
+  const connectButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [preferredSources, setVisibleSources] = useState(loadVisibleInboxSources);
   const [filterMenu, setFilterMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -515,11 +533,15 @@ export function InboxView({
         setFilterMenu(null);
         return;
       }
+      if (connectMenuOpen) {
+        setConnectMenuOpen(false);
+        return;
+      }
       onCloseRef.current?.();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [visible, filterMenu]);
+  }, [visible, connectMenuOpen, filterMenu]);
 
   useEffect(() => {
     if (!visible) return;
@@ -546,6 +568,7 @@ export function InboxView({
       void jiraConnected().then(status => {
         if (cancelled) return;
         setJiraSite(status.site);
+        setConnections(prev => ({ ...prev, jira: status.connected }));
         setJiraProjects([]);
         setJiraFavorites([]);
         setJiraFilter(loadJiraFilter(status.site));
@@ -589,6 +612,7 @@ export function InboxView({
         if (changed && azureOwner.current !== owner) setItems(previous => previous.filter(item => item.provider !== "azure"));
         azureOwner.current = owner;
         setAzureSite(status.connected ? status.site : "");
+        setConnections(prev => ({ ...prev, azure: status.connected }));
         setAzureFilter(loadAzureFilter(status.site, status.project));
         if (changed) setRefresh(value => value + 1);
       }).catch(() => { /* The list owns connection errors. */ });
@@ -598,6 +622,74 @@ export function InboxView({
     window.addEventListener(AZURE_CHANGE_EVENT, onChange);
     return () => { cancelled = true; window.removeEventListener(AZURE_CHANGE_EVENT, onChange); };
   }, [visible]);
+
+  // The mount read does the real work: opening Settings unmounts this view, so
+  // a token set there lands on the way back in. Reads can also overlap, and
+  // only the newest may write, or a slow earlier answer restores a stale one.
+  useEffect(() => {
+    let cancelled = false;
+    if (!visible) return;
+    let latest = 0;
+    const read = () => {
+      const generation = ++latest;
+      void Promise.allSettled([
+        githubStatus(),
+        linearConnected(),
+        gitlabConnected(),
+      ]).then(([github, linear, gitlab]) => {
+        if (cancelled || generation !== latest) return;
+        setConnections((prev) => ({
+          ...prev,
+          github:
+            github.status === "fulfilled"
+              ? github.value.connected
+              : prev.github,
+          linear:
+            linear.status === "fulfilled"
+              ? linear.value.connected
+              : prev.linear,
+          gitlab:
+            gitlab.status === "fulfilled"
+              ? gitlab.value.connected
+              : prev.gitlab,
+        }));
+      });
+    };
+    read();
+    window.addEventListener(LINEAR_CHANGE_EVENT, read);
+    window.addEventListener(GITLAB_CHANGE_EVENT, read);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(LINEAR_CHANGE_EVENT, read);
+      window.removeEventListener(GITLAB_CHANGE_EVENT, read);
+    };
+  }, [visible]);
+
+  useEffect(() => {
+    saveInboxConnections(connections);
+  }, [connections]);
+
+  // The initial source is resolved against cached status, so storage can still
+  // name a provider this view has already fallen back from.
+  useEffect(() => {
+    saveInboxSource(source);
+    // Mount only: the temporary switch to GitHub for a linked target must not
+    // be persisted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Disconnecting can pull the tab out from under the current selection.
+  useEffect(() => {
+    const next = resolveInboxSource(source, connections, preferredSources);
+    if (next === source) return;
+    setSource(next);
+    saveInboxSource(next);
+  }, [connections, source, preferredSources]);
+
+  const visibleSources = visibleInboxSources(connections).filter(source => preferredSources.includes(source));
+  const connectableSources = connectableInboxSources(connections);
+  const sourceAvailable = visibleSources.includes(source);
+  const noSourcesConnected = visibleSources.length === 0;
 
   // The roster has to come from Linear, not from the fetched issues: hiding a
   // team drops its issues, so a derived list could never offer it back.
@@ -701,6 +793,7 @@ export function InboxView({
   }, [visible, cwd, items, target, targetSelectionKey]);
 
   const visibleItems = useMemo(() => {
+    if (!sourceAvailable) return [];
     const visible = applyInboxFilters(
       items,
       activeFilters,
@@ -716,7 +809,15 @@ export function InboxView({
         : null);
     if (!targeted || visible.includes(targeted)) return visible;
     return [targeted, ...visible];
-  }, [activeFilters, items, searchInput, source, target, targetItem]);
+  }, [
+    activeFilters,
+    items,
+    searchInput,
+    source,
+    sourceAvailable,
+    target,
+    targetItem,
+  ]);
 
   const relatedSessionCounts = useMemo(() => inboxRelatedSessionCounts(visibleItems, sessions), [visibleItems, sessions]);
   const selectTicketPreview = useCallback((item: InboxItem) => {
@@ -730,13 +831,15 @@ export function InboxView({
   const inboxSeenTick = useInboxSeenTick();
   const sourceEntries = useMemo(
     () =>
-      items
-        .filter((item) => item.provider === source)
-        .map((item) => ({
-          key: inboxItemKey(item),
-          updatedAt: item.updatedAt,
-        })),
-    [items, source],
+      sourceAvailable
+        ? items
+            .filter((item) => item.provider === source)
+            .map((item) => ({
+              key: inboxItemKey(item),
+              updatedAt: item.updatedAt,
+            }))
+        : [],
+    [items, source, sourceAvailable],
   );
   const sourceHasUnseen = useMemo(
     () => sourceEntries.some(isInboxEntryUnseen),
@@ -815,14 +918,43 @@ export function InboxView({
       hidden={!!conversationId && issuesCollapsed}
       className={conversationId && issuesCollapsed ? "hidden" : "relative flex h-full min-h-0 shrink-0 flex-col border-r border-content/10"}
     >
-      <div
-        role="tablist"
-        aria-label="Inbox source"
-        className={`flex min-h-9 shrink-0 flex-wrap items-center gap-px border-b border-content/10 px-2 py-1 ${visibleSources.length > 4 ? "[&>button]:min-w-[72px]" : ""}`}
-      >
-        {visibleSources.map(provider => (
-          <InboxSourceTab key={provider} source={provider} selected={source === provider} onSelect={onSourceChange} />
-        ))}
+      <div className="flex h-9 shrink-0 items-center gap-px border-b border-content/10 px-2">
+        {visibleSources.length > 0 ? (
+          <div
+            role="tablist"
+            aria-label="Inbox source"
+            className="flex min-w-0 basis-0 items-center gap-px"
+            style={{ flexGrow: visibleSources.length }}
+          >
+            {visibleSources.map((option) => (
+              <InboxSourceTab
+                key={option}
+                source={option}
+                selected={source === option}
+                onSelect={onSourceChange}
+              />
+            ))}
+          </div>
+        ) : null}
+        {connectableSources.length > 0 ? (
+          <button
+            ref={connectButtonRef}
+            type="button"
+            aria-label="Connect an inbox source"
+            aria-haspopup="menu"
+            aria-expanded={connectMenuOpen}
+            title="Connect an inbox source"
+            onClick={() => setConnectMenuOpen((open) => !open)}
+            className={`flex h-6 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-2 text-[12px] leading-none ${
+              connectMenuOpen
+                ? "bg-content/10 text-content"
+                : "text-content/40 hover:bg-content/5 hover:text-content"
+            }`}
+          >
+            <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
+            <span className="min-w-0 truncate">Add connection</span>
+          </button>
+        ) : null}
       </div>
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-content/10 px-2">
         {selectingTickets ? <>
@@ -892,7 +1024,7 @@ export function InboxView({
         className="min-h-0 flex-1 overflow-y-auto overscroll-none"
       >
         {sourceError && visibleItems.length > 0 ? <p role="status" className="px-3 py-2 text-[12px] text-content/50">{sourceError} <button type="button" onClick={() => setRefresh(value => value + 1)} className="underline">Retry</button></p> : null}
-        {sourceError && visibleItems.length === 0 ? (
+        {noSourcesConnected ? <p className="px-3 py-3 text-[12px] text-content/50">Add a connection to start using the Inbox.</p> : sourceError && visibleItems.length === 0 ? (
           <div className="px-3 py-2 text-[12px] text-content/50">
             <p>{sourceError}</p>
             {source === "azure" ? <div className="mt-2 flex gap-3">
@@ -982,7 +1114,7 @@ export function InboxView({
       linearTeams={linearTeams}
       hiddenLinearTeamIds={linearHiddenTeamIds}
       source={source}
-      visibleSources={visibleSources}
+      visibleSources={preferredSources}
       onVisibleSourcesChange={onVisibleSourcesChange}
       filters={activeFilters}
       onChange={onFiltersChange}
@@ -996,6 +1128,16 @@ export function InboxView({
       onClose={() => setFilterMenu(null)}
     />
   ) : null;
+
+  const connectPortal =
+    connectMenuOpen && connectableSources.length > 0 ? (
+      <InboxConnectMenu
+        anchor={connectButtonRef}
+        sources={connectableSources}
+        onConnect={source => onOpenIntegrations?.(source)}
+        onClose={() => setConnectMenuOpen(false)}
+      />
+    ) : null;
 
   return (
     <div
@@ -1028,9 +1170,8 @@ export function InboxView({
         {list}
         <div className="relative flex min-h-0 min-w-0 flex-1">
           <div
-            ref={detailLock}
             hidden={!!conversationId && !previewingTicket}
-            className={conversationId && !previewingTicket ? "hidden" : "min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"}
+            className={conversationId && !previewingTicket ? "hidden" : "min-h-0 min-w-0 flex-1"}
           >
             {target && !selected && selectedKey === targetSelectionKey && !loading && source === target.provider && target.provider !== "github" ? (
               <div role="status" className="p-4 text-[13px] text-content/60">
@@ -1070,6 +1211,7 @@ export function InboxView({
         </div>
       </div>
       {filtersPortal}
+      {connectPortal}
     </div>
   );
 }
@@ -1099,9 +1241,7 @@ function InboxDetailBody({
     return (
       <div className="flex h-full flex-col items-center justify-center px-6 text-center">
         <Inbox className="mb-3 size-6 text-content/30" strokeWidth={1.75} />
-        <p className="text-[13px] text-content/45">
-          Select an inbox item
-        </p>
+        <p className="text-[13px] text-content/45">Select an inbox item</p>
       </div>
     );
   }
@@ -1276,7 +1416,7 @@ const InboxCard = memo(function InboxCard({
   );
 });
 
-function InboxDetail({
+export function InboxDetail({
   item,
   cwd,
   projects,
@@ -1297,6 +1437,7 @@ function InboxDetail({
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   onOpenDelivery?: (sessionId: string, kind: "pr" | "ci", current: () => boolean, provider: "github" | "azure", prUrl?: string) => Promise<void>;
 }) {
+  const detailLock = useLockOverscroll<HTMLDivElement>();
   const [deliveryProviders, setDeliveryProviders] = useState<Record<string, "github" | "azure">>(() => {
     try { const saved = JSON.parse(localStorage.getItem("monocode.inboxDeliveryProviders.v1") || "{}"); return saved && typeof saved === "object" && !Array.isArray(saved) ? Object.fromEntries(Object.entries(saved).filter(([, value]) => value === "github" || value === "azure").slice(-100)) as Record<string, "github" | "azure"> : {}; }
     catch { return {}; }
@@ -1690,7 +1831,9 @@ function InboxDetail({
   };
 
   return (
-    <div className={`mx-auto flex w-full flex-col gap-5 px-8 py-8 max-w-5xl`}>
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
+      <div data-inbox-detail-header className="relative z-10 shrink-0 border-b border-content/10">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-2.5 px-8 pt-5 pb-5">
       <header className="flex flex-col gap-3">
         <div className="flex items-center gap-2 text-[12px] text-content/50">
           <InboxProviderMark provider={item.provider} className="size-3.5" />
@@ -1708,10 +1851,11 @@ function InboxDetail({
           </span>
           {source ? <span className="truncate">{source}</span> : null}
         </div>
-        <h1 className="text-[20px] font-semibold leading-tight text-content">
+        <h1 title={item.title}
+          className="line-clamp-2 text-[20px] font-semibold leading-tight text-content">
           {item.title}
         </h1>
-        <div className="flex flex-wrap items-center gap-2 text-[12px] text-content/50">
+        <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] text-content/50">
           {authorName ? (
             <InboxPerson
               name={authorName}
@@ -1746,12 +1890,6 @@ function InboxDetail({
               )}
             </>
           ) : null}
-          {ticket ? null : (
-            <>
-              <span aria-hidden>·</span>
-              <span>{projectName(item.projectPath)}</span>
-            </>
-          )}
           {formatRelativeTime(item.updatedAt) ? (
             <>
               <span aria-hidden>·</span>
@@ -1776,13 +1914,6 @@ function InboxDetail({
             </>
           ) : null}
         </div>
-        {item.labels.length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {item.labels.map((label) => (
-              <InboxLabel key={label.name} label={label} />
-            ))}
-          </div>
-        ) : null}
         {relatedSessions.length > 0 ? (
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="mr-0.5 inline-flex items-center gap-1 text-[11px] text-content/45">
@@ -1836,6 +1967,7 @@ function InboxDetail({
               >
                 Send to agent
               </button>
+              {ticket ? <InboxProjectPicker projects={projects} value={startProject} onChange={setStartProject} /> : null}
             </>
           ) : null}
           <button
@@ -1896,6 +2028,17 @@ function InboxDetail({
       ) : (
         <div className="border-t border-content/10" />
       )}
+      </div>
+      </div>
+      <div ref={detailLock} data-inbox-detail-scroll className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-8 py-5">
+        {item.labels.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {item.labels.map((label) => (
+              <InboxLabel key={label.name} label={label} />
+            ))}
+          </div>
+        ) : null}
       {isPr && tab === "code" ? (
         diffLoading ? (
           <div className="flex justify-center py-10 text-content/40">
@@ -1951,6 +2094,8 @@ function InboxDetail({
           />}
         </>
       )}
+      </div>
+      </div>
     </div>
   );
 }
