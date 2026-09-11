@@ -1,4 +1,5 @@
 import { wslLocation } from "../paths";
+import type { HarnessId } from "../session";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -292,6 +293,19 @@ export function resolveCursorBinary(cwd?: string): Promise<{ path: string }> {
   return cwd && wslLocation(cwd)
     ? invoke("wsl_resolve_harness", { cwd, provider: "cursor" })
     : invoke("harness_resolve_cursor");
+}
+
+export type WslAgentResolution = {
+  path?: string;
+  authenticated?: boolean;
+  error?: string;
+};
+
+/** One bridged round trip that resolves every provider in the distribution. */
+export function resolveWslAgents(
+  cwd: string,
+): Promise<Partial<Record<HarnessId, WslAgentResolution>>> {
+  return invoke("wsl_resolve_agents", { cwd });
 }
 
 export function resolveCodexBinary(cwd?: string): Promise<{ path: string }> {

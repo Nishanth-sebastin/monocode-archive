@@ -292,6 +292,15 @@ export function modelCatalogStatus(harness: HarnessId, cwd?: string): string {
     : "Bundled models · refresh to discover available models";
 }
 
+export function modelCatalogError(
+  harness: HarnessId,
+  cwd?: string,
+): string | undefined {
+  const entry = catalogs.get(modelCatalogKey(cwd))?.[harness];
+  if (!entry?.error) return undefined;
+  return entry.error.replace(/^Error:\s*/, "");
+}
+
 let catalogVersion = 0;
 const listeners = new Set<() => void>();
 
@@ -321,6 +330,18 @@ export function setHarnessModels(
 ) {
   if (models.length === 0) return;
   catalogScope(cwd)[harness] = { models };
+  emit();
+}
+
+/** Record a discovery failure without replacing a working catalog. */
+export function setCatalogError(
+  harness: HarnessId,
+  message: string,
+  cwd?: string,
+) {
+  const entry = (catalogScope(cwd)[harness] ??= {});
+  if (entry.models || entry.inflight) return;
+  entry.error = message;
   emit();
 }
 

@@ -111,6 +111,90 @@ it("keeps changes selected until the chosen recipient accepts context", async ()
   }
 });
 
+it("moves a staged file immediately and refreshes the index once", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const { invoke } = await import("@tauri-apps/api/core");
+  let staged = false;
+  let indexCalls = 0;
+  let release: (() => void) | undefined;
+  const snapshot = () => ({
+    branch: "feature",
+    ahead: 0,
+    behind: 0,
+    files: [
+      {
+        path: "/repo/a.ts",
+        relative: "a.ts",
+        status: "modified",
+        staged,
+        unstaged: !staged,
+        additions: 1,
+        deletions: 0,
+      },
+    ],
+  });
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_stage_file") {
+      staged = true;
+      return null;
+    }
+    if (command === "git_diff_index") {
+      indexCalls += 1;
+      if (indexCalls > 1) {
+        // Hold the post-mutation refresh open so the optimistic move is
+        // observable before the refreshed index lands.
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return snapshot();
+    }
+    return original(command, args);
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const stageButton = () =>
+    host.querySelector('button[aria-label="Stage Changes"]');
+  const unstageButton = () =>
+    host.querySelector('button[aria-label="Unstage Changes"]');
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo",
+          sourceSessionId: "owner",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    expect(stageButton()).not.toBeNull();
+    expect(unstageButton()).toBeNull();
+    await act(async () => {
+      (stageButton() as HTMLButtonElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The row moved to the staged section before the refreshed index
+    // resolved, and the mutation triggered exactly one index reload
+    // (notify + no duplicate reload pass).
+    expect(stageButton()).toBeNull();
+    expect(unstageButton()).not.toBeNull();
+    expect(indexCalls).toBe(2);
+    await act(async () => release?.());
+    expect(unstageButton()).not.toBeNull();
+    expect(indexCalls).toBe(2);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.mocked(invoke).mockImplementation(original);
+    vi.unstubAllGlobals();
+  }
+});
+
 it("updates PR and CI rows when their exact conversation associations change", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rows = new Map<string, string>();
