@@ -6,6 +6,7 @@ import {
   ChevronUp,
   CircleAlert,
   FolderOpen,
+  FolderTree,
   GitBranch,
   ImagePlus,
   Inbox,
@@ -26,7 +27,21 @@ import {
   useSyncExternalStore,
   type MouseEvent,
 } from "react";
-import { useRepositoryFamilies } from "../hooks/useRepositoryFamilies";
+import { probeRepositoryFamily, useRepositoryFamilies } from "../hooks/useRepositoryFamilies";
+import {
+  groupRailProjectsByMembership,
+  loadProjects,
+  projectContainsPath,
+  projectsSnapshot,
+  recordProjectLastPath,
+  repositoryDisplayName,
+  subscribeProjects,
+  deleteProject,
+  familyForRepository,
+  renameProject,
+  type ProjectRecord,
+} from "../lib/projects";
+import { ProjectRepositories } from "./ProjectRepositories";
 import {
   groupRepositoryFamilies,
   workingCopyName,
@@ -51,7 +66,7 @@ import {
 } from "../lib/appearance";
 import { basename, revealPath, type GitDiffStats } from "../lib/fs";
 import { IS_MAC, IS_WIN, MOD } from "../lib/platform";
-import { pathKey, prettyCwd, projectKey, projectName } from "../lib/paths";
+import { pathKey, prettyCwd, projectKey, projectName, wslLocation } from "../lib/paths";
 import {
   collectRailProjects,
   loadPinnedProjects,
@@ -65,6 +80,7 @@ import {
   subscribeRemovedWorktree,
   type RecentProject,
 } from "../lib/recents";
+import type { RailProjectItem } from "../lib/projects";
 import {
   loadTabGroupColors,
   loadTabGroupCustomColors,
@@ -110,6 +126,11 @@ function projectMenuExtraItems(
   canRemove: boolean,
 ): TabGroupMenuExtraItem[] {
   const items: TabGroupMenuExtraItem[] = [
+    {
+      id: "repositories",
+      label: "Project repositories…",
+      icon: FolderTree,
+    },
     {
       id: "background",
       label: "Background image",
@@ -222,10 +243,16 @@ export function ProjectRail({
     y: number;
     path: string;
     projectKey: string;
+    projectId?: string;
+  } | null>(null);
+  const [repositoriesProject, setRepositoriesProject] = useState<{
+    path: string;
+    projectId?: string;
   } | null>(null);
   const [removing, setRemoving] = useState<{
     path: string;
     name: string;
+    projectId?: string;
   } | null>(null);
   const [backgroundProject, setBackgroundProject] = useState<{
     project: string;
@@ -234,19 +261,46 @@ export function ProjectRail({
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const groupLogos = useTabGroupLogos();
-  const allProjects = useMemo(
-    () => collectRailProjects(recents, cwd),
-    [cwd, recents],
-  );
+  const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
+  const storedProjects = useMemo(() => loadProjects(), [projectsRaw]);
+  const allProjects = useMemo(() => {
+    const map = collectRailProjects(recents, cwd);
+    // Stored projects keep a rail row from their anchor even when no member
+    // path is a recent; the anchor keys order, pins and appearance.
+    for (const project of storedProjects) {
+      const key = pathKey(project.anchor);
+      if (!map.has(key))
+        map.set(key, { path: project.anchor, openedAt: 0 });
+    }
+    return map;
+  }, [cwd, recents, storedProjects]);
   const rawSections = useMemo(
-    () => projectRailSections(recents, cwd, railOrder, pinnedPaths, new Map()),
-    [cwd, pinnedPaths, railOrder, recents],
+    () =>
+      projectRailSections(
+        recents,
+        cwd,
+        railOrder,
+        pinnedPaths,
+        new Map(),
+        storedProjects,
+      ),
+    [cwd, pinnedPaths, railOrder, recents, storedProjects],
   );
   const families = useRepositoryFamilies(recents, cwd);
   const sections = useMemo(
-    () => groupRepositoryFamilies(rawSections, families),
-    [rawSections, families],
+    () =>
+      groupRailProjectsByMembership(
+        groupRepositoryFamilies(rawSections, families),
+        families,
+        storedProjects,
+      ),
+    [rawSections, families, storedProjects],
   );
+
+  // Reopening a project lands on the working copy the user last left it in.
+  useEffect(() => {
+    if (cwd) recordProjectLastPath(cwd, families);
+  }, [cwd, families]);
   const busy = useMemo(() => {
     const set = new Set<string>();
     for (const path of busyPaths ?? []) set.add(path);
@@ -279,26 +333,32 @@ export function ProjectRail({
     return () => scrollParent.removeEventListener("scroll", onScroll, true);
   }, [projectMenu]);
 
-  const openProjectMenu = (path: string, x: number, y: number) => {
+  const openProjectMenu = (item: RailProjectItem, x: number, y: number) => {
     setProjectMenu({
       x,
       y,
-      path,
-      projectKey: projectKey(path),
+      path: item.path,
+      projectKey: projectKey(item.path),
+      projectId: item.project?.id,
     });
   };
 
   const onProjectContextMenu = (
-    path: string,
+    item: RailProjectItem,
     event: MouseEvent<HTMLElement>,
   ) => {
     event.preventDefault();
     event.stopPropagation();
-    openProjectMenu(path, event.clientX, event.clientY);
+    openProjectMenu(item, event.clientX, event.clientY);
   };
 
-  const onProjectRename = (projectKey: string, label: string) => {
-    saveTabGroupLabel(projectKey, label);
+  const onProjectRename = (groupId: string, label: string) => {
+    const projectId = projectMenu?.projectId;
+    if (projectId) {
+      renameProject(projectId, label);
+      return;
+    }
+    saveTabGroupLabel(groupId, label);
     setGroupLabels(loadTabGroupLabels());
   };
 
@@ -366,29 +426,64 @@ export function ProjectRail({
     savePinnedProjects(next);
   };
 
+  const menuProject = projectMenu?.projectId
+    ? storedProjects.find((entry) => entry.id === projectMenu.projectId)
+    : undefined;
+
+  /** Recent paths whose verified family belongs to the project — the paths the
+   * rail actually lists for it. */
+  const memberRecentPaths = (project: ProjectRecord) =>
+    recents
+      .filter((item) => projectContainsPath(project, item.path, families))
+      .map((item) => item.path);
+
+  const removeProjectEntry = (
+    path: string,
+    projectId: string | undefined,
+    purgeData: boolean,
+  ) => {
+    const project = projectId
+      ? storedProjects.find((entry) => entry.id === projectId)
+      : undefined;
+    if (!project) {
+      onRemoveProject?.(path, { purgeData });
+      return;
+    }
+    // Removing the project removes its rail rows and record — member
+    // checkouts, worktrees, branches and credentials stay on disk. Purge still
+    // applies the existing per-path session cleanup.
+    deleteProject(project.id);
+    const members = memberRecentPaths(project);
+    for (const member of members)
+      onRemoveProject?.(member, { purgeData });
+    if (!members.includes(path)) onRemoveProject?.(path, { purgeData });
+  };
+
   const onProjectMenuPick = (action: string) => {
     if (!projectMenu) return;
-    const { path, projectKey } = projectMenu;
+    const { path, projectKey, projectId } = projectMenu;
+    const displayName =
+      menuProject?.name ??
+      resolveTabGroupLabel(projectKey, groupLabels, basename(path));
     if (action === "pin" || action === "unpin") onTogglePin(path);
-    else if (action === "background") {
+    else if (action === "repositories") {
+      setRepositoriesProject({ path, projectId });
+    } else if (action === "background") {
       setBackgroundProject({
         project: projectKey,
-        name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
+        name: displayName,
       });
     } else if (action === "reveal") void revealPath(path);
     else if (action === "archive") {
-      onRemoveProject?.(path, { purgeData: false });
+      removeProjectEntry(path, projectId, false);
     } else if (action === "delete") {
-      setRemoving({
-        path,
-        name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
-      });
+      setRemoving({ path, name: displayName, projectId });
     }
   };
 
   const onConfirmDelete = () => {
     if (!removing) return;
-    onRemoveProject?.(removing.path, { purgeData: true });
+    removeProjectEntry(removing.path, removing.projectId, true);
     setRemoving(null);
   };
 
@@ -542,11 +637,14 @@ export function ProjectRail({
           x={projectMenu.x}
           y={projectMenu.y}
           groupId={projectMenu.projectKey}
-          label={resolveTabGroupLabel(
-            projectMenu.projectKey,
-            groupLabels,
-            basename(projectMenu.path),
-          )}
+          label={
+            menuProject?.name ??
+            resolveTabGroupLabel(
+              projectMenu.projectKey,
+              groupLabels,
+              basename(projectMenu.path),
+            )
+          }
           colorIndex={resolveTabGroupColorIndex(
             projectMenu.projectKey,
             groupColors,
@@ -599,6 +697,18 @@ export function ProjectRail({
           project={backgroundProject.project}
           name={backgroundProject.name}
           onClose={() => setBackgroundProject(null)}
+        />
+      ) : null}
+      {repositoriesProject ? (
+        <ProjectRepositories
+          path={repositoriesProject.path}
+          projectId={repositoriesProject.projectId}
+          families={families}
+          onOpenPath={(path) => {
+            setRepositoriesProject(null);
+            onSelectProject(path);
+          }}
+          onClose={() => setRepositoriesProject(null)}
         />
       ) : null}
       <div
@@ -840,7 +950,7 @@ function ProjectSection({
   groupMascots,
 }: {
   label: string;
-  items: RecentProject[];
+  items: RailProjectItem[];
   families: ReadonlyMap<string, RepositoryFamily>;
   emptyLabel?: string;
   onAdd?: () => void;
@@ -851,8 +961,12 @@ function ProjectSection({
   searchActive: boolean;
   onSelect: (path: string) => void;
   onTogglePin: (path: string) => void;
-  onContextMenu: (path: string, event: MouseEvent<HTMLElement>) => void;
-  onOpenMenu: (path: string, x: number, y: number) => void;
+  onContextMenu: (item: RailProjectItem, event: MouseEvent<HTMLElement>) => void;
+  onOpenMenu: (
+    item: RailProjectItem,
+    x: number,
+    y: number,
+  ) => void;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
   groupCustomColors: Record<string, string>;
@@ -888,6 +1002,7 @@ function ProjectSection({
             key={item.path}
             item={item}
             family={families.get(pathKey(item.path))}
+            families={families}
             cwd={cwd}
             busyPaths={busy}
             selected={!searchActive && sameProjectPath(item.path, cwd)}
@@ -914,15 +1029,279 @@ function ProjectSection({
 const nameClassName =
   "min-w-0 flex-1 truncate text-sm font-medium leading-tight";
 
+function useExpandedRow(key: string): [boolean | null, (next: boolean) => void] {
+  const [expanded, setExpanded] = useState<boolean | null>(null);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(key);
+      setExpanded(saved === null ? null : saved === "true");
+    } catch {
+      setExpanded(null);
+    }
+  }, [key]);
+  const set = (next: boolean) => {
+    setExpanded(next);
+    try {
+      localStorage.setItem(key, String(next));
+    } catch {
+      /* quota */
+    }
+  };
+  return [expanded, set];
+}
+
+function lastWorkingCopyPath(
+  commonDir: string,
+  family: RepositoryFamily | undefined,
+): string | null {
+  let last: string | null = null;
+  try {
+    last = localStorage.getItem(`monocode.worktreeLast:${commonDir}`);
+  } catch {
+    /* private mode */
+  }
+  return (
+    family?.worktrees.find(
+      (child) => !child.missing && last && sameProjectPath(child.path, last),
+    )?.path ?? null
+  );
+}
+
+function WorkingCopyRows({
+  family,
+  hidden,
+  cwd,
+  busyPaths,
+  recents,
+  onSelect,
+  onManage,
+}: {
+  family: RepositoryFamily;
+  hidden: string[];
+  cwd: string;
+  busyPaths: Set<string>;
+  recents: RecentProject[];
+  onSelect: (path: string) => void;
+  onManage: (event: MouseEvent<HTMLButtonElement>, path?: string) => void;
+}) {
+  const children = family.worktrees.filter(
+    (child) =>
+      sameProjectPath(child.path, cwd) ||
+      !hidden.some((path) => sameProjectPath(path, child.path)),
+  );
+  return (
+    <>
+      {children.map((child) => {
+        const name = workingCopyName(child, family);
+        const active = sameProjectPath(child.path, cwd);
+        const working = isBusyPath(child.path, busyPaths);
+        return (
+          <div
+            key={child.path}
+            className="group/working-copy relative flex min-w-0 items-center"
+          >
+            <button
+              type="button"
+              disabled={child.missing || !!child.prunable}
+              title={`${prettyCwd(child.path)}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
+              aria-current={active ? "true" : undefined}
+              className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 pr-6 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+              onClick={() => onSelect(child.path)}
+            >
+              <GitBranch
+                className="size-3 shrink-0 text-content/40"
+                strokeWidth={1.5}
+              />
+              <span className="min-w-0 flex-1 truncate">{name}</span>
+              {child.missing || child.prunable ? (
+                <span className="text-[10px]">Missing</span>
+              ) : working ? (
+                <span title="Working" aria-label="Working">
+                  <TerminalSpinner className="size-3" />
+                </span>
+              ) : active ? (
+                <Check
+                  className="size-3 shrink-0 text-content/45"
+                  strokeWidth={1.5}
+                />
+              ) : null}
+            </button>
+            <button
+              type="button"
+              title="Worktree details and cleanup"
+              aria-label={`Manage worktree ${name}`}
+              className="absolute right-0 rounded p-1 text-content/40 opacity-0 hover:bg-content/10 hover:text-content group-hover/working-copy:opacity-100 group-focus-within/working-copy:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-content/30"
+              onClick={(event) => onManage(event, child.path)}
+            >
+              <MoreHorizontal className="size-3" />
+            </button>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/** One repository row inside an expanded multi-repository project. Opens the
+ * repository's last working copy; its chevron reveals that repository's
+ * worktrees. */
+function ProjectRepositoryRow({
+  repo,
+  families,
+  hidden,
+  cwd,
+  busyPaths,
+  recents,
+  onSelect,
+}: {
+  repo: ProjectRecord["repositories"][number];
+  families: ReadonlyMap<string, RepositoryFamily>;
+  hidden: string[];
+  cwd: string;
+  busyPaths: Set<string>;
+  recents: RecentProject[];
+  onSelect: (path: string) => void;
+}) {
+  const anchor = useRef<HTMLButtonElement>(null);
+  const managePath = useRef<string | undefined>(undefined);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [working, setWorking] = useState(false);
+  const family = familyForRepository(repo, families);
+  const [expanded, setExpanded] = useExpandedRow(
+    `monocode.repoExpanded:${repo.id}`,
+  );
+  const visible = expanded ?? false;
+  const name = repositoryDisplayName(repo);
+  const wsl = wslLocation(repo.anchor);
+  const active = family
+    ? family.worktrees.some((child) => sameProjectPath(child.path, cwd))
+    : sameProjectPath(repo.anchor, cwd);
+  const openRepository = () =>
+    onSelect(
+      lastWorkingCopyPath(repo.commonDir, family) ??
+        (family?.worktrees.find((child) => child.main && !child.missing)?.path ||
+          repo.anchor),
+    );
+  return (
+    <div>
+      <div className="group/repository relative flex min-w-0 items-center">
+        {family ? (
+          <button
+            type="button"
+            aria-label={`Show working copies of ${name}`}
+            aria-expanded={visible}
+            onClick={() => setExpanded(!visible)}
+            className="shrink-0 rounded px-0.5 text-content/45 hover:text-content"
+          >
+            <ChevronDown
+              className={`size-3 ${visible ? "" : "-rotate-90"}`}
+            />
+          </button>
+        ) : null}
+        <button
+          type="button"
+          title={prettyCwd(repo.anchor)}
+          aria-current={active ? "true" : undefined}
+          className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 pr-6 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+          onClick={openRepository}
+        >
+          <FolderTree
+            className="size-3 shrink-0 text-content/40"
+            strokeWidth={1.5}
+          />
+          <span className="min-w-0 flex-1 truncate">{name}</span>
+          {wsl ? (
+            <span className="shrink-0 text-[10px] text-content/40">WSL</span>
+          ) : null}
+          {active ? (
+            <Check
+              className="size-3 shrink-0 text-content/45"
+              strokeWidth={1.5}
+            />
+          ) : null}
+        </button>
+        <button
+          type="button"
+          title="Repository worktrees"
+          aria-label={`Manage ${name} worktrees`}
+          className="absolute right-0 rounded p-1 text-content/40 opacity-0 hover:bg-content/10 hover:text-content group-hover/repository:opacity-100 group-focus-within/repository:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-content/30"
+          onClick={(event) => {
+            anchor.current = event.currentTarget;
+            setMenuOpen(true);
+          }}
+        >
+          <MoreHorizontal className="size-3" />
+        </button>
+      </div>
+      {visible && family ? (
+        <div className="my-0.5 ml-3">
+          <WorkingCopyRows
+            family={family}
+            hidden={hidden}
+            cwd={cwd}
+            busyPaths={busyPaths}
+            recents={recents}
+            onSelect={onSelect}
+            onManage={(event, path) => {
+              anchor.current = event.currentTarget;
+              setMenuOpen(true);
+              managePath.current = path;
+            }}
+          />
+        </div>
+      ) : null}
+      {menuOpen && (
+        <Popover
+          anchor={anchor}
+          side="right"
+          width={320}
+          maxHeight={380}
+          onDismiss={() => {
+            if (!working) {
+              setMenuOpen(false);
+              anchor.current?.focus();
+            }
+          }}
+          role="dialog"
+          aria-label={`${name} worktrees`}
+          className="flex flex-col overflow-hidden"
+        >
+          <WorktreePanel
+            key={managePath.current ?? ""}
+            initialCreate={false}
+            initialPath={managePath.current}
+            activeCwd={cwd}
+            cwd={
+              family?.worktrees.find(
+                (entry) => !entry.missing && !entry.prunable,
+              )?.path ?? repo.anchor
+            }
+            onClose={() => {
+              setMenuOpen(false);
+              anchor.current?.focus();
+            }}
+            onOpen={onSelect}
+            onBusyChange={setWorking}
+          />
+        </Popover>
+      )}
+    </div>
+  );
+}
+
 function ProjectFamilyCard(
   props: Parameters<typeof ProjectCard>[0] & {
     family?: RepositoryFamily;
+    families: ReadonlyMap<string, RepositoryFamily>;
     cwd: string;
     busyPaths: Set<string>;
   },
 ) {
-  const { family, cwd, busyPaths, onSelect } = props;
+  const { family, families, cwd, busyPaths, onSelect } = props;
+  const project = props.item.project;
+  const multiRepo = (project?.repositories.length ?? 0) > 1;
   const anchor = useRef<HTMLButtonElement>(null);
+  const managePath = useRef<string | undefined>(undefined);
   const [menu, setMenu] = useState<{ create: boolean; path?: string } | null>(
     null,
   );
@@ -933,45 +1312,60 @@ function ProjectFamilyCard(
   const hidden = hiddenWorkingCopies(hiddenRaw);
   const recents = loadRecents();
   const [working, setWorking] = useState(false);
-  const expandedKey = `monocode.worktreeExpanded:${family?.commonDir ?? props.item.path}`;
-  const [expanded, setExpanded] = useState<boolean | null>(null);
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(expandedKey);
-      setExpanded(saved === null ? null : saved === "true");
-    } catch {
-      setExpanded(null);
-    }
-  }, [expandedKey]);
+  const expandedKey = project
+    ? `monocode.projectExpanded:${project.id}`
+    : `monocode.worktreeExpanded:${family?.commonDir ?? props.item.path}`;
+  const [expanded, setExpanded] = useExpandedRow(expandedKey);
   const allChildren = family?.worktrees ?? [];
   const children = allChildren.filter(
     (child) =>
       sameProjectPath(child.path, cwd) ||
       !hidden.some((path) => sameProjectPath(path, child.path)),
   );
-  const visible = expanded ?? children.length > 1;
-  const selected = children.some((child) => sameProjectPath(child.path, cwd));
+  const visible = multiRepo
+    ? (expanded ?? false)
+    : (expanded ?? children.length > 1);
+  const selected = multiRepo
+    ? !!project && projectContainsPath(project, cwd, families)
+    : children.some((child) => sameProjectPath(child.path, cwd));
+  const busy =
+    props.busy ||
+    (!!project &&
+      project.repositories.some((repo) => {
+        const member = familyForRepository(repo, families);
+        return member
+          ? member.worktrees.some((copy) => isBusyPath(copy.path, busyPaths))
+          : isBusyPath(repo.anchor, busyPaths);
+      }));
   const lastKey = `monocode.worktreeLast:${family?.commonDir ?? props.item.path}`;
+  const inFamily = children.some((child) => sameProjectPath(child.path, cwd));
   useEffect(() => {
-    if (selected) {
+    if (inFamily) {
       try {
         localStorage.setItem(lastKey, cwd);
       } catch {
         /* quota */
       }
     }
-  }, [selected, lastKey, cwd]);
+  }, [inFamily, lastKey, cwd]);
+  // Expanding a multi-repository row verifies member repositories on demand so
+  // collapsed rows never probe extra Git state.
+  useEffect(() => {
+    if (!visible || !project) return;
+    for (const repo of project.repositories)
+      if (!familyForRepository(repo, families))
+        void probeRepositoryFamily(repo.anchor);
+  }, [visible, project, families]);
   const openLast = () => {
-    let last: string | null = null;
-    try {
-      last = localStorage.getItem(lastKey);
-    } catch {
-      /* private mode */
+    if (
+      project?.lastPath &&
+      projectContainsPath(project, project.lastPath, families)
+    ) {
+      onSelect(project.lastPath);
+      return;
     }
     onSelect(
-      children.find(
-        (child) => !child.missing && last && sameProjectPath(child.path, last),
-      )?.path ?? props.item.path,
+      lastWorkingCopyPath(family?.commonDir ?? "", family) ?? props.item.path,
     );
   };
   return (
@@ -979,82 +1373,56 @@ function ProjectFamilyCard(
       <ProjectCard
         {...props}
         selected={!visible && (props.selected || selected)}
+        busy={busy}
         onSelect={openLast}
         worktreeControls={
-          family
+          family || multiRepo
             ? {
                 expanded: visible,
-                toggle: () => {
-                  setExpanded(!visible);
-                  try {
-                    localStorage.setItem(expandedKey, String(!visible));
-                  } catch {
-                    /* quota */
-                  }
-                },
-                create: (event) => { anchor.current = event.currentTarget; setMenu({ create: true }); },
+                toggle: () => setExpanded(!visible),
+                create: (event) => { anchor.current = event.currentTarget; managePath.current = undefined; setMenu({ create: true }); },
               }
             : undefined
         }
       />
-      {visible && children.length > 0 && (
+      {visible && multiRepo && project && (
         <div className="my-0.5 ml-3">
-          {children.map((child) => {
-            const name = family
-              ? workingCopyName(child, family)
-              : basename(child.path);
-            const active = sameProjectPath(child.path, cwd);
-            const working = isBusyPath(child.path, busyPaths);
-            return (
-              <div
-                key={child.path}
-                className="group/working-copy relative flex min-w-0 items-center"
-              >
-                <button
-                  type="button"
-                  disabled={child.missing || !!child.prunable}
-                  title={`${prettyCwd(child.path)}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
-                  aria-current={active ? "true" : undefined}
-                  className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 pr-6 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
-                  onClick={() => onSelect(child.path)}
-                >
-                  <GitBranch
-                    className="size-3 shrink-0 text-content/40"
-                    strokeWidth={1.5}
-                  />
-                  <span className="min-w-0 flex-1 truncate">{name}</span>
-                  {child.missing || child.prunable ? (
-                    <span className="text-[10px]">Missing</span>
-                  ) : working ? (
-                    <span title="Working" aria-label="Working">
-                      <TerminalSpinner className="size-3" />
-                    </span>
-                  ) : active ? (
-                    <Check
-                      className="size-3 shrink-0 text-content/45"
-                      strokeWidth={1.5}
-                    />
-                  ) : null}
-                </button>
-                <button
-                  type="button"
-                  title="Worktree details and cleanup"
-                  aria-label={`Manage worktree ${name}`}
-                  className="absolute right-0 rounded p-1 text-content/40 opacity-0 hover:bg-content/10 hover:text-content group-hover/working-copy:opacity-100 group-focus-within/working-copy:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-content/30"
-                  onClick={(event) => { anchor.current = event.currentTarget; setMenu({ create: false, path: child.path }); }}
-                >
-                  <MoreHorizontal className="size-3" />
-                </button>
-              </div>
-            );
-          })}
+          {project.repositories.map((repo) => (
+            <ProjectRepositoryRow
+              key={repo.id}
+              repo={repo}
+              families={families}
+              hidden={hidden}
+              cwd={cwd}
+              busyPaths={busyPaths}
+              recents={recents}
+              onSelect={onSelect}
+            />
+          ))}
         </div>
       )}
-      {allChildren.length > children.length && (
+      {visible && !multiRepo && family && (
+        <div className="my-0.5 ml-3">
+          <WorkingCopyRows
+            family={family}
+            hidden={hidden}
+            cwd={cwd}
+            busyPaths={busyPaths}
+            recents={recents}
+            onSelect={onSelect}
+            onManage={(event, path) => {
+              anchor.current = event.currentTarget;
+              managePath.current = path;
+              setMenu({ create: false, path });
+            }}
+          />
+        </div>
+      )}
+      {visible && !multiRepo && allChildren.length > children.length && (
         <button
           type="button"
           className="w-full rounded px-2 py-1 text-left text-[10px] text-content/50 hover:bg-content/5"
-          onClick={(event) => { anchor.current = event.currentTarget; setMenu({ create: false }); }}
+          onClick={(event) => { anchor.current = event.currentTarget; managePath.current = undefined; setMenu({ create: false }); }}
         >
           {allChildren.length - children.length} hidden · Manage worktrees
         </button>
@@ -1110,7 +1478,7 @@ function ProjectCard({
   groupLogos,
   groupMascots,
 }: {
-  item: RecentProject;
+  item: RailProjectItem;
   worktreeControls?: {
     expanded: boolean;
     toggle: () => void;
@@ -1123,8 +1491,8 @@ function ProjectCard({
   index: number;
   onSelect: (path: string) => void;
   onTogglePin: (path: string) => void;
-  onContextMenu: (path: string, event: MouseEvent<HTMLElement>) => void;
-  onOpenMenu: (path: string, x: number, y: number) => void;
+  onContextMenu: (item: RailProjectItem, event: MouseEvent<HTMLElement>) => void;
+  onOpenMenu: (item: RailProjectItem, x: number, y: number) => void;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
   groupCustomColors: Record<string, string>;
@@ -1134,7 +1502,9 @@ function ProjectCard({
   const fallbackName = basename(item.path);
   const key = projectKey(item.path);
   const seed = projectName(item.path);
-  const name = resolveTabGroupLabel(key, groupLabels, fallbackName);
+  const name =
+    item.project?.name ??
+    resolveTabGroupLabel(key, groupLabels, fallbackName);
   const logoPath = resolveTabGroupLogo(key, groupLogos);
   const color = resolveTabGroupColor(key, groupColors, groupCustomColors, seed);
   const dragging = sortable.draggingId === item.path;
@@ -1179,7 +1549,7 @@ function ProjectCard({
         if (sortable.consumeClick()) return;
         onSelect(item.path);
       }}
-      onContextMenu={(event) => onContextMenu(item.path, event)}
+      onContextMenu={(event) => onContextMenu(item, event)}
     >
       {showStart ? (
         <div className="pointer-events-none absolute inset-x-2 top-0 z-20 h-0.5 rounded-full bg-accent" />
@@ -1260,7 +1630,7 @@ function ProjectCard({
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          onOpenMenu(item.path, event.clientX, event.clientY);
+          onOpenMenu(item, event.clientX, event.clientY);
         }}
         className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
       >

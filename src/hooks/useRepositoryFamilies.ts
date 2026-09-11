@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { collectRailProjects, type RecentProject } from "../lib/recents";
+import { loadProjects } from "../lib/projects";
 import { pathKey } from "../lib/paths";
 import { subscribeGitChanged } from "../lib/fs";
 import {
@@ -25,6 +26,11 @@ export async function discoverRepositoryFamilies(
       return family ? [pathKey(family.commonDir)] : [];
     }),
   );
+  // Stored project members stay cached even when no member path is a recent —
+  // expansion and the repositories sheet probe them on demand.
+  for (const project of loadProjects())
+    for (const repo of project.repositories)
+      retained.add(pathKey(repo.commonDir));
   publishRepositoryFamilies(
     new Map(
       [...previous].filter(([, family]) =>
@@ -94,6 +100,31 @@ export async function discoverRepositoryFamilies(
         publishRepositoryFamilies(verified);
       }
     }
+  }
+}
+
+/** Probes one path and merges the verified family into the shared cache
+ * without pruning — for on-demand member loading (project popover, expanded
+ * project rows). Returns null when the path is not a Git repository. */
+export async function probeRepositoryFamily(
+  path: string,
+): Promise<RepositoryFamily | null> {
+  try {
+    const family = await invoke<RepositoryFamily>("git_repository_family", {
+      cwd: path,
+    });
+    const verified = new Map(getVerifiedFamilies());
+    const key = pathKey(family.commonDir);
+    for (const [entry, value] of verified)
+      if (pathKey(value.commonDir) === key) verified.delete(entry);
+    verified.set(pathKey(path), family);
+    for (const child of family.worktrees)
+      if (!child.missing && !child.prunable)
+        verified.set(pathKey(child.path), family);
+    publishRepositoryFamilies(verified);
+    return family;
+  } catch {
+    return null;
   }
 }
 

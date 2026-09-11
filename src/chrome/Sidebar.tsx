@@ -1806,11 +1806,13 @@ function SidebarProjectPicker({
                   const current = sameProjectPath(item.path, cwd);
                   const itemKey = projectKey(item.path);
                   const itemSeed = projectName(item.path);
-                  const itemLabel = resolveTabGroupLabel(
-                    itemKey,
-                    groupLabels,
-                    basename(item.path) || itemSeed,
-                  );
+                  const itemLabel =
+                    item.project?.name ??
+                    resolveTabGroupLabel(
+                      itemKey,
+                      groupLabels,
+                      basename(item.path) || itemSeed,
+                    );
                   const itemLogo = resolveTabGroupLogo(itemKey, groupLogos);
                   const itemColor = resolveTabGroupColor(
                     itemKey,

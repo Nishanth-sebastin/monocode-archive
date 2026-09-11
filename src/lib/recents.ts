@@ -1,5 +1,13 @@
-import { pathKey, prettyCwd, slash } from "./paths";
+import { looksLikeProject, pathKey, slash } from "./paths";
+import {
+  groupRailProjectsByMembership,
+  loadProjects,
+  type ProjectRecord,
+  type RailProjectItem,
+} from "./projects";
 import { getVerifiedFamilies, groupRepositoryFamilies, type RepositoryFamily } from "./repositoryFamilies";
+
+export { looksLikeProject };
 
 const KEY = "monocode.recentProjects";
 const RAIL_ORDER_KEY = "monocode.projectRailOrder";
@@ -209,8 +217,8 @@ export function lastProjectPath(): string | null {
 }
 
 export type ProjectRailSections = {
-  pinned: RecentProject[];
-  projects: RecentProject[];
+  pinned: RailProjectItem[];
+  projects: RailProjectItem[];
 };
 
 function readPathList(key: string): string[] {
@@ -326,8 +334,16 @@ export function projectRailSections(
   order: string[],
   pinnedPaths: string[],
   families: ReadonlyMap<string, RepositoryFamily> = getVerifiedFamilies(),
+  storedProjects: readonly ProjectRecord[] = loadProjects(),
 ): ProjectRailSections {
   const projects = collectRailProjects(recents, currentCwd);
+  // Stored projects keep their rail row from the anchor even when no member
+  // path is a recent; the anchor keys saved order, pins and appearance.
+  for (const project of storedProjects) {
+    const key = pathKey(project.anchor);
+    if (!projects.has(key))
+      projects.set(key, { path: project.anchor, openedAt: 0 });
+  }
   const syncedOrder = syncProjectRailOrder(order, projects);
   const pinnedSet = new Set(pinnedPaths.map(pathKey));
   const pinned: RecentProject[] = [];
@@ -339,14 +355,18 @@ export function projectRailSections(
     if (pinnedSet.has(key)) pinned.push(item);
     else unpinned.push(item);
   }
-  return groupRepositoryFamilies({ pinned, projects: unpinned }, families);
+  return groupRailProjectsByMembership(
+    groupRepositoryFamilies({ pinned, projects: unpinned }, families),
+    families,
+    storedProjects,
+  );
 }
 
 /** Recents plus the current folder when it is a project not yet remembered. */
 export function projectRailItems(
   recents: RecentProject[],
   currentCwd: string,
-): RecentProject[] {
+): RailProjectItem[] {
   const projects = collectRailProjects(recents, currentCwd);
   const order = syncProjectRailOrder(loadProjectRailOrder(), projects);
   const { pinned, projects: unpinned } = projectRailSections(
@@ -356,16 +376,4 @@ export function projectRailItems(
     loadPinnedProjects(),
   );
   return [...pinned, ...unpinned];
-}
-
-/** True if this looks like a user project, not an app bundle or system root. */
-export function looksLikeProject(path: string): boolean {
-  if (!path || path === "/" || path === "~") return false;
-  const normalized = slash(path).replace(/\/+$/, "") || "/";
-  if (/^[A-Za-z]:$/.test(normalized) || normalized === "/") return false;
-  // Home itself arrives expanded (`/Users/me`), so the `~` check above misses
-  // it. Indexing it walks `~/Library`, which trips the OS consent prompt.
-  if (prettyCwd(path) === "~") return false;
-  if (path.includes(".app/") || path.includes(".app\\")) return false;
-  return true;
 }

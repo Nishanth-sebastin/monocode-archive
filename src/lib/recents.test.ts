@@ -1,4 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { pathKey } from "./paths";
+import {
+  addRepositoryToProject,
+  ensureProjectForPath,
+  loadProjects,
+} from "./projects";
+import type { RepositoryFamily } from "./repositoryFamilies";
 import {
   archiveProject,
   forgetProject,
@@ -126,6 +133,111 @@ describe("projectRailItems", () => {
         (item) => item.path,
       ),
     ).toEqual(["/tmp/app"]);
+  });
+});
+
+describe("project grouping on the rail", () => {
+  beforeEach(mockLocalStorage);
+  afterEach(mockLocalStorage);
+
+  function family(commonDir: string, checkout: string): RepositoryFamily {
+    return {
+      commonDir,
+      checkout,
+      worktrees: [
+        {
+          path: checkout,
+          head: "main",
+          branch: "main",
+          main: true,
+          missing: false,
+          locked: null,
+          prunable: null,
+        },
+      ],
+    };
+  }
+
+  it("collapses two member recents into one project row and keeps order", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    addRepositoryToProject(project.id, {
+      commonDir: "/tmp/lib/.git",
+      anchor: "/tmp/lib",
+    });
+    const families = new Map<string, RepositoryFamily>([
+      [pathKey("/tmp/app"), family("/tmp/app/.git", "/tmp/app")],
+      [pathKey("/tmp/lib"), family("/tmp/lib/.git", "/tmp/lib")],
+    ]);
+    const sections = projectRailSections(
+      [
+        { path: "/tmp/app", openedAt: 1 },
+        { path: "/tmp/lib", openedAt: 2 },
+        { path: "/tmp/else", openedAt: 3 },
+      ],
+      "/tmp/app",
+      ["/tmp/else", "/tmp/lib", "/tmp/app"],
+      [],
+      families,
+      loadProjects(),
+    );
+    expect(sections.projects.map((item) => item.path)).toEqual([
+      "/tmp/else",
+      "/tmp/app",
+    ]);
+    expect(sections.projects[0].project).toBeUndefined();
+    expect(sections.projects[1].project?.id).toBe(project.id);
+  });
+
+  it("keeps the pinned position when a member recent is pinned", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    addRepositoryToProject(project.id, {
+      commonDir: "/tmp/lib/.git",
+      anchor: "/tmp/lib",
+    });
+    const families = new Map<string, RepositoryFamily>([
+      [pathKey("/tmp/app"), family("/tmp/app/.git", "/tmp/app")],
+      [pathKey("/tmp/lib"), family("/tmp/lib/.git", "/tmp/lib")],
+    ]);
+    const sections = projectRailSections(
+      [
+        { path: "/tmp/app", openedAt: 1 },
+        { path: "/tmp/lib", openedAt: 2 },
+      ],
+      "/tmp/app",
+      ["/tmp/app", "/tmp/lib"],
+      ["/tmp/lib"],
+      families,
+      loadProjects(),
+    );
+    expect(sections.pinned.map((item) => item.path)).toEqual(["/tmp/app"]);
+    expect(sections.pinned[0].project?.id).toBe(project.id);
+    expect(sections.projects).toEqual([]);
+  });
+
+  it("renders a stored project whose members are not recents", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    const sections = projectRailSections(
+      [{ path: "/tmp/else", openedAt: 1 }],
+      "/tmp/else",
+      ["/tmp/else", "/tmp/app"],
+      [],
+      new Map(),
+      [project],
+    );
+    expect(sections.projects.map((item) => item.path)).toEqual([
+      "/tmp/else",
+      "/tmp/app",
+    ]);
+    expect(sections.projects[1].project?.id).toBe(project.id);
   });
 });
 
