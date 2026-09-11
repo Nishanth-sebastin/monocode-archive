@@ -100,7 +100,7 @@ export async function resolveLinkedWorkItem(
 export function linkedWorkItemFromInboxItem(
   item: InboxItem,
 ): LinkedWorkItem | null {
-  if (!validNumber(item.number)) return null;
+  if (!validNumber(item.number) || item.kind === "ci") return null;
   if (item.provider === "github") {
     if ((item.kind !== "issue" && item.kind !== "pr") || !validRepo(item.repo))
       return null;

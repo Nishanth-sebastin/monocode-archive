@@ -35,6 +35,8 @@ pub struct CiLookup {
     target: CiTarget,
     head: CiHead,
     continuation: Option<String>,
+    #[serde(default, rename = "runId")]
+    run_id: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -300,6 +302,15 @@ pub async fn azure_ci_lookup(app: AppHandle, input: CiLookup) -> Result<Value, S
         let response: Value = serde_json::from_slice(&raw).map_err(|_| "Azure returned an invalid run list")?;
         let mut items = Vec::new();
         for run in response["value"].as_array().ok_or("Azure returned an invalid run list")?.iter().take(PAGE) { verify_run(run,&target)?; items.push(summary(run,&input.head)); }
+        if let Some(id) = input.run_id {
+            if id == 0 || id > i32::MAX as u32 { return Err("Invalid selected run ID".into()); }
+            if !items.iter().any(|run| run["id"] == id) {
+                let run = get(&config, &format!("{}/builds/{id}", path(project)?), &[])?;
+                verify_run(&run, &target)?;
+                if run["id"] != id { return Err("Azure returned a different run".into()); }
+                items.insert(0, summary(&run, &input.head));
+            }
+        }
         connection(&app,&target)?; check_head(&input.head)?;
         Ok(json!({"target":target,"definitionName":definition["name"],"projectName":definition["project"]["name"],"items":items,"continuation":continuation,"checkedAt":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()}))
     }).await.map_err(|_| "Pipeline lookup failed")?

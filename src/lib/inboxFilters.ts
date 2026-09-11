@@ -60,6 +60,48 @@ export const INBOX_SOURCE_LABELS: Record<InboxSource, string> = {
   github: "GitHub", linear: "Linear", gitlab: "GitLab", jira: "Jira", azure: "Azure",
 };
 
+export type ConnectableInboxSource = InboxSource;
+
+/** `null` means the status check has not resolved yet. */
+export type InboxSourceConnections = Record<
+  ConnectableInboxSource,
+  boolean | null
+>;
+
+
+export function visibleInboxSources(
+  connections: InboxSourceConnections,
+): InboxSource[] {
+  const sources: InboxSource[] = [];
+  if (connections.github !== false) sources.push("github");
+  if (connections.linear !== false) sources.push("linear");
+  if (connections.gitlab !== false) sources.push("gitlab");
+  if (connections.jira !== false) sources.push("jira");
+  if (connections.azure !== false) sources.push("azure");
+  return sources;
+}
+
+export function connectableInboxSources(
+  connections: InboxSourceConnections,
+): ConnectableInboxSource[] {
+  const sources: ConnectableInboxSource[] = [];
+  if (connections.github === false) sources.push("github");
+  if (connections.linear === false) sources.push("linear");
+  if (connections.gitlab === false) sources.push("gitlab");
+  if (connections.jira === false) sources.push("jira");
+  if (connections.azure === false) sources.push("azure");
+  return sources;
+}
+
+export function resolveInboxSource(
+  source: InboxSource,
+  connections: InboxSourceConnections,
+  preferredSources: InboxSource[] = INBOX_SOURCES,
+): InboxSource {
+  const visible = visibleInboxSources(connections).filter(source => preferredSources.includes(source));
+  return visible.includes(source) ? source : (visible[0] ?? "github");
+}
+
 const FILTERS_KEY = "monocode.inboxFilters";
 const SOURCE_KEY = "monocode.inboxSource";
 const VISIBLE_SOURCES_KEY = "monocode.inboxVisibleSources";
@@ -81,6 +123,15 @@ export function saveVisibleInboxSources(sources: InboxSource[]) {
     // private mode / quota
   }
 }
+const CONNECTIONS_KEY = "monocode.inboxConnections";
+
+const UNKNOWN_CONNECTIONS: InboxSourceConnections = {
+  github: null,
+  linear: null,
+  gitlab: null,
+  jira: null,
+  azure: null,
+};
 
 export function loadInboxSource(): InboxSource {
   try {
@@ -95,6 +146,40 @@ export function loadInboxSource(): InboxSource {
 export function saveInboxSource(source: InboxSource) {
   try {
     localStorage.setItem(SOURCE_KEY, source);
+  } catch {
+    // private mode / quota
+  }
+}
+
+function connectFlag(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+/**
+ * Seeded from the last known answer so a returning user does not watch every
+ * tab paint and then drop two. A wrong guess corrects itself on the read.
+ */
+export function loadInboxConnections(): InboxSourceConnections {
+  try {
+    const raw = localStorage.getItem(CONNECTIONS_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== "object") return UNKNOWN_CONNECTIONS;
+    const record = parsed as Record<string, unknown>;
+    return {
+      github: connectFlag(record.github),
+      linear: connectFlag(record.linear),
+      gitlab: connectFlag(record.gitlab),
+      jira: connectFlag(record.jira),
+      azure: connectFlag(record.azure),
+    };
+  } catch {
+    return UNKNOWN_CONNECTIONS;
+  }
+}
+
+export function saveInboxConnections(connections: InboxSourceConnections) {
+  try {
+    localStorage.setItem(CONNECTIONS_KEY, JSON.stringify(connections));
   } catch {
     // private mode / quota
   }
@@ -296,7 +381,7 @@ export function applyInboxFilters(
 ): InboxItem[] {
   const scoped = source ? filterInboxByProvider(items, source) : [...items];
   const hiddenProjects = source === "linear" || source === "jira" || source === "azure" ? [] : filters.hiddenProjects;
-  const hiddenKinds = source === "linear" || source === "jira" || source === "azure" ? [] : filters.hiddenKinds;
+  const hiddenKinds = source === "linear" || source === "jira" ? [] : filters.hiddenKinds;
   return filterInboxItems(
     filterInboxByStatus(
       filterInboxByTime(
@@ -320,7 +405,7 @@ export function statusFilterForSource(
   status: InboxStatusFilter,
   source?: InboxSource,
 ): InboxStatusFilter {
-  if (source !== "linear" && source !== "jira" && source !== "azure") return status;
+  if (source !== "linear" && source !== "jira") return status;
   return {
     open: status.open,
     closed: status.closed,
@@ -330,7 +415,7 @@ export function statusFilterForSource(
 }
 
 function isGithubInboxKind(value: unknown): value is InboxKind {
-  return value === "issue" || value === "pr";
+  return value === "issue" || value === "pr" || value === "ci" || value === "azure";
 }
 
 function isTimeFilter(value: unknown): value is InboxTimeFilter {

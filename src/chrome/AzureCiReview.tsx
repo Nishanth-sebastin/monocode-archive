@@ -24,6 +24,7 @@ import {
   loadCiSources,
   parsePipelineUrl,
   saveCiSources,
+  type CiTarget,
   type CiCheckout,
   type CiHead,
   type CiJob,
@@ -50,6 +51,7 @@ const scheduleInitialLoad = (action: () => Promise<void>, current: () => boolean
 const drafts = new Map<string, string>();
 
 export function AzureCiReview({
+  inboxTarget,
   cwd,
   branch,
   sourceSessionId,
@@ -57,6 +59,7 @@ export function AzureCiReview({
   onClose,
   onReveal,
 }: {
+  inboxTarget?: CiTarget;
   cwd: string;
   branch: string;
   sourceSessionId?: string;
@@ -73,6 +76,7 @@ export function AzureCiReview({
   };
   return enabled ? (
     <CiPanel
+      inboxTarget={inboxTarget}
       key={ciScope(cwd, branch, sourceSessionId)}
       cwd={cwd}
       branch={branch}
@@ -86,6 +90,7 @@ export function AzureCiReview({
 }
 
 function CiPanel({
+  inboxTarget,
   cwd,
   branch,
   session,
@@ -94,6 +99,7 @@ function CiPanel({
   onClose,
   onReveal,
 }: {
+  inboxTarget?: CiTarget;
   cwd: string;
   branch: string;
   session?: string;
@@ -249,7 +255,7 @@ function CiPanel({
           >
             Refresh
           </button>
-          {!adding ? (
+          {!inboxTarget && !adding ? (
             <button
               className={`${button} bg-content/10`}
               disabled={!status?.connected}
@@ -336,11 +342,12 @@ function CiPanel({
           </form>
         ) : null}
         {checkout
-          ? sources.map((source, index) => (
+          ? sources.filter(source => !inboxTarget || ciKey(source.target) === ciKey(inboxTarget)).map((source, index) => (
               <CiSourcePanel
                 key={`${ciKey(source.target)}:${checkout.commit}`}
                 refreshVersion={version}
                 autoDetails={index === 0}
+                embedded={!!inboxTarget}
                 source={source}
                 head={{
                   cwd,
@@ -382,6 +389,7 @@ function CiPanel({
 }
 
 function CiSourcePanel({
+  embedded,
   autoDetails,
   refreshVersion,
   source,
@@ -394,6 +402,7 @@ function CiSourcePanel({
   onRefreshEvidence,
   repairInstruction,
 }: {
+  embedded: boolean;
   autoDetails: boolean;
   refreshVersion: number;
   source: CiSource;
@@ -444,7 +453,7 @@ function CiSourcePanel({
   };
   const refresh = (continuation: string | null = null) =>
     run(async (current) => {
-      const next = await ciLookup(source.target, head, continuation);
+      const next = await ciLookup(source.target, head, continuation, !continuation ? source.last?.run.id : undefined);
       if (!current()) return;
       setPage(next);
       const unchanged =
@@ -454,7 +463,7 @@ function CiSourcePanel({
             value.id === selected.id && value.revision === selected.revision,
         );
       if (!selected && !continuation && autoDetails) {
-        const initial = next.items.find(value => value.id === source.last?.run.id && ciMatches(value)) ?? next.items.find(ciMatches);
+        const initial = next.items.find(value => value.id === source.last?.run.id) ?? next.items.find(ciMatches);
         if (initial) await readSelection(initial, current);
       } else if (!unchanged) {
         setSelected(undefined);
@@ -586,9 +595,9 @@ function CiSourcePanel({
           <br />
           {source.remote}
         </p>
-        <button className={button} disabled={busy} onClick={onRemove}>
+        {!embedded ? <button className={button} disabled={busy} onClick={onRemove}>
           Disconnect pipeline
-        </button>
+        </button> : null}
       </details>
       <div className="flex flex-wrap gap-1">
         <button

@@ -99,7 +99,7 @@ export function InboxFiltersMenu({
   onVisibleSourcesChange,
   azure,
 }: Props) {
-  const ticket = source === "linear" || source === "jira" || source === "azure";
+  const ticket = source === "linear" || source === "jira";
   const hiddenProjects = new Set(filters.hiddenProjects);
   const hiddenLinearProjects = new Set(filters.hiddenLinearProjects);
   const hiddenTeams = new Set(hiddenLinearTeamIds);
@@ -245,7 +245,7 @@ export function InboxFiltersMenu({
       {!ticket ? (
         <>
           <SectionLabel>Type</SectionLabel>
-          {KIND_OPTIONS.map((option) => (
+          {(source === "azure" ? [...KIND_OPTIONS.map(option => option.id === "issue" ? {...option,id:"azure" as const} : option), {id:"ci" as const,label:"CI",icon:<CircleDot className="size-3.5" />} ] : KIND_OPTIONS).map((option) => (
             <FilterItem
               key={option.id}
               label={
@@ -335,7 +335,7 @@ export function InboxFiltersMenu({
         </>
       ) : null}
 
-      {!ticket && projects.length > 0 ? (
+      {!ticket && source !== "azure" && projects.length > 0 ? (
         <>
           <SectionLabel>Projects</SectionLabel>
           {projects.map((project) => (

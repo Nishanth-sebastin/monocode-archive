@@ -98,9 +98,10 @@ export function ciLookup(
   target: CiTarget,
   head: CiHead,
   continuation: string | null = null,
+  runId?: number,
 ) {
   return invoke<CiPage>("azure_ci_lookup", {
-    input: { target, head, continuation },
+    input: { target, head, continuation, ...(runId ? {runId} : {}) },
   });
 }
 export function ciRead<T>(

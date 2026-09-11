@@ -1,3 +1,4 @@
+import { azureDeliveryContext } from "./azureInbox";
 import { invoke } from "@tauri-apps/api/core";
 import {
   attachmentsFromFiles,
@@ -63,6 +64,7 @@ export async function readContext(
   item: InboxItem,
   pages = 1,
 ): Promise<ContextDocument> {
+  if (item.delivery) return azureDeliveryContext(item, pages);
   const raw = await invoke<
     Omit<ContextDocument, "description" | "comments"> & {
       adf: boolean;

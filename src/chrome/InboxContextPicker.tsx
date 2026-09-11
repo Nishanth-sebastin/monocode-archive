@@ -219,7 +219,7 @@ export function InboxContextPicker({
             action === "send"
               ? "Send to agent"
               : action === "ask"
-                ? "Ask about this ticket"
+                ? item.kind === "ci" ? "Ask about this CI run" : item.kind === "pr" ? "Ask about this PR" : "Ask about this ticket"
                 : "Agent context"
           }
           description="Review the context for your next message."
@@ -251,7 +251,7 @@ export function InboxContextPicker({
               </div>
             ) : null}
             <p className="text-content/45">
-              Ticket title and link always included.
+              Title and link always included.
             </p>
             <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-content/10 p-3 hover:bg-content/5">
               <ContextCheckbox
@@ -264,7 +264,7 @@ export function InboxContextPicker({
               <span className="min-w-0 flex-1">
                 <span className="block font-medium">Description</span>
                 <span className="block text-[12px] text-content/45">
-                  Ticket details and requirements
+                  {item.kind === "ci" ? "Run details and revision" : item.kind === "pr" ? "PR description and revision" : "Ticket details and requirements"}
                 </span>
               </span>
             </label>

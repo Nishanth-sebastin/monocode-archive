@@ -1,5 +1,7 @@
+import { Select } from "./Select";
+import { deliveryProvider, saveDeliveryProvider, repositoryProvider, openGitHubDelivery, DELIVERY_PROVIDERS_CHANGED, type DeliveryProvider } from "../lib/deliveryProviders";
 import { loadAzurePrAssociations, AZURE_PR_ASSOCIATIONS_CHANGED } from "../lib/azureRepos";
-import { loadCiSources, ciState, AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
+import { loadCiSources, ciState, ciContext, AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
 import type { DeliveryTabSource } from "../lib/layout";
 import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
 import { ContextCheckbox } from "./InboxContextPicker";
@@ -131,14 +133,51 @@ export function GitChangesPanel({
     window.addEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, refresh);
     window.addEventListener(AZURE_CI_SOURCES_CHANGED, refresh);
     window.addEventListener("storage", refresh);
+    window.addEventListener(DELIVERY_PROVIDERS_CHANGED, refresh);
     return () => {
       window.removeEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, refresh);
       window.removeEventListener(AZURE_CI_SOURCES_CHANGED, refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener(DELIVERY_PROVIDERS_CHANGED, refresh);
     };
   }, []);
   const prs = loadAzurePrAssociations(cwd, index?.branch ?? "", sourceSessionId);
   const pipelines = loadCiSources(cwd, index?.branch ?? "", sourceSessionId);
+
+  const [repository, setRepository] = useState<{cwd: string; branch: string; provider?: DeliveryProvider}>();
+  const [choosingProviders, setChoosingProviders] = useState(false);
+  const [deliveryError, setDeliveryError] = useState("");
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
+  const deliveryGeneration = useRef(0);
+  const deliveryPending = useRef(false);
+  useEffect(() => {
+    const generation = ++deliveryGeneration.current;
+    setRepository(undefined);
+    setDeliveryError("");
+    setDeliveryBusy(false);
+    deliveryPending.current = false;
+    if (enabled && index?.branch) void ciContext(cwd).then(context => {
+      if (generation === deliveryGeneration.current && context?.branch === index.branch)
+        setRepository({cwd, branch: context.branch, provider: repositoryProvider(context.remotes, index.remote)});
+    }).catch(() => { /* Explicit provider selection remains available. */ });
+    return () => { deliveryGeneration.current++; };
+  }, [cwd, index?.branch, index?.remote, sourceSessionId, enabled]);
+  const defaultProvider = repository?.cwd === cwd && repository.branch === index?.branch ? repository.provider : undefined;
+  const providerFor = (kind: "pr" | "ci") => deliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind)
+    ?? ((kind === "pr" ? prs.length : pipelines.length) ? "azure" : defaultProvider);
+  const openDelivery = async (kind: "pr" | "ci") => {
+    const provider = providerFor(kind);
+    if (!provider) { setChoosingProviders(true); return; }
+    if (deliveryPending.current) return;
+    deliveryPending.current = true;
+    const generation = deliveryGeneration.current;
+    setDeliveryBusy(true); setDeliveryError("");
+    try {
+      if (provider === "github") await openGitHubDelivery(cwd, kind, () => generation === deliveryGeneration.current);
+      else onOpenDelivery?.(cwd, {kind, branch: index?.branch ?? "", sourceSessionId});
+    } catch (error) { if (generation === deliveryGeneration.current) setDeliveryError(String(error instanceof Error ? error.message : error)); }
+    finally { if (generation === deliveryGeneration.current) { deliveryPending.current = false; setDeliveryBusy(false); } }
+  };
 
   const paneRef = useRef<HTMLDivElement>(null);
   const [graphHeight, setGraphHeight] = useState(loadGraphPanelHeight);
@@ -189,23 +228,21 @@ export function GitChangesPanel({
       <div className="shrink-0 border-b border-content/10 py-1">
         {(
           [
-            ["pr", "Pull requests", "Azure Repos"],
-            ["ci", "CI", "Azure Pipelines"],
+            ["pr", "Pull requests"],
+            ["ci", "CI"],
           ] as const
-        ).map(([kind, label, provider]) => (
+        ).map(([kind, label]) => {
+          const provider = providerFor(kind);
+          const providerLabel = provider === "github" ? (kind === "pr" ? "GitHub" : "GitHub checks") : provider === "azure" ? (kind === "pr" ? "Azure Repos" : "Azure Pipelines") : "Choose provider";
+          const linked = provider === "azure";
+          return (
           <button
             key={kind}
             type="button"
             aria-label={label}
-            disabled={!enabled || !index || !onOpenDelivery}
+            disabled={!enabled || !index || deliveryBusy || (provider === "azure" && !onOpenDelivery)}
             className="group flex min-h-9 w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-content/70 hover:bg-content/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent disabled:opacity-40"
-            onClick={() =>
-              onOpenDelivery?.(cwd, {
-                kind,
-                branch: index?.branch ?? "",
-                sourceSessionId,
-              })
-            }
+            onClick={() => void openDelivery(kind)}
           >
             {kind === "pr" ? (
               <GitPullRequest
@@ -219,11 +256,12 @@ export function GitChangesPanel({
               />
             )}
             <span className="min-w-0 flex-1">
-            <span className="block truncate" title={kind === "pr" ? prs[0]?.pr.title : pipelines.map(source => source.definitionName).join(", ")}>
-              {kind === "pr" && prs.length ? `#${prs[0].pr.pullRequestId} ${prs[0].pr.title}${prs.length > 1 ? ` +${prs.length - 1}` : ""}` : kind === "ci" && pipelines.length ? `CI · ${pipelines.map(source => source.definitionName).join(", ")}` : label}
+            <span className="block truncate" title={linked ? (kind === "pr" ? prs[0]?.pr.title : pipelines.map(source => source.definitionName).join(", ")) : providerLabel}>
+              {linked && kind === "pr" && prs.length ? `#${prs[0].pr.pullRequestId} ${prs[0].pr.title}${prs.length > 1 ? ` +${prs.length - 1}` : ""}` : linked && kind === "ci" && pipelines.length ? `CI · ${pipelines.map(source => source.definitionName).join(", ")}` : label}
             </span>
             <span className="block truncate text-[11px] text-content/45">
-              {kind === "pr" && prs.length ? `${prs[0].pr.status === "active" && prs[0].pr.reviewers.some(reviewer => reviewer.vote < 0) ? "Needs attention" : prs[0].pr.status === "active" ? "Open" : prs[0].pr.status} · saved` : kind === "ci" && pipelines.length ? (pipelines.length === 1 && pipelines[0].last ? `${ciState(pipelines[0].last.run.status, pipelines[0].last.run.result)} · ${pipelines[0].last.run.commit?.slice(0, 8) || "unknown commit"} · saved` : `${pipelines.length} linked`) : provider}
+              {linked && (kind === "pr" ? prs.length : pipelines.length) ? `${providerLabel} · ` : ""}
+              {linked && kind === "pr" && prs.length ? `${prs[0].pr.status === "active" && prs[0].pr.reviewers.some(reviewer => reviewer.vote < 0) ? "Needs attention" : prs[0].pr.status === "active" ? "Open" : prs[0].pr.status} · saved` : linked && kind === "ci" && pipelines.length ? (pipelines.length === 1 && pipelines[0].last ? `${ciState(pipelines[0].last.run.status, pipelines[0].last.run.result)} · ${pipelines[0].last.run.commit?.slice(0, 8) || "unknown commit"} · saved` : `${pipelines.length} linked`) : providerLabel}
             </span>
             </span>
             <ChevronRight
@@ -231,7 +269,15 @@ export function GitChangesPanel({
               strokeWidth={1.75}
             />
           </button>
-        ))}
+        );})}
+        <details open={choosingProviders} onToggle={event => setChoosingProviders(event.currentTarget.open)} className="px-3 text-[11px] text-content/45">
+          <summary className="cursor-pointer py-1">Providers</summary>
+          <div className="space-y-1 pb-2">{(["pr", "ci"] as const).map(kind => <div key={kind} className="flex items-center justify-between gap-2"><span>{kind === "pr" ? "PR" : "CI"}</span><Select disabled={!enabled || !index || deliveryBusy} label={kind === "pr" ? "PR provider" : "CI provider"} value={deliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind) ?? ""} options={[{value:"",label:"Automatic"},{value:"github",label:kind === "pr" ? "GitHub" : "GitHub checks"},{value:"azure",label:kind === "pr" ? "Azure Repos" : "Azure Pipelines"}]} onChange={value => {
+            try { saveDeliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind, value as DeliveryProvider | ""); setDeliveryError(""); }
+            catch { setDeliveryError("Could not save provider choice. Try again."); }
+          }} /></div>)}</div>
+        </details>
+        {deliveryError ? <p role="alert" className="px-3 py-1 text-[11px] text-red-400">{deliveryError}</p> : null}
       </div>
       <ChangedFiles
         cwd={cwd}

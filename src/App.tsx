@@ -1,5 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { gitPrStatus } from "./lib/fs";
+import { openGitHubDelivery, saveDeliveryProvider } from "./lib/deliveryProviders";
 import { ciContext } from "./lib/azurePipelines";
 import type { DeliveryTabSource } from "./lib/layout";
 import { RepairStatus } from "./chrome/RepairStatus";
@@ -154,9 +153,11 @@ import {
   promoteLastAssistantToPlan,
   respondHarnessApproval,
   respondHarnessQuestion,
+  keepHarnessQuestionOpen,
   sendHarnessTurn,
   steerHarnessTurn,
   startHarnessBridge,
+  stopHarnessSession,
   stopStreaming,
   pickTextHarness,
   type ApprovalDecision,
@@ -292,6 +293,7 @@ import {
   probeNotificationPermission,
   setWindowFocused,
 } from "./lib/notifications";
+import { useInputNotifications } from "./hooks/useInputNotifications";
 import { playCue } from "./lib/sounds";
 import { archiveFocusedSession } from "./lib/archiveShortcut";
 import {
@@ -316,6 +318,12 @@ import { preparePrompt } from "./lib/promptPreparation";
 import { warmNativeSkills, isNativeCommandPrompt } from "./lib/skills";
 import { nativeSkillContextForSession } from "./lib/sessionSkills";
 import {
+  loadSessionFolders,
+  placeSessionInFolder,
+  saveSessionFolders,
+  type SessionFolderTarget,
+} from "./lib/sessionFolders";
+import {
   ADD_NOTE_TO_CHAT_EVENT,
   composeNoteMessage,
   noteCardMeta,
@@ -335,7 +343,8 @@ import { SessionPane } from "./surfaces/SessionPane";
 import { SessionSurface } from "./surfaces/SessionSurface";
 import { ProjectTerminalDock } from "./surfaces/ProjectTerminalDock";
 import { SearchView } from "./surfaces/SearchView";
-import { SettingsView } from "./surfaces/SettingsView";
+import { SettingsView, type SettingsAnchor } from "./surfaces/SettingsView";
+import type { ConnectableInboxSource } from "./lib/inboxFilters";
 import { InboxView } from "./surfaces/InboxView";
 import type { InboxSessionPortal } from "./surfaces/InboxDiscussionPanel";
 import { inboxAskKey, inboxAskPrompt } from "./lib/inboxAsk";
@@ -689,6 +698,9 @@ export default function App({
   const [whatsNewVersion, setWhatsNewVersion] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>(loadSettingsSection);
+  const [settingsAnchor, setSettingsAnchor] = useState<SettingsAnchor | null>(
+    null,
+  );
   const [editorNavigation, setEditorNavigation] =
     useState<EditorNavigationTarget | null>(null);
   const editorNavigationToken = useRef(0);
@@ -1046,22 +1058,7 @@ export default function App({
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
 
-  const notifiedApprovalIdsRef = useRef<ReadonlySet<string>>(new Set());
-  useEffect(() => {
-    const previous = notifiedApprovalIdsRef.current;
-    notifiedApprovalIdsRef.current = approvalSessionIds;
-    for (const id of approvalSessionIds) {
-      if (previous.has(id)) continue;
-      const session = sessionsRef.current.find((s) => s.id === id);
-      if (session) {
-        void notifySession(
-          session,
-          "needsInput",
-          id === activeSessionIdRef.current,
-        );
-      }
-    }
-  }, [approvalSessionIds]);
+  useInputNotifications(sessions, activeSessionId);
 
   // Cache the OS decision so a turn ending later can skip a denied banner.
   useEffect(() => {
@@ -3498,6 +3495,26 @@ export default function App({
   }, [onSelectProject]);
 
   const pickWslProject = useCallback(() => setWslPickerOpen(true), []);
+  const onPlaceSessionInFolder = useCallback(
+    (sessionId: string, target: SessionFolderTarget) => {
+      const source = sessionsRef.current.find(
+        (session) => session.id === sessionId,
+      );
+      if (!source || !looksLikeProject(source.cwd)) return;
+      const folders = loadSessionFolders(source.cwd);
+      if (
+        target.kind === "existing" &&
+        !folders.some((folder) => folder.id === target.folderId)
+      ) {
+        return;
+      }
+      saveSessionFolders(
+        source.cwd,
+        placeSessionInFolder(folders, sessionId, target),
+      );
+    },
+    [],
+  );
 
   const onRemoveProject = useCallback(
     (path: string, options: { purgeData: boolean }) => {
@@ -4320,15 +4337,26 @@ export default function App({
             error instanceof Error
               ? error.message
               : `${current.harness} adapter failed`;
-          enqueueHarnessEvent(sessionId, {
-            type: "session.error",
-            message,
-          });
+          if (!providerFailureSeen) {
+            enqueueHarnessEvent(sessionId, {
+              type: "session.error",
+              message,
+            });
+          }
+          providerFailureSeen = true;
         } finally {
           if (repair && turnGen.current.get(sessionId) !== gen) updateRepair(repair.id, "uncertain", "Turn interrupted. Inspect the conversation before allowing another request.");
           if (turnGen.current.get(sessionId) !== gen) return;
           if (repair && buildSucceeded) updateRepair(repair.id, providerFailureSeen ? "uncertain" : "completed", providerFailureSeen ? "Provider reported a failure; inspect the conversation before retry." : "Agent turn completed. Verify the changes and provider results separately.");
           flushHarnessEvents();
+          // A failed provider can leave its process alive with a dead event
+          // stream or poisoned turn state. Park it now; the next prompt will
+          // reconnect and resume through a fresh transport.
+          if (providerFailureSeen) {
+            await stopHarnessSession(current.harness, sessionId).catch(
+              () => undefined,
+            );
+          }
           await flushSessionCheckpoint(sessionId);
           setSessions((prev) =>
             prev.map((s) => {
@@ -4907,6 +4935,14 @@ export default function App({
     [],
   );
 
+  const onQuestionInteraction = useCallback(
+    (sessionId: string, requestId: number) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId);
+      if (session) keepHarnessQuestionOpen(session.harness, sessionId, requestId);
+    },
+    [],
+  );
+
   const onOpenApprovalSession = useCallback(
     (sessionId: string) => {
       if (!focusOpenSession(sessionId)) {
@@ -5085,25 +5121,15 @@ export default function App({
     if (!current()) return;
     if (!session || session.inboxAsk) throw new Error("Open a workspace conversation for this item before reviewing PRs or CI.");
     const cwd = sessionWorkCwd(session);
-    if (provider === "github") {
-      const url = prUrl ?? (await gitPrStatus(cwd))?.url;
-      if (!current()) return;
-      if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
-        throw new Error("The conversation checkout changed. Open its review again.");
-      if (!url) throw new Error("No GitHub PR found for this conversation’s branch. Open the PR branch or choose another delivery provider.");
-      const target = new URL(url);
-      if (target.protocol !== "https:" || target.username || target.password || !/^\/[^/]+\/[^/]+\/pull\/\d+\/?$/.test(target.pathname))
-        throw new Error("GitHub returned an invalid PR link.");
-      target.search = "";
-      target.hash = "";
-      target.pathname = target.pathname.replace(/\/$/, "") + (kind === "ci" ? "/checks" : "");
-      await openUrl(target.href);
-      return;
-    }
     const checkout = await ciContext(cwd);
     if (!current()) return;
     if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
       throw new Error("The conversation checkout changed. Open its review again.");
+    saveDeliveryProvider(cwd, checkout.branch, sessionId, kind, provider);
+    if (provider === "github") {
+      await openGitHubDelivery(cwd, kind, () => current() && sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) === cwd, prUrl);
+      return;
+    }
     const existing = tabsRef.current.find(tab => leafIds(tab.layout).includes(sessionId));
     const base = existing ?? newTab(sessionId);
     const file = { id: crypto.randomUUID(), path: kind === "pr" ? "Pull requests" : "CI", cwd, delivery: { kind, branch: checkout.branch, sourceSessionId: sessionId } };
@@ -5143,19 +5169,28 @@ export default function App({
     setNotesViewOpen(false);
   }, []);
 
-  const openSettings = useCallback((section?: SettingsSectionId) => {
-    setFilePickerOpen(false);
-    setSearchViewOpen(false);
-    setInboxViewOpen(false);
-    setNotesViewOpen(false);
-    if (section) {
-      setSettingsSection(section);
-      saveSettingsSection(section);
-    }
-    setSettingsOpen(true);
-  }, []);
+  const openSettings = useCallback(
+    (section?: SettingsSectionId, anchor?: SettingsAnchor) => {
+      setFilePickerOpen(false);
+      setSearchViewOpen(false);
+      setInboxViewOpen(false);
+      setNotesViewOpen(false);
+      if (section) {
+        setSettingsSection(section);
+        saveSettingsSection(section);
+      }
+      setSettingsAnchor(anchor ?? null);
+      setSettingsOpen(true);
+    },
+    [],
+  );
 
   const onOpenSettings = useCallback(() => openSettings(), [openSettings]);
+
+  const onOpenInboxIntegrations = useCallback(
+    (source: ConnectableInboxSource) => openSettings("inbox", source),
+    [openSettings],
+  );
 
   const onCloseSettings = useCallback(() => {
     setSettingsOpen(false);
@@ -5632,6 +5667,7 @@ export default function App({
     onSubmit,
     onStop,
     onCompactContext,
+    onPlaceSessionInFolder,
     onDeleteQueuedMessage,
     onEditQueuedMessage,
     onQueuedMessageEditingChange,
@@ -5643,6 +5679,7 @@ export default function App({
     onHandoffCardDismiss,
     onApproval,
     onQuestionReply,
+    onQuestionInteraction,
     onOpenFile,
     onOpenDiff,
     onOpenPlan,
@@ -5976,7 +6013,7 @@ export default function App({
             onClose={onLeaveInbox}
             onToggleSidebar={onToggleSidebar}
             onStart={onStartInboxItem}
-            onOpenSettings={() => openSettings("general")}
+            onOpenSettings={() => openSettings("inbox")}
             onAsk={onAskInboxItem}
             onAskRestart={onRestartInboxAsk}
             onAskMount={setInboxAskPortal}
@@ -5991,6 +6028,7 @@ export default function App({
             onCloseConversation={() => setInboxConversationId(undefined)}
             onToggleConversationTicket={onToggleConversationTicket}
             onSelectTickets={items => setContextRequest({ context: contextFromTickets(items), tickets: items, cwd: sidebarCwd })}
+            onOpenIntegrations={onOpenInboxIntegrations}
           />
         </div> : null}
         {contextRequest ? <AgentContextPicker request={contextRequest} history={sidebarHistory} sessions={sessions} recents={recents} onPrepare={prepareContextDestination} onOpen={id => { if (contextRequest.context.entries.every(entry => !!entry.ticket)) void onOpenInboxSession(id); else { setInboxViewOpen(false); void onSelectHistorySession(id); } }} onClose={() => setContextRequest(undefined)} /> : null}
@@ -6005,6 +6043,7 @@ export default function App({
         {settingsOpen ? (
           <SettingsView
             section={settingsSection}
+            anchor={settingsAnchor}
             cwd={sidebarCwd}
             sessions={sidebarHistory}
             besideRail
