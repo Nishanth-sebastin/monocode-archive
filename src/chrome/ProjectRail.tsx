@@ -1131,7 +1131,7 @@ function WorkingCopyRows({
               type="button"
               title="Worktree details and cleanup"
               aria-label={`Manage worktree ${name}`}
-              className="absolute right-1 top-1/2 hidden size-5 -translate-y-1/2 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/working-copy:grid group-focus-within/working-copy:grid focus-visible:ring-1 focus-visible:ring-content/30"
+              className="invisible absolute right-1 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/working-copy:visible group-focus-within/working-copy:visible focus-visible:ring-1 focus-visible:ring-content/30"
               onClick={(event) => onManage(event, child.path)}
             >
               <MoreHorizontal className="size-3" />
@@ -1227,7 +1227,7 @@ function ProjectRepositoryRow({
           type="button"
           title="Repository worktrees"
           aria-label={`Manage ${name} worktrees`}
-          className="absolute right-1 top-1/2 hidden size-5 -translate-y-1/2 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/repository:grid group-focus-within/repository:grid focus-visible:ring-1 focus-visible:ring-content/30"
+          className="invisible absolute right-1 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content group-hover/repository:visible group-focus-within/repository:visible focus-visible:ring-1 focus-visible:ring-content/30"
           onClick={(event) => {
             anchor.current = event.currentTarget;
             setMenuOpen(true);
@@ -1622,7 +1622,7 @@ function ProjectCard({
             title="New worktree"
             aria-label={`New worktree in ${name}`}
             onClick={worktreeControls.create}
-            className="hidden size-6 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
+            className="invisible grid size-6 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:visible"
           >
             <Plus className="size-3.5" strokeWidth={1.75} />
           </button>
@@ -1638,7 +1638,7 @@ function ProjectCard({
             event.stopPropagation();
             onOpenMenu(item, event.clientX, event.clientY);
           }}
-          className="hidden size-6 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
+          className="invisible grid size-6 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:visible"
         >
           <MoreHorizontal className="size-4" strokeWidth={1.75} />
         </button>
