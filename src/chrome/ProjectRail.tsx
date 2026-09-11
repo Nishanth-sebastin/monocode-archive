@@ -194,6 +194,7 @@ type Props = {
   onOpenProject: () => void;
   onNewTask?: (path: string, projectId?: string) => void;
   onOpenTask?: (taskId: string) => void;
+  onEditTask?: (taskId: string) => void;
   /** Sessions currently needing input (approval or question) — per-child dots. */
   needsInputSessionIds?: ReadonlySet<string>;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
@@ -231,6 +232,7 @@ export function ProjectRail({
   onOpenProject,
   onNewTask,
   onOpenTask,
+  onEditTask,
   needsInputSessionIds,
   onRemoveProject,
   liveAgents = [],
@@ -886,6 +888,17 @@ export function ProjectRail({
               }}
             >
               Open task
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+              onClick={() => {
+                onEditTask?.(taskMenu.task.id);
+                setTaskMenu(null);
+              }}
+            >
+              Edit task…
             </button>
             <button
               type="button"

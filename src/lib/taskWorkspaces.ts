@@ -246,26 +246,12 @@ function repositoryOf(
  * repository ids or a mixed-host working-copy set. Draft inputs are copied
  * verbatim — nothing is inferred from names or tickets.
  */
-export function createTask(input: {
-  projectId: string;
-  name: string;
-  ticket?: LinkedWorkItem;
-  brief?: string;
-  children: TaskChildDraft[];
-}): TaskWorkspace {
-  const name = input.name.trim();
-  if (!name) throw new Error("Enter a task name");
-  const project = loadProjects().find(
-    (entry) => entry.id === input.projectId,
-  );
-  if (!project) throw new Error("Project no longer exists");
-  const drafts = input.children.filter(
-    (child) => child && child.repositoryId,
-  );
-  if (!drafts.length) throw new Error("Select at least one repository");
-  if (drafts.length > MAX_CHILDREN)
-    throw new Error(`A task supports up to ${MAX_CHILDREN} repositories`);
-  const children: TaskChild[] = drafts.map((draft) => {
+/** Validates child drafts against a project and builds child records. */
+function buildTaskChildren(
+  project: ProjectRecord,
+  drafts: readonly TaskChildDraft[],
+): TaskChild[] {
+  return drafts.map((draft) => {
     const repository = repositoryOf(project, draft.repositoryId);
     if (!repository)
       throw new Error("A selected repository is no longer in this project");
@@ -305,6 +291,28 @@ export function createTask(input: {
       launch: { state: "pending" as const },
     };
   });
+}
+
+export function createTask(input: {
+  projectId: string;
+  name: string;
+  ticket?: LinkedWorkItem;
+  brief?: string;
+  children: TaskChildDraft[];
+}): TaskWorkspace {
+  const name = input.name.trim();
+  if (!name) throw new Error("Enter a task name");
+  const project = loadProjects().find(
+    (entry) => entry.id === input.projectId,
+  );
+  if (!project) throw new Error("Project no longer exists");
+  const drafts = input.children.filter(
+    (child) => child && child.repositoryId,
+  );
+  if (!drafts.length) throw new Error("Select at least one repository");
+  if (drafts.length > MAX_CHILDREN)
+    throw new Error(`A task supports up to ${MAX_CHILDREN} repositories`);
+  const children = buildTaskChildren(project, drafts);
   const conflict = taskHostConflict(
     children.map((child) => child.workingCopy),
   );
@@ -346,6 +354,36 @@ export function updateTaskChild(
       child.id === childId ? { ...child, ...patch } : child,
     ),
   }));
+}
+
+/** Adds new repository children to an existing task. Same validation as
+ * createTask; returns the added children so the caller can launch them. */
+export function addTaskChildren(
+  taskId: string,
+  drafts: readonly TaskChildDraft[],
+): TaskChild[] {
+  const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+  if (!task) throw new Error("Task no longer exists");
+  const project = projectForTask(task);
+  if (!project) throw new Error("Project no longer exists");
+  const valid = drafts.filter((child) => child && child.repositoryId);
+  if (!valid.length) return [];
+  const owned = new Set(task.children.map((child) => child.repositoryId));
+  for (const draft of valid)
+    if (owned.has(draft.repositoryId))
+      throw new Error("A selected repository is already in this task");
+  if (task.children.length + valid.length > MAX_CHILDREN)
+    throw new Error(`A task supports up to ${MAX_CHILDREN} repositories`);
+  const added = buildTaskChildren(project, valid);
+  const conflict = taskHostConflict(
+    [...task.children, ...added].map((child) => child.workingCopy),
+  );
+  if (conflict) throw new Error(conflict);
+  updateTask(taskId, (current) => ({
+    ...current,
+    children: [...current.children, ...added],
+  }));
+  return added;
 }
 
 export function recordTaskActiveChild(taskId: string, childId: string) {

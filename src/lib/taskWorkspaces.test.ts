@@ -7,6 +7,7 @@ import {
 } from "./projects";
 import type { RepositoryFamily } from "./repositoryFamilies";
 import {
+  addTaskChildren,
   archiveTask,
   composeTaskPrompt,
   createTask,
@@ -295,6 +296,46 @@ describe("task child updates", () => {
     expect(tasksForProject(project.id)).toHaveLength(0);
     removeTask(task.id);
     expect(loadTaskWorkspaces()).toEqual([]);
+  });
+});
+
+describe("addTaskChildren", () => {
+  it("appends new children and returns them for launch", () => {
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo, lib] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id)],
+    });
+    const added = addTaskChildren(task.id, [later(lib.id)]);
+    expect(added).toHaveLength(1);
+    expect(added[0].repositoryId).toBe(lib.id);
+    expect(added[0].launch.state).toBe("pending");
+    expect(
+      loadTaskWorkspaces().find((entry) => entry.id === task.id)?.children,
+    ).toHaveLength(2);
+  });
+
+  it("rejects repositories already in the task or not in the project", () => {
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id)],
+    });
+    expect(() => addTaskChildren(task.id, [later(repo.id)])).toThrow(
+      "already in this task",
+    );
+    expect(() => addTaskChildren(task.id, [later("gone")])).toThrow(
+      "no longer in this project",
+    );
+    // Nothing was appended on failure.
+    expect(
+      loadTaskWorkspaces().find((entry) => entry.id === task.id)?.children,
+    ).toHaveLength(1);
+    expect(addTaskChildren(task.id, [])).toEqual([]);
   });
 });
 

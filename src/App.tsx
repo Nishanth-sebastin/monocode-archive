@@ -4442,9 +4442,10 @@ export default function App({
     return () => window.removeEventListener(OPEN_REPAIR, open);
   }, [onSelectHistorySession]);
 
-  const [taskSheet, setTaskSheet] = useState<{ projectId: string } | null>(
-    null,
-  );
+  const [taskSheet, setTaskSheet] = useState<{
+    projectId: string;
+    editingTaskId?: string;
+  } | null>(null);
   const onNewTask = useCallback(
     (path: string, projectId?: string) => {
       const stored = projectId
@@ -4458,6 +4459,11 @@ export default function App({
     },
     [],
   );
+
+  const onEditTask = useCallback((taskId: string) => {
+    const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+    if (task) setTaskSheet({ projectId: task.projectId, editingTaskId: taskId });
+  }, []);
 
   /**
    * Per-child independent launch: create the reviewed worktree, open one
@@ -5997,6 +6003,7 @@ export default function App({
         onOpenProject={pickProject}
         onNewTask={onNewTask}
         onOpenTask={onOpenTask}
+        onEditTask={onEditTask}
         needsInputSessionIds={needsInputSessionIds}
         onRemoveProject={onRemoveProject}
         onNew={onNew}
@@ -6028,6 +6035,7 @@ export default function App({
       {taskSheet && (
         <TaskCreateSheet
           projectId={taskSheet.projectId}
+          editingTaskId={taskSheet.editingTaskId}
           onLaunchChildren={(taskId, childIds) =>
             void launchTaskChildren(taskId, childIds)
           }

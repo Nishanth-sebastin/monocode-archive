@@ -23,6 +23,7 @@ import {
   type ProjectRepository,
 } from "../lib/projects";
 import {
+  addTaskChildren,
   createTask,
   loadTaskWorkspaces,
   suggestTaskBranch,
@@ -30,6 +31,8 @@ import {
   taskHostConflict,
   taskWorkspacesSnapshot,
   subscribeTaskWorkspaces,
+  updateTask,
+  type TaskChild,
   type TaskChildDraft,
   type TaskWorkspace,
 } from "../lib/taskWorkspaces";
@@ -66,6 +69,8 @@ type ChildDraftState = {
 type Props = {
   /** Resolved stored project — the sheet only opens with a real project id. */
   projectId: string;
+  /** Present → edit mode: rename, retune children, add/remove repositories. */
+  editingTaskId?: string;
   /** Launches all unresolved children, or just the given ones (retry). */
   onLaunchChildren: (taskId: string, childIds?: readonly string[]) => void;
   onOpenPath: (path: string) => void;
@@ -91,6 +96,7 @@ const shortRef = (name: string) =>
  */
 export function TaskCreateSheet({
   projectId,
+  editingTaskId,
   onLaunchChildren,
   onOpenPath,
   onClose,
@@ -107,9 +113,30 @@ export function TaskCreateSheet({
   );
   const project = projects.find((entry) => entry.id === projectId);
 
-  const [name, setName] = useState("");
-  const [brief, setBrief] = useState("");
-  const [selected, setSelected] = useState<string[]>([]);
+  const editingTask: TaskWorkspace | undefined = useMemo(
+    () =>
+      editingTaskId
+        ? loadTaskWorkspaces().find((entry) => entry.id === editingTaskId)
+        : undefined,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [editingTaskId, tasksRaw],
+  );
+
+  const [name, setName] = useState(editingTask?.name ?? "");
+  const [brief, setBrief] = useState(editingTask?.brief ?? "");
+  const [selected, setSelected] = useState<string[]>(
+    () => editingTask?.children.map((child) => child.repositoryId) ?? [],
+  );
+  /** Editable responsibilities for children that already exist — keyed by
+   * child id, since existing children are not drafts. */
+  const [childResp, setChildResp] = useState<Map<string, string>>(
+    () =>
+      new Map(
+        (editingTask?.children ?? [])
+          .filter((child) => child.responsibility)
+          .map((child) => [child.id, child.responsibility ?? ""]),
+      ),
+  );
   const [drafts, setDrafts] = useState<Map<string, ChildDraftState>>(new Map());
   const [error, setError] = useState("");
   const [taskId, setTaskId] = useState<string | null>(null);
@@ -128,6 +155,13 @@ export function TaskCreateSheet({
     () => project?.repositories ?? [],
     [project],
   );
+
+  const existingByRepo = useMemo(() => {
+    const map = new Map<string, TaskChild>();
+    for (const child of editingTask?.children ?? [])
+      map.set(child.repositoryId, child);
+    return map;
+  }, [editingTask]);
 
   // Probe member anchors once so worktree choices and concurrent-writer
   // evidence are available for the checklist.
@@ -238,13 +272,15 @@ export function TaskCreateSheet({
       setSelected((prev) =>
         prev.includes(repo.id) ? prev : [...prev, repo.id],
       );
-      setDrafts((prev) => {
-        if (prev.has(repo.id)) return prev;
-        const next = new Map(prev);
-        next.set(repo.id, defaultDraft(repo));
-        return next;
-      });
-      loadRefs(repo);
+      if (!existingByRepo.has(repo.id)) {
+        setDrafts((prev) => {
+          if (prev.has(repo.id)) return prev;
+          const next = new Map(prev);
+          next.set(repo.id, defaultDraft(repo));
+          return next;
+        });
+        loadRefs(repo);
+      }
       return;
     }
     setSelected((prev) => prev.filter((id) => id !== repo.id));
@@ -266,6 +302,7 @@ export function TaskCreateSheet({
     setDrafts((prev) => {
       const next = new Map<string, ChildDraftState>();
       for (const id of ids) {
+        if (existingByRepo.has(id)) continue;
         const repo = repositories.find((entry) => entry.id === id);
         if (!repo) continue;
         next.set(id, prev.get(id) ?? defaultDraft(repo));
@@ -320,14 +357,17 @@ export function TaskCreateSheet({
     return [...users];
   };
 
-  const hostConflict = taskHostConflict(
-    repositories
+  const hostConflict = taskHostConflict([
+    ...(editingTask?.children ?? [])
+      .filter((child) => selected.includes(child.repositoryId))
+      .map((child) => child.workingCopy),
+    ...repositories
       .filter((repo) => selected.includes(repo.id))
       .map((repo) => {
         const draft = drafts.get(repo.id);
         return draft ? chosenPath(repo, draft) : undefined;
       }),
-  );
+  ]);
 
   const blockedShared = repositories.filter((repo) => {
     const draft = drafts.get(repo.id);
@@ -345,6 +385,7 @@ export function TaskCreateSheet({
   const buildDrafts = (): TaskChildDraft[] =>
     selected
       .map((repoId): TaskChildDraft | null => {
+        if (existingByRepo.has(repoId)) return null;
         const repo = repositories.find((entry) => entry.id === repoId);
         const draft = drafts.get(repoId);
         if (!repo || !draft) return null;
@@ -371,6 +412,41 @@ export function TaskCreateSheet({
   const submit = () => {
     setError("");
     try {
+      if (editingTask) {
+        const clean = brief.trim();
+        updateTask(editingTask.id, (current) => {
+          const kept = current.children.filter((child) =>
+            selected.includes(child.repositoryId),
+          );
+          return {
+            ...current,
+            name: name.trim(),
+            ...(clean ? { brief: clean } : { brief: undefined }),
+            children: kept.map((child) => {
+              const resp = childResp.get(child.id)?.trim();
+              return resp
+                ? { ...child, responsibility: resp }
+                : { ...child, responsibility: undefined };
+            }),
+            ...(kept.some(
+              (child) => child.id === current.lastActiveChildId,
+            )
+              ? {}
+              : { lastActiveChildId: undefined }),
+          };
+        });
+        const added = addTaskChildren(editingTask.id, buildDrafts());
+        if (added.length) {
+          setTaskId(editingTask.id);
+          onLaunchChildren(
+            editingTask.id,
+            added.map((child) => child.id),
+          );
+        } else {
+          onClose();
+        }
+        return;
+      }
       const created = createTask({
         projectId,
         name,
@@ -387,7 +463,9 @@ export function TaskCreateSheet({
   return (
     <Modal
       onClose={onClose}
-      title={task ? task.name : "New task"}
+      title={
+        task ? task.name : editingTask ? `Edit · ${editingTask.name}` : "New task"
+      }
       description={
         project
           ? (project.name ??
@@ -471,8 +549,28 @@ export function TaskCreateSheet({
 
             {selected.map((repoId) => {
               const repo = repositories.find((entry) => entry.id === repoId);
+              if (!repo) return null;
+              const existing = existingByRepo.get(repoId);
+              if (existing) {
+                return (
+                  <ExistingChildCard
+                    key={repoId}
+                    repo={repo}
+                    child={existing}
+                    responsibility={childResp.get(existing.id) ?? ""}
+                    onResponsibility={(value) =>
+                      setChildResp((prev) => {
+                        const next = new Map(prev);
+                        next.set(existing.id, value);
+                        return next;
+                      })
+                    }
+                    onRemove={() => selectRepository(repo, false)}
+                  />
+                );
+              }
               const draft = drafts.get(repoId);
-              if (!repo || !draft) return null;
+              if (!draft) return null;
               return (
                 <ChildConfig
                   key={repoId}
@@ -528,7 +626,9 @@ export function TaskCreateSheet({
                 onClick={submit}
                 className="rounded-md bg-content/10 px-3 py-1.5 text-[12px] font-medium text-content hover:bg-content/15 disabled:opacity-40"
               >
-                Create task and start sessions
+                {editingTask
+                  ? "Save changes"
+                  : "Create task and start sessions"}
               </button>
             </div>
           </>
@@ -763,6 +863,80 @@ function ChildConfig({
           placeholder="What changes in this repository…"
           className={`${inputClass} py-1.5 text-[12px]`}
           aria-label={`Responsibility for ${repositoryDisplayName(repo)}`}
+        />
+      </label>
+    </section>
+  );
+}
+
+/** Read-only card for a child that already exists — its working copy,
+ * branch and sessions are settled; only the responsibility can change, or
+ * the child can be removed from the task. */
+function ExistingChildCard({
+  repo,
+  child,
+  responsibility,
+  onResponsibility,
+  onRemove,
+}: {
+  repo: ProjectRepository;
+  child: TaskChild;
+  responsibility: string;
+  onResponsibility: (value: string) => void;
+  onRemove: () => void;
+}) {
+  const location = wslLocation(repo.anchor);
+  const state = child.launch.state;
+  const summary = child.workingCopy
+    ? [child.branch, prettyCwd(child.workingCopy)].filter(Boolean).join(" · ")
+    : "Skipped — no working copy yet";
+  return (
+    <section className="rounded-lg border border-content/10 p-2.5">
+      <div className="mb-1.5 flex items-center gap-2">
+        <GitBranch
+          className="size-3.5 shrink-0 text-content/40"
+          strokeWidth={1.5}
+        />
+        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-content">
+          {repositoryDisplayName(repo)}
+        </span>
+        {location ? (
+          <span className="shrink-0 rounded bg-content/8 px-1.5 py-0.5 text-[10px] text-content/55">
+            WSL · {location.distribution}
+          </span>
+        ) : null}
+        <button
+          type="button"
+          onClick={onRemove}
+          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-content/40 hover:bg-content/5 hover:text-content/70"
+        >
+          Remove
+        </button>
+      </div>
+      <div className="mb-2 flex items-center gap-1.5">
+        {state === "ready" ? (
+          <Check className="size-3 shrink-0 text-emerald-400" strokeWidth={2} />
+        ) : state === "working" ? (
+          <Loader className="size-3 shrink-0 animate-spin text-content/50" />
+        ) : state === "failed" ? (
+          <CircleAlert className="size-3 shrink-0 text-red-400" />
+        ) : (
+          <CircleAlert className="size-3 shrink-0 text-content/30" />
+        )}
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-content/50">
+          {summary}
+        </span>
+      </div>
+      <label className="block">
+        <span className="mb-0.5 block text-[11px] text-content/50">
+          Responsibility
+        </span>
+        <input
+          value={responsibility}
+          onChange={(event) => onResponsibility(event.target.value)}
+          placeholder="What this repository contributes…"
+          aria-label={`Responsibility for ${repositoryDisplayName(repo)}`}
+          className={`${inputClass} py-1.5 text-[12px]`}
         />
       </label>
     </section>

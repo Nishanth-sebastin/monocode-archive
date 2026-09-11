@@ -234,6 +234,7 @@ type Props = {
   onOpenProject?: () => void;
   onNewTask?: (path: string, projectId?: string) => void;
   onOpenTask?: (taskId: string) => void;
+  onEditTask?: (taskId: string) => void;
   needsInputSessionIds?: ReadonlySet<string>;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
   onNew?: () => string | void;
@@ -313,6 +314,7 @@ function SidebarComponent({
   onOpenProject,
   onNewTask,
   onOpenTask,
+  onEditTask,
   needsInputSessionIds,
   onRemoveProject,
   onNew,
@@ -1606,6 +1608,7 @@ function SidebarComponent({
           onOpenProject={onOpenProject}
           onNewTask={onNewTask}
           onOpenTask={onOpenTask}
+          onEditTask={onEditTask}
           needsInputSessionIds={needsInputSessionIds}
           onRemoveProject={onRemoveProject}
           settingsOpen={settingsOpen}
