@@ -34,7 +34,7 @@ Also exercise two projects using different accounts on the same provider and col
 
 A Git remote cannot tell us the issue tracker. A PR provider cannot tell us the CI system. Bind runs/checks to the correct provider, repository, branch and commit; expose ambiguity or stale evidence rather than guessing. Credentials are account-scoped, stored through an appropriate local credential mechanism, and excluded from tracked configuration, logs, prompts, and URLs. A missing connector disables only its own capability. A configured issue provider must not be required to use local Git or agents.
 
-Shared connection onboarding, read-only capability checks, reauthentication and disconnect behavior belong to #6; connectors add their own scopes and limitations. Credential ownership must identify the host: Windows-side service access and Linux Git/agent credentials may differ. Never silently copy secrets across hosts or substitute another account. Local disconnect is not necessarily provider-side revocation.
+Each real connector owns the smallest usable connection onboarding, read-only capability check, reauthentication and disconnect behavior it needs; later connectors for the same service reuse that account identity and UI rather than adding another login. Credential ownership must identify the host: Windows-side service access and Linux Git/agent credentials may differ. Never silently copy secrets across hosts or substitute another account. Local disconnect is not necessarily provider-side revocation.
 
 Azure PR inspection and repair handoff do not imply branch push or draft-PR creation. The first slice may use manual publication; adding in-app publication requires explicitly scoped actions and authority.
 
@@ -46,7 +46,7 @@ Azure PR inspection and repair handoff do not imply branch push or draft-PR crea
 - Upstream already has web/Rust checks and macOS/Windows/Linux CI. Reuse them. Revalidate tests, migrations, lifecycle, and the mixed-provider smoke matrix after merges.
 - Review upstream periodically and before a major feature; use an integration branch and merge the chosen upstream commit. Do not auto-resolve conflicts in favor of either side. Preserve both sets of behavior. If upstream adds our feature, converge and retire duplicate code after validation.
 - Check relevant upstream overlap as part of each feature and normal maintenance; record selected SHAs, conflicts and compatibility evidence when syncing. This is not a separate prerequisite project or reason to delay product work.
-- Preserve the app identity, data and disabled-release safeguards already introduced by PR #30. No further branding/setup project is on the delivery roadmap; concrete regressions should be fixed as bounded bugs. Publication remains separately authorized.
+- Preserve the app identifier and local data boundary introduced by PR #30. Release publication is owned by #64 and this repository's GitHub Actions configuration; concrete distribution regressions should be fixed as bounded bugs.
 - Upstream contribution policy currently pauses new coding-agent adapters. Respect that for upstream submissions. Our ticket/PR/CI connectors are a different concern. Submit upstream fixes only when the user asks; a PR to this repository is not an upstream submission.
 
 Example maintenance flow (run from this repository; choose a fresh branch name and review the fetched target):
@@ -89,7 +89,7 @@ Diri and TUICommander use Apache-2.0 at the project level. Any source reuse requ
 
 Use [local development instructions and isolation audit](LOCAL_DEVELOPMENT.md) for setup, build commands and the current platform verification limits.
 
-Start actual development with #32 worktree management, #6 independent provider settings, then #22 Windows-to-WSL execution once its core prerequisites land. Agent status #7 is independent ready product work. Setup, source investigation, relevant before/after performance measurement and integration checks are steps within each feature, not standalone issues or reports to complete first. Administrative issues #2/#3/#4/#28/#27 are retired from the delivery queue, without certifying their outstanding checks.
+Start actual development with #32 worktree management and #22 Windows-to-WSL execution, then continue with agent status #7 and targeted handoff #8. Connection UI lands with the first real Jira/Azure connector instead of a standalone settings project. Setup, source investigation, relevant before/after performance measurement and integration checks are steps within each feature, not standalone issues or reports to complete first. Administrative issues #2/#3/#4/#6/#28/#27 are retired from the delivery queue, without certifying their outstanding checks.
 
 Identify required test resources and missing access in the affected feature. Missing Windows/WSL hardware or provider credentials blocks only the relevant live acceptance, not unrelated coding. A hosted build or ready environment does not prove a feature works; do not publish secrets or private test payloads as evidence.
 

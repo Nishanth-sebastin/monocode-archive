@@ -1,6 +1,6 @@
 # Local development
 
-Read AGENTS.md and the assigned issue first. The default Tauri configuration builds **MonoCode Fork**, identifier `com.kaceper11.monocode`; no special override is required. Do not override it with stock identity or stock release configuration.
+Read AGENTS.md and the assigned issue first. The default Tauri configuration builds **MonoCode**, identifier `com.kaceper11.monocode`; no special override is required. Keep that identifier so this distribution retains its own local data and update identity.
 
 ## Setup and checks
 
@@ -21,9 +21,9 @@ For a compiled development binary without launching or publishing:
 npm run tauri build -- --debug --no-bundle
 ```
 
-For an unsigned/ad-hoc local macOS app bundle, use `npm run tauri build -- --bundles app`. It is written beneath `target/release/bundle/macos/MonoCode Fork.app`; open it there or copy that exact app into Applications. Windows testers can use `npm run build:windows` for the local NSIS installer, then verify its displayed application name, install path and app-data ownership. Neither path publishes a release. A fresh build's first compile can be slow; performance measurements must use release builds, not this debug path.
+For an unsigned/ad-hoc local macOS app bundle, use `npm run tauri build -- --bundles app`. It is written beneath `target/release/bundle/macos/MonoCode.app`; open it there or copy that exact app into Applications. Windows testers can use `npm run build:windows` for the local NSIS installer, then verify its displayed application name, install path and app-data ownership. Neither path publishes a release. A fresh build's first compile can be slow; performance measurements must use release builds, not this debug path.
 
-Record `git rev-parse HEAD`, tool versions, machine/OS, build command and any uncommitted changes with test evidence. Do not package secrets or a user profile in an artifact. Uninstall only the explicitly identified **MonoCode Fork** app/installer entry; retain its data by default. Delete this application's data only after explicit backup/deletion approval, never the stock profile.
+Record `git rev-parse HEAD`, tool versions, machine/OS, build command and any uncommitted changes with test evidence. Do not package secrets or a user profile in an artifact. Retain application data by default when uninstalling. Delete this application's data only after explicit backup/deletion approval, never another installation's profile.
 
 ## Isolation audit for issue #2
 
@@ -32,13 +32,22 @@ Record `git rev-parse HEAD`, tool versions, machine/OS, build command and any un
 - No single-instance/deep-link plugin or URI scheme registration was found in the audited Tauri configuration/backend. Re-audit when upstream introduces these. Secondary windows reuse configured window identity.
 - Application orphan cleanup uses its own process marker and does not reap unmarked legacy Cursor agents. Stock MonoCode's own legacy cleanup is outside this application's control; do not claim this patch changes stock process-management behavior.
 - Provider CLIs retain their own existing home/config/authentication mechanisms; this is not a credential sandbox for third-party CLIs. No stock app profile or credentials are copied/imported. In particular, quota refresh can use the provider's own credential store; live coexistence needs verification before claiming complete credential isolation.
-- Updater endpoints and key remain empty, updater artifact generation is off, and inherited release jobs are restricted to the upstream repository. Manual update checks explain that this build has no configured release channel instead of directing users to install stock MonoCode. Do not supply updater overrides or project signing/publication secrets until separately authorized.
-- Reviewed upstream through `d4cd7df` (five commits after the bootstrap); changes include Windows updater/release workflow work. They were subsequently merged via upstream sync PR #31 and integrated into this branch; the release guards remain in place.
+- Updater endpoints and keys remain empty in the default development configuration, and updater artifact generation is off. The release workflow injects this repository's public GitHub Releases endpoint and public updater key without putting the private signing key in Git. Manual checks from development builds explain that published builds are required for updates.
+- Reviewed upstream through `d4cd7df` (five commits after the bootstrap); changes include Windows updater/release workflow work. They were subsequently merged via upstream sync PR #31 and integrated into this branch.
+
+## Publishing a release
+
+Releases are built only for `kaceper11/monocode` tags. Keep the Tauri updater private key backed up outside Git and set it as the `TAURI_SIGNING_PRIVATE_KEY` Actions secret; set its public half as `TAURI_UPDATER_PUBKEY`. Apple signing and notarization use the existing optional `APPLE_*` secrets. Without them, the workflow deliberately publishes an ad-hoc-signed macOS build and the release notes disclose that limitation.
+
+1. Run `npm run set-version -- <version>` and add the same version to `CHANGELOG.md`.
+2. Merge the tested release change to `main`, then create and push `v<version>` from that exact commit.
+3. Verify every platform job and the eight release assets, including `latest.json` and both updater signatures.
+4. Before claiming automatic updates work, install release N and verify check, download, install and relaunch against a newer release on real macOS and Windows machines.
 
 ## Readiness evidence (2026-09-08)
 
 Local host: Apple Silicon macOS, Node 22.23.2, npm 10.9.8, Rust/Cargo 1.98.1, rustfmt and clippy installed. `npm ci` installed the locked dependencies and reported no known vulnerabilities. The untouched baseline at `70a7280` passed `npm run check` (including 214 Rust tests) and `npm run build`; Vite reported existing chunk-size and mixed static/dynamic import warnings. These are not a measured responsiveness baseline.
 
-Issue #28 still needs actual Windows/WSL hardware or authorized remote access and Jira/Azure test resources. No real Windows/WSL, Jira/Azure or authenticated in-app agent acceptance is implied by local checks. Keep issue #2 open until its remaining live coexistence checks are recorded.
+Actual Windows/WSL hardware or authorized remote access and service test resources are still required for live platform/provider acceptance. No real Windows/WSL, Jira/Azure or authenticated in-app agent acceptance is implied by local checks. Historical setup issue #2 is retired; current limitations remain documented in their owning feature and release issues.
 
 After the initial isolation changes, on macOS 26.6.2 arm64: `npm run check` passed (135 web test files / 1,396 tests, TypeScript, rustfmt, clippy and 215 Rust tests). `npm run tauri build -- --debug --no-bundle` built `target/debug/monocode` successfully without launching or installing it. UI launch/quit, notification identity, actual profile/coexistence and manual updater interaction remain unverified; no production app profile was deliberately opened or migrated. The default debug build is not a release performance benchmark.

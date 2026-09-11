@@ -10,7 +10,7 @@ Text snapshots share a 32,000-character limit, divided fairly between entries wi
 
 ## Verification (2026-09-10)
 
-- Latest `origin/main` at implementation base: `2aee4a79`. Included current upstream through `fe356a5` (image preview, line mentions and transcript review), retaining fork behavior.
+- Latest `origin/main` at implementation base: `2aee4a79`. Included current upstream through `fe356a5` (image preview, line mentions and transcript review), retaining downstream-specific behavior.
 - `npm run check:web`: 1,577 tests and TypeScript passed. `npm run check:rust`: formatting, Clippy and 262 tests passed, one existing ignored test. Production `npm run build` passed with the existing large-chunk warning. One earlier web run was interrupted by prolonged timeouts; the unchanged rerun passed.
 - Real macOS Tauri UI/IPC: Explorer file capture prepared the exact existing conversation. Live GitHub Inbox selection opened a conversation beside the ticket list; native inspection confirmed one composer after fixing duplicate pane ownership. No prompt was sent and no ticket was mutated.
 - Browser component interaction: actual picker components at 900 × 600 in dark/light themes, destination selection, explicit existing-conversation navigation, and keyboard focus wrap. Automated component checks cover preparation failure, retained destination, repeat-click suppression, mixed-provider/account identity, source switching, bounded snapshots, deleted sources and unsupported attachments.
