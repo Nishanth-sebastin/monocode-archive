@@ -1,3 +1,6 @@
+import { Select } from "./Select";
+import { ciRepair } from "../lib/repair";
+import { RepairStatus } from "./RepairStatus";
 import { useEffect, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -30,7 +33,6 @@ import {
   type CiRun,
   type CiSource,
 } from "../lib/azurePipelines";
-import { Modal } from "./Modal";
 
 const button =
   "rounded-md px-2 py-1 text-[12px] text-content hover:bg-content/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-40";
@@ -38,6 +40,13 @@ const field =
   "w-full rounded-md border border-content/15 bg-content/5 px-2 py-1.5 text-[12px] text-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 const failure = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
+// Two initial sources at a time across visible CI panes; explicit refreshes stay immediate.
+const initialLoads: Promise<unknown>[] = [Promise.resolve(), Promise.resolve()];
+let initialSlot = 0;
+const scheduleInitialLoad = (action: () => Promise<void>, current: () => boolean) => {
+  const slot = initialSlot++ % initialLoads.length;
+  initialLoads[slot] = initialLoads[slot].then(() => current() ? action() : undefined).catch(() => undefined);
+};
 const drafts = new Map<string, string>();
 
 export function AzureCiReview({
@@ -45,75 +54,45 @@ export function AzureCiReview({
   branch,
   sourceSessionId,
   enabled,
+  onClose,
+  onReveal,
 }: {
   cwd: string;
   branch: string;
   sourceSessionId?: string;
   enabled: boolean;
+  onClose: () => void;
+  onReveal?: () => void;
 }) {
   const [sources, setSources] = useState(() =>
     loadCiSources(cwd, branch, sourceSessionId),
   );
-  const [open, setOpen] = useState(false);
-  const trigger = useRef<HTMLButtonElement>(null);
   const update = (next: CiSource[]) => {
     saveCiSources(next, cwd, branch, sourceSessionId);
     setSources(next);
   };
-  const close = () => {
-    setOpen(false);
-    trigger.current?.focus();
-  };
-  return (
-    <div className="shrink-0 border-b border-content/10 px-2 py-1">
-      <button
-        ref={trigger}
-        type="button"
-        className={`${button} w-full text-left`}
-        disabled={!enabled}
-        onClick={() => setOpen(true)}
-      >
-        <span className="block">
-          Azure Pipelines ·{" "}
-          {sources.length
-            ? `${sources.length} configured`
-            : "Connect CI for this work"}
-        </span>
-        {sources.some((source) => source.last) ? (
-          <span className="block truncate text-content/50">
-            Saved:{" "}
-            {sources
-              .filter((source) => source.last)
-              .map(
-                (source) =>
-                  `${source.definitionName}: ${ciState(source.last!.run.status, source.last!.run.result)}`,
-              )
-              .join(" · ")}{" "}
-            · refresh to verify commit
-          </span>
-        ) : null}
-      </button>
-      {open && enabled ? (
-        <CiDialog
-          cwd={cwd}
-          branch={branch}
-          session={sourceSessionId}
-          sources={sources}
-          onChange={update}
-          onClose={close}
-        />
-      ) : null}
-    </div>
-  );
+  return enabled ? (
+    <CiPanel
+      key={ciScope(cwd, branch, sourceSessionId)}
+      cwd={cwd}
+      branch={branch}
+      session={sourceSessionId}
+      sources={sources}
+      onChange={update}
+      onClose={onClose}
+      onReveal={onReveal}
+    />
+  ) : null;
 }
 
-function CiDialog({
+function CiPanel({
   cwd,
   branch,
   session,
   sources,
   onChange,
   onClose,
+  onReveal,
 }: {
   cwd: string;
   branch: string;
@@ -121,23 +100,24 @@ function CiDialog({
   sources: CiSource[];
   onChange: (sources: CiSource[]) => void;
   onClose: () => void;
+  onReveal?: () => void;
 }) {
   const [status, setStatus] = useState<AzureStatus>();
   const [checkout, setCheckout] = useState<CiCheckout>();
   const [error, setError] = useState("");
   const [version, setVersion] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [adding, setAdding] = useState(!sources.length);
+  const [adding, setAdding] = useState(false);
   const scope = ciScope(cwd, branch, session);
   const [link, setLink] = useState(drafts.get(scope) ?? "");
   const [remote, setRemote] = useState("");
   const generation = useRef(0),
     pending = useRef(false);
+  const repairDraft = useRef<{ key: string; instruction: string } | null>(null);
   const sourceRef = useRef(sources);
   sourceRef.current = sources;
   useEffect(() => {
     const run = ++generation.current;
-    setCheckout(undefined);
     setStatus(undefined);
     setError("");
     setBusy(false);
@@ -151,10 +131,14 @@ function CiDialog({
           );
         setStatus(status);
         setCheckout(context);
-        setRemote(context.remotes.length === 1 ? context.remotes[0].url : "");
+        setRemote((previous) => context.remotes.some((remote) => remote.url === previous)
+          ? previous : context.remotes.length === 1 ? context.remotes[0].url : "");
       })
       .catch((error) => {
-        if (run === generation.current) setError(failure(error));
+        if (run === generation.current) {
+          setCheckout(undefined);
+          setError(failure(error));
+        }
       });
     const changed = () => setVersion((v) => v + 1);
     window.addEventListener(AZURE_CHANGE_EVENT, changed);
@@ -216,45 +200,62 @@ function CiDialog({
     }
   };
   return (
-    <Modal
-      trapFocus
-      title="Azure Pipelines"
-      onClose={onClose}
-      className="max-h-[80vh]"
+    <section
+      aria-label="Azure pipeline runs"
+      className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
     >
-      <div className="space-y-3 p-4 text-[12px]">
-        <p className="break-words text-content/60">
-          {status?.connected
-            ? `${status.account} · ${status.site} · credentials on this device`
-            : "Connect the shared Azure account with Build (Read) to inspect CI."}
-        </p>
-        <p className="break-all text-content/50">
-          Worktree: {cwd}
-          <br />
-          Branch: {branch || "detached"} · Session:{" "}
-          {session ?? "Choose when sending"}
-          <br />
-          Checkout commit: {checkout?.commit ?? "Checking…"}
-        </p>
-        <p className="text-content/50">
-          Each source is independent. A passing run does not establish that all
-          required CI passes. PR merge builds need verified source-head
-          evidence.
-        </p>
-        <div className="flex flex-wrap gap-1">
+      <div className="mx-auto w-full max-w-3xl space-y-3 px-5 py-4 text-[12px]">
+        <header className="flex items-center justify-between gap-3 border-b border-content/10 pb-3">
+          <h2 className="text-[13px] font-medium">CI</h2>
+          <span className="truncate text-content/50" title={cwd}>
+            {branch || "Detached checkout"}
+            {checkout?.commit ? ` · ${checkout.commit.slice(0, 8)}` : ""}
+          </span>
+        </header>
+        <details className="text-content/60" open={!status?.connected}>
+          <summary className="cursor-pointer focus-visible:outline-accent">
+            Azure Pipelines
+            {status?.connected && status.account
+              ? ` · ${status.account}`
+              : " · Connect account"}
+          </summary>
+          <p className="break-words text-content/60">
+            {status?.connected
+              ? `${status.account} · ${status.site} · credentials on this device`
+              : "Connect the shared Azure account with Build (Read) to inspect CI."}
+          </p>
+          <p className="break-all text-content/50">
+            Worktree: {cwd}
+            <br />
+            Branch: {branch || "detached"} · Session:{" "}
+            {session ?? "Choose when sending"}
+            <br />
+            Checkout commit: {checkout?.commit ?? "Checking…"}
+          </p>
+          <p className="text-content/50">
+            Each source is independent. A passing run does not establish that
+            all required CI passes. PR merge builds need verified source-head
+            evidence.
+          </p>
           <button className={button} onClick={connect}>
             {status?.connected ? "Connection settings" : "Connect Azure DevOps"}
           </button>
+        </details>
+        <div className="flex flex-wrap gap-1">
           <button
             className={button}
             disabled={busy}
             onClick={() => setVersion((v) => v + 1)}
           >
-            Refresh checkout and CI
+            Refresh
           </button>
           {!adding ? (
-            <button className={button} onClick={() => setAdding(true)}>
-              Add pipeline
+            <button
+              className={`${button} bg-content/10`}
+              disabled={!status?.connected}
+              onClick={() => setAdding(true)}
+            >
+              {sources.length ? "Add pipeline" : "Connect a pipeline"}
             </button>
           ) : null}
         </div>
@@ -263,14 +264,21 @@ function CiDialog({
             {error}
           </p>
         ) : null}
+        {!sources.length ? (
+          <p className="text-content/60">
+            No pipeline connected. Add one to see runs and failed jobs for this
+            checkout.
+          </p>
+        ) : null}
         {adding ? (
           <form
-            className="space-y-2"
+            className="max-w-lg space-y-3 rounded-md border border-content/10 p-3"
             onSubmit={(e) => {
               e.preventDefault();
               void add();
             }}
           >
+            <p className="font-medium">Connect pipeline</p>
             <label className="block">
               Pipeline link
               <input
@@ -291,20 +299,19 @@ function CiDialog({
             </label>
             <label className="block">
               Repository for this pipeline
-              <select
-                aria-label="Pipeline repository remote"
-                className={field}
-                disabled={busy}
+              <Select
+                label="Pipeline repository remote"
                 value={remote}
-                onChange={(e) => setRemote(e.target.value)}
-              >
-                <option value="">Choose the exact checkout remote</option>
-                {checkout?.remotes.map((value) => (
-                  <option key={`${value.name}:${value.url}`} value={value.url}>
-                    {value.name} · {value.url}
-                  </option>
-                ))}
-              </select>
+                disabled={busy}
+                options={[
+                  { value: "", label: "Choose repository" },
+                  ...(checkout?.remotes.map((value) => ({
+                    value: value.url,
+                    label: `${value.name} · ${value.url}`,
+                  })) ?? []),
+                ]}
+                onChange={setRemote}
+              />
             </label>
             <button
               className={button}
@@ -318,12 +325,22 @@ function CiDialog({
             >
               {busy ? "Verifying…" : "Connect pipeline"}
             </button>
+            <button
+              type="button"
+              className={button}
+              disabled={busy}
+              onClick={() => setAdding(false)}
+            >
+              Cancel
+            </button>
           </form>
         ) : null}
         {checkout
-          ? sources.map((source) => (
+          ? sources.map((source, index) => (
               <CiSourcePanel
-                key={`${ciKey(source.target)}:${checkout.commit}:${version}`}
+                key={`${ciKey(source.target)}:${checkout.commit}`}
+                refreshVersion={version}
+                autoDetails={index === 0}
                 source={source}
                 head={{
                   cwd,
@@ -349,28 +366,45 @@ function CiDialog({
                   )
                 }
                 onHandoff={onClose}
+                onReconnect={connect}
+                repairInstruction={repairDraft.current?.key === ciKey(source.target) ? repairDraft.current.instruction : undefined}
+                onRefreshEvidence={(instruction) => {
+                  repairDraft.current = { key: ciKey(source.target), instruction };
+                  onReveal?.();
+                  setVersion((value) => value + 1);
+                }}
               />
             ))
           : null}
       </div>
-    </Modal>
+    </section>
   );
 }
 
 function CiSourcePanel({
+  autoDetails,
+  refreshVersion,
   source,
   head,
   status,
   onSave,
   onRemove,
   onHandoff,
+  onReconnect,
+  onRefreshEvidence,
+  repairInstruction,
 }: {
+  autoDetails: boolean;
+  refreshVersion: number;
   source: CiSource;
   head: CiHead;
   status?: AzureStatus;
   onSave: (last: CiSource["last"]) => void;
   onRemove: () => void;
   onHandoff: () => void;
+  onReconnect: () => void;
+  onRefreshEvidence: (instruction: string) => void;
+  repairInstruction?: string;
 }) {
   const [page, setPage] = useState<CiPage>();
   const [selected, setSelected] = useState<CiRun>();
@@ -391,7 +425,7 @@ function CiSourcePanel({
     action: (current: () => boolean) => Promise<void>,
     detail = false,
   ) => {
-    if (pending.current) return;
+    if (pending.current || !sameAccount) return;
     pending.current = true;
     setBusy(true);
     (detail ? setDetailError : setError)("");
@@ -409,7 +443,7 @@ function CiSourcePanel({
     }
   };
   const refresh = (continuation: string | null = null) =>
-    void run(async (current) => {
+    run(async (current) => {
       const next = await ciLookup(source.target, head, continuation);
       if (!current()) return;
       setPage(next);
@@ -419,7 +453,10 @@ function CiSourcePanel({
           (value) =>
             value.id === selected.id && value.revision === selected.revision,
         );
-      if (!unchanged) {
+      if (!selected && !continuation && autoDetails) {
+        const initial = next.items.find(value => value.id === source.last?.run.id && ciMatches(value)) ?? next.items.find(ciMatches);
+        if (initial) await readSelection(initial, current);
+      } else if (!unchanged) {
         setSelected(undefined);
         setJobs(undefined);
         setJob(undefined);
@@ -434,23 +471,27 @@ function CiSourcePanel({
   useEffect(() => {
     const id = ++generation.current;
     pending.current = false;
-    if (sameAccount) refresh();
-    else
-      setError(
-        "Reconnect the mapped Azure organization/account to read this source.",
-      );
+    if (sameAccount) {
+      setBusy(true);
+      scheduleInitialLoad(() => refresh(), () => generation.current === id);
+    }
+    else if (status) {
+      setPage(undefined);
+      setSelected(undefined);
+      setJobs(undefined);
+      setJob(undefined);
+      setLog(undefined);
+      setSkip(0);
+      setDetailError("");
+      setBusy(false);
+      setError("Reconnect the mapped Azure organization/account to read this source.");
+    }
     return () => {
       if (generation.current === id) generation.current++;
     };
-  }, [sameAccount]);
-  const select = (value: CiRun) =>
-    void run(async (current) => {
-      const checked = await ciRead<CiRun>(
-        source.target,
-        head,
-        value,
-        "summary",
-      );
+  }, [sameAccount, status, refreshVersion]);
+  const readSelection = async (value: CiRun, current: () => boolean) => {
+      const checked = await ciRead<CiRun>(source.target, head, value, "summary");
       if (!current()) return;
       setSelected(checked);
       setJobs(undefined);
@@ -459,7 +500,14 @@ function CiSourcePanel({
       setSkip(0);
       setDetailError("");
       onSave({ run: checked, commit: head.commit, checkedAt: Date.now() });
-    });
+      try {
+        const data = await ciRead<CiJobs>(source.target, head, checked, "jobs", { skip: 0 });
+        if (current()) setJobs(data);
+      } catch (error) {
+        if (current()) setDetailError(failure(error));
+      }
+  };
+  const select = (value: CiRun) => void run(current => readSelection(value, current));
   const loadJobs = (skip = 0) =>
     void run(async (current) => {
       if (!selected) return;
@@ -486,7 +534,7 @@ function CiSourcePanel({
         setLog(data);
       }
     }, true);
-  const handoff = () =>
+  const handoff = (repair = false) =>
     void run(async (current) => {
       if (!selected || !job || !log || !ciMatches(selected)) return;
       const checked = await ciRead<CiLog>(
@@ -502,13 +550,19 @@ function CiSourcePanel({
         },
       );
       if (!current()) return;
+      const draft = repair
+        ? ciRepair(source, head, selected, job, checked)
+        : undefined;
       requestAgentContext({
-        context: ciLogContext(source, head, selected, job, checked),
+        repair: draft?.evidence,
+        onRefreshEvidence,
+        onPrepared: onHandoff,
+        context:
+          draft ? { ...draft.context, instruction: repairInstruction ?? draft.context.instruction } : ciLogContext(source, head, selected, job, checked),
         cwd: head.cwd,
         sourceSessionId: source.session,
         requireDestinationSelection: !source.session,
       });
-      onHandoff();
     }, true);
   const external = (id?: number) =>
     void openUrl(ciUrl(source.target, id)).catch((error) =>
@@ -516,6 +570,7 @@ function CiSourcePanel({
     );
   return (
     <section className="space-y-2 border-t border-content/10 pt-3">
+      <RepairStatus scope={ciKey(source.target)} cwd={head.cwd} />
       <h3 className="font-medium">
         {source.definitionName} · {source.projectName}
       </h3>
@@ -531,6 +586,9 @@ function CiSourcePanel({
           <br />
           {source.remote}
         </p>
+        <button className={button} disabled={busy} onClick={onRemove}>
+          Disconnect pipeline
+        </button>
       </details>
       <div className="flex flex-wrap gap-1">
         <button
@@ -543,19 +601,17 @@ function CiSourcePanel({
         <button className={button} onClick={() => external()}>
           Open pipeline in Azure
         </button>
-        <button className={button} disabled={busy} onClick={onRemove}>
-          Remove mapping
-        </button>
       </div>
-      {busy ? (
+      {busy || !status ? (
         <p role="status" className="text-content/50">
           Loading selected CI evidence…
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="break-words">
-          {error}
-        </p>
+        <div>
+          <p role="alert" className="break-words">{error}</p>
+          <button className={button} onClick={onReconnect}>Connection settings</button>
+        </div>
       ) : null}
       {page && !page.items.some(ciMatches) ? (
         <p className="text-content/60">
@@ -614,7 +670,7 @@ function CiSourcePanel({
           {jobs?.items.map((value) => (
             <div
               key={`${value.id}:${value.attempt}`}
-              className="space-y-1 rounded border border-content/10 p-2"
+              className="space-y-1 border-b border-content/10 py-2"
             >
               <p className="break-words">
                 {value.parentName ? `${value.parentName} / ` : ""}
@@ -631,15 +687,13 @@ function CiSourcePanel({
                   · open in Azure for historical logs
                 </p>
               ) : null}
-              <button
+              {value.logId && value.attempt ? <button
                 className={button}
-                disabled={
-                  busy || !sameAccount || !value.logId || !value.attempt
-                }
+                disabled={busy || !sameAccount}
                 onClick={() => loadLog(value)}
               >
                 Load log · {value.name}
-              </button>
+              </button> : <p className="text-content/50">No log available</p>}
             </div>
           ))}
           {jobs && skip > 0 ? (
@@ -697,10 +751,21 @@ function CiSourcePanel({
                 <button
                   className={button}
                   disabled={busy || !sameAccount || !ciMatches(selected)}
-                  onClick={handoff}
+                  onClick={() => handoff()}
                 >
                   Send log to agent
                 </button>
+                {selected.result === "failed" &&
+                job.result === "failed" &&
+                ciMatches(selected) ? (
+                  <button
+                    className={button}
+                    disabled={busy || !sameAccount}
+                    onClick={() => handoff(true)}
+                  >
+                    Fix CI
+                  </button>
+                ) : null}
               </div>
               {!ciMatches(selected) ? (
                 <p className="text-content/50">

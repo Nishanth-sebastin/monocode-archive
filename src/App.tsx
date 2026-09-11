@@ -1,3 +1,10 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { gitPrStatus } from "./lib/fs";
+import { ciContext } from "./lib/azurePipelines";
+import type { DeliveryTabSource } from "./lib/layout";
+import { RepairStatus } from "./chrome/RepairStatus";
+import { assertRepairOwner, repairOwnerError, reserveRepair, updateRepair, validateRepair, OPEN_REPAIR, repairRecords, type RepairDelivery } from "./lib/repair";
+import { composeAgentContext } from "./lib/agentContext";
 import { AgentContextPicker } from "./chrome/AgentContextPicker";
 import { PREPARE_AGENT_CONTEXT, removeContextItem, contextFromTicketDescriptions, linkTicketContext, prepareSessionContext, contextFromTickets, type AgentContextRequest } from "./lib/agentContext";
 import { invoke } from "@tauri-apps/api/core";
@@ -716,6 +723,7 @@ export default function App({
 
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
+  const repairCheckingRef = useRef(new Set<string>());
   const queueDispatchingRef = useRef(new Set<string>());
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
@@ -934,6 +942,7 @@ export default function App({
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
   const active =
     sessions.find((session) => session.id === activeTab?.focusedId) ??
+    sessions.find((session) => activeTab && session.id === focusedFileTab(activeTab)?.delivery?.sourceSessionId) ??
     sessions.find(
       (session) => activeTab && leafIds(activeTab.layout).includes(session.id),
     );
@@ -1502,7 +1511,7 @@ export default function App({
           session.id === (request.sourceSessionId ?? activeSessionIdRef.current),
       );
       if (
-        request.prepareInSource &&
+        request.prepareInSource && !request.repair &&
         source &&
         (!request.cwd || sessionWorkCwd(source) === request.cwd)
       ) {
@@ -1552,6 +1561,24 @@ export default function App({
       : destination;
     if (!target)
       throw new Error("Conversation closed. Choose another destination.");
+    if (request.repair) {
+      const error = repairOwnerError(target, request.repair);
+      if (error) throw new Error(error);
+      const delivery: RepairDelivery = { id: crypto.randomUUID(), evidence: request.repair, context, owner: { id: target.id, harness: target.harness, model: target.model, cwd: sessionWorkCwd(target), runtimeMode: target.runtimeMode, providerSessionId: target.providerSessionId } };
+      signal?.throwIfAborted();
+      reserveRepair(delivery, repairCheckingRef.current.has(target.id));
+      if (!existing) {
+        const updated = [...sessionsRef.current, target];
+        sessionsRef.current = updated;
+        setSessions(updated);
+        const tab = newTab(target.id);
+        appendTab(tab, target.cwd);
+        setActiveTabId(tab.id);
+      }
+      const accepted = await onSubmit(target.id, composeAgentContext(context, ""), [], { repair: delivery, followUpBehavior: "queue", noteCard: undefined, handoffCard: undefined, signal });
+      if (!accepted) throw new Error(repairRecords().find(row => row.id === delivery.id)?.detail || "Repair was not delivered. Refresh evidence and retry.");
+      return target.id;
+    }
     const tickets = request.context.entries.every(entry => !!entry.ticket);
     let next = tickets ? linkTicketContext(target, context) : prepareSessionContext(target, context, true);
     if (existing) {
@@ -2578,6 +2605,13 @@ export default function App({
     (path: string, kind?: GitFileDiffKind) => onOpenDiff(path, undefined, kind),
     [onOpenDiff],
   );
+
+  const onOpenDelivery = useCallback((cwd: string, delivery: DeliveryTabSource) => {
+    setTabs(previous => previous.map(tab => tab.id === activeTabId
+      ? openEditorTab(tab, { id: crypto.randomUUID(), path: delivery.kind === "pr" ? "Pull requests" : "CI", cwd, delivery })
+      : tab));
+    setComposerFocused(false);
+  }, [activeTabId]);
 
   /** Stack every working-tree change in one review, whatever the diff-view setting. */
   const onOpenAllChanges = useCallback(() => {
@@ -3699,6 +3733,10 @@ export default function App({
   );
 
   const onSelectFileSurface = useCallback((paneId: string, fileId: string) => {
+    const owner = tabsRef.current.find(tab => findSurfacePane(tab, paneId)?.pane.files.some(file => file.id === fileId));
+    if (!owner) return;
+    activateTab(owner.id);
+    setInboxViewOpen(false);
     setTabs((prev) =>
       prev.map((tab) => {
         const found = findSurfacePane(tab, paneId);
@@ -3713,7 +3751,7 @@ export default function App({
       }),
     );
     setComposerFocused(false);
-  }, []);
+  }, [activateTab]);
 
   const onModelChange = useCallback(
     (sessionId: string, harness: HarnessId, model: string) => {
@@ -3783,11 +3821,13 @@ export default function App({
   );
 
   const onSubmit = useCallback(
-    (
+    async (
       sessionId: string,
       text: string,
       attachments: Attachment[] = [],
       options?: {
+        repair?: RepairDelivery;
+        signal?: AbortSignal;
         secondOpinion?: SecondOpinionMeta;
         followUpBehavior?: FollowUpBehavior;
         noteCard?: NoteComposerCard;
@@ -3799,8 +3839,36 @@ export default function App({
       },
     ) => {
       if (removingSessionIds.current.has(sessionId)) return;
-      const storedCurrent = sessionsRef.current.find((s) => s.id === sessionId);
+      let storedCurrent = sessionsRef.current.find((s) => s.id === sessionId);
+      const repair = options?.repair ?? storedCurrent?.queuedMessages?.find(row => row.id === options?.queuedMessageId)?.repair;
       if (!storedCurrent) return;
+      if (repair) {
+        if (repairCheckingRef.current.has(sessionId)) return false;
+        repairCheckingRef.current.add(sessionId);
+        try {
+          options?.signal?.throwIfAborted();
+          assertRepairOwner(repair, storedCurrent);
+          const record = repairRecords().find(row => row.id === repair.id);
+          if (!record || !["checking", "queued"].includes(record.state)) throw new Error("This repair was already attempted or cancelled. Remove it from the queue and refresh evidence.");
+          if (options?.followUpBehavior === "steer") throw new Error("Repair requests must start a separately tracked turn; use Queue for owner.");
+          await validateRepair(repair.evidence, repair.context);
+          options?.signal?.throwIfAborted();
+          storedCurrent = sessionsRef.current.find(s => s.id === sessionId);
+          assertRepairOwner(repair, storedCurrent);
+          if (removingSessionIds.current.has(sessionId)) throw new Error("Conversation is being removed.");
+        } catch (error) {
+          updateRepair(repair.id, "blocked", String(error));
+          if (options?.queuedMessageId) setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, queueStatus: "paused" } : s));
+          return false;
+        } finally { repairCheckingRef.current.delete(sessionId); }
+      }
+      if (!storedCurrent) return false;
+      const setSubmissionSessions = (update: (prev: Session[]) => Session[]) => {
+        if (!repair) { setSessions(update); return; }
+        const next = update(sessionsRef.current);
+        sessionsRef.current = next;
+        setSessions(next);
+      };
       const current = options?.buildTarget
         ? withPlanBuildTarget(storedCurrent, options.buildTarget)
         : storedCurrent;
@@ -3835,7 +3903,7 @@ export default function App({
       }
       if (isPreparingHandoff(current)) return;
       const workCwd = sessionWorkCwd(current);
-      const submittedText = intent === "build" ? "Build approved plan" : text;
+      const submittedText = repair ? composeAgentContext(repair.context, "") : intent === "build" ? "Build approved plan" : text;
       const rawCommand = isNativeCommandPrompt(submittedText, current.harness);
       const harnessText = rawCommand
         ? submittedText
@@ -3852,7 +3920,7 @@ export default function App({
             ? "queue"
             : (options?.followUpBehavior ?? loadFollowUpBehavior());
         if (followUpBehavior === "queue") {
-          setSessions((prev) =>
+          setSubmissionSessions((prev) =>
             prev.map((s) =>
               s.id === sessionId
                 ? {
@@ -3865,6 +3933,7 @@ export default function App({
                       ...(s.queuedMessages ?? []),
                       {
                         id: crypto.randomUUID(),
+                        repair,
                         text,
                         attachments,
                         noteCard,
@@ -3878,7 +3947,8 @@ export default function App({
                 : s,
             ),
           );
-          return;
+          if (repair) updateRepair(repair.id, "queued", "Queued for this agent; evidence will be checked again before delivery. App must remain open.");
+          return true;
         }
         if (
           !isLiveHarness(current.harness) ||
@@ -3980,7 +4050,7 @@ export default function App({
         void cancelHarnessTurn(pendingSwitch.from, sessionId);
       }
 
-      setSessions((prev) =>
+      setSubmissionSessions((prev) =>
         prev.map((s) => {
           if (s.id !== sessionId) return s;
           const selected = options?.buildTarget
@@ -4187,6 +4257,12 @@ export default function App({
           const earlier = queuedHandoff
             ? userMessagesAfterHandoff(current)
             : [];
+          if (repair) {
+            await validateRepair(repair.evidence, repair.context);
+            assertRepairOwner(repair, sessionsRef.current.find(s => s.id === sessionId));
+            if (turnGen.current.get(sessionId) !== gen || removingSessionIds.current.has(sessionId)) throw new Error("Repair was cancelled before delivery.");
+            updateRepair(repair.id, "running", "Request submitted to the selected agent. Completion does not mean CI passes or comments are resolved.");
+          }
           await sendHarnessTurn({
             harness: current.harness,
             sessionId,
@@ -4237,6 +4313,7 @@ export default function App({
           }
           buildSucceeded = true;
         } catch (error: unknown) {
+          if (repair) updateRepair(repair.id, repairRecords().find(row => row.id === repair.id)?.state === "running" ? "uncertain" : "blocked", String(error));
           if (turnGen.current.get(sessionId) !== gen) return;
           if (wrap) revealHandoff(wrap.text);
           const message =
@@ -4248,7 +4325,9 @@ export default function App({
             message,
           });
         } finally {
+          if (repair && turnGen.current.get(sessionId) !== gen) updateRepair(repair.id, "uncertain", "Turn interrupted. Inspect the conversation before allowing another request.");
           if (turnGen.current.get(sessionId) !== gen) return;
+          if (repair && buildSucceeded) updateRepair(repair.id, providerFailureSeen ? "uncertain" : "completed", providerFailureSeen ? "Provider reported a failure; inspect the conversation before retry." : "Agent turn completed. Verify the changes and provider results separately.");
           flushHarnessEvents();
           await flushSessionCheckpoint(sessionId);
           setSessions((prev) =>
@@ -4292,9 +4371,16 @@ export default function App({
           window.setTimeout(() => nudgeWatchedFiles(), 150);
         }
       })();
+      return true;
     },
     [enqueueHarnessEvent, flushHarnessEvents],
   );
+
+  useEffect(() => {
+    const open = (event: Event) => { const id = (event as CustomEvent<string>).detail; setInboxViewOpen(false); void onSelectHistorySession(id); };
+    window.addEventListener(OPEN_REPAIR, open);
+    return () => window.removeEventListener(OPEN_REPAIR, open);
+  }, [onSelectHistorySession]);
 
   const onUpdatePlan = useCallback(
     (sessionId: string, blockId: string, text: string) => {
@@ -4379,7 +4465,7 @@ export default function App({
         continue;
       }
       if (
-        !canDispatchQueuedHead(session) ||
+        !canDispatchQueuedHead(session, repairCheckingRef.current.has(session.id)) ||
         queueDispatchingRef.current.has(session.id)
       ) {
         continue;
@@ -4400,7 +4486,7 @@ export default function App({
             !latest ||
             !head ||
             head.id !== next.id ||
-            !canDispatchQueuedHead(latest)
+            !canDispatchQueuedHead(latest, repairCheckingRef.current.has(session.id))
           ) {
             return;
           }
@@ -4421,6 +4507,8 @@ export default function App({
 
   const onDeleteQueuedMessage = useCallback(
     (sessionId: string, messageId: string) => {
+      const repair = sessionsRef.current.find(s => s.id === sessionId)?.queuedMessages?.find(row => row.id === messageId)?.repair;
+      if (repair) updateRepair(repair.id, "blocked", "Queued repair cancelled before delivery.");
       setSessions((prev) =>
         prev.map((session) =>
           session.id === sessionId
@@ -4453,7 +4541,7 @@ export default function App({
             ? {
                 ...session,
                 queuedMessages: session.queuedMessages?.map((message) =>
-                  message.id === messageId ? { ...message, text } : message,
+                  message.id === messageId && !message.repair ? { ...message, text } : message,
                 ),
                 editingQueuedMessageId: undefined,
               }
@@ -4991,6 +5079,45 @@ export default function App({
     setInboxViewOpen(false);
     setInboxTarget(null);
   }, []);
+
+  const onOpenInboxDelivery = useCallback(async (sessionId: string, kind: "pr" | "ci", current: () => boolean, provider: "github" | "azure", prUrl?: string) => {
+    const session = await ensureOpenSession(sessionId);
+    if (!current()) return;
+    if (!session || session.inboxAsk) throw new Error("Open a workspace conversation for this item before reviewing PRs or CI.");
+    const cwd = sessionWorkCwd(session);
+    if (provider === "github") {
+      const url = prUrl ?? (await gitPrStatus(cwd))?.url;
+      if (!current()) return;
+      if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
+        throw new Error("The conversation checkout changed. Open its review again.");
+      if (!url) throw new Error("No GitHub PR found for this conversation’s branch. Open the PR branch or choose another delivery provider.");
+      const target = new URL(url);
+      if (target.protocol !== "https:" || target.username || target.password || !/^\/[^/]+\/[^/]+\/pull\/\d+\/?$/.test(target.pathname))
+        throw new Error("GitHub returned an invalid PR link.");
+      target.search = "";
+      target.hash = "";
+      target.pathname = target.pathname.replace(/\/$/, "") + (kind === "ci" ? "/checks" : "");
+      await openUrl(target.href);
+      return;
+    }
+    const checkout = await ciContext(cwd);
+    if (!current()) return;
+    if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
+      throw new Error("The conversation checkout changed. Open its review again.");
+    const existing = tabsRef.current.find(tab => leafIds(tab.layout).includes(sessionId));
+    const base = existing ?? newTab(sessionId);
+    const file = { id: crypto.randomUUID(), path: kind === "pr" ? "Pull requests" : "CI", cwd, delivery: { kind, branch: checkout.branch, sourceSessionId: sessionId } };
+    if (existing) {
+      setTabs(previous => previous.map(tab => tab.id === existing.id ? openEditorTab(tab, file) : tab));
+      activateTab(existing.id);
+    } else {
+      appendTab(openEditorTab(base, file), cwd);
+      setActiveTabId(base.id);
+    }
+    setInboxViewOpen(false);
+    setSidebarTab("changes");
+    setComposerFocused(false);
+  }, [ensureOpenSession, activateTab, appendTab]);
 
   const onOpenInboxSession = useCallback(
     async (sessionId: string) => {
@@ -5572,6 +5699,7 @@ export default function App({
         onGoBack={onRailBack}
         onGoForward={onRailForward}
         onOpenDiff={onOpenWorkingTreeDiff}
+        onOpenDelivery={onOpenDelivery}
         onOpenAllChanges={onOpenAllChanges}
         onOpenCommit={onOpenCommit}
         onShowSourceControl={onToggleChanges}
@@ -5675,6 +5803,7 @@ export default function App({
               }}
             />
           ) : null}
+          {active ? <RepairStatus session={active.id} /> : null}
           <TitleBar
             tabs={titleTabs}
             activeId={activeTabId}
@@ -5853,6 +5982,7 @@ export default function App({
             onAskMount={setInboxAskPortal}
             sessions={inboxRelatedSessions}
             onOpenSession={onOpenInboxSession}
+            onOpenDelivery={onOpenInboxDelivery}
             target={inboxTarget}
             visible={inboxViewOpen}
             conversationId={inboxConversationId}

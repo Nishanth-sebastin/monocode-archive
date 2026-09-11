@@ -386,3 +386,43 @@ it("restores main and two worktree conversations without rebinding their owners"
   }
   expect(JSON.stringify(sessions)).toBe(before);
 });
+
+it("restores delivery scope without treating it as an editable file", () => {
+  const file = {
+    id: "pr-1",
+    path: "Pull requests",
+    cwd: "/repo",
+    delivery: {
+      kind: "pr" as const,
+      branch: "feature",
+      sourceSessionId: "owner",
+    },
+  };
+  const tab = {
+    ...newTab("owner"),
+    id: "t1",
+    editorPanes: [{ id: "e1", files: [file], activeFileId: file.id }],
+  };
+  const snapshot = collectWorkspaceSnapshot([tab], [], "t1", "/repo");
+  const restored = hydrateWorkspaceSnapshot(snapshot, new Map())?.tabs[0]
+    ?.editorPanes[0]?.files[0];
+  expect(restored).toEqual(file);
+  for (const bad of [
+    { ...file, delivery: { ...file.delivery, kind: "shell" } },
+    { ...file, terminal: true },
+  ]) {
+    const invalid = {
+      ...snapshot,
+      tabs: [
+        {
+          ...tab,
+          editorPanes: [{ id: "e1", files: [bad], activeFileId: bad.id }],
+        },
+      ],
+    };
+    expect(
+      parseWorkspaceSnapshot(JSON.stringify(invalid))?.tabs[0]?.editorPanes?.[0]
+        ?.files?.[0],
+    ).toBeUndefined();
+  }
+});

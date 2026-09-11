@@ -182,9 +182,9 @@ describe("openChangesTab", () => {
     );
     const next = openChangesTab(withReview, cwd, "/repo/b.ts");
     const files = next.editorPanes[0]?.files ?? [];
-    expect(files.some((file) => editorTabKey(file) === `review:${cwd}/a.ts`)).toBe(
-      false,
-    );
+    expect(
+      files.some((file) => editorTabKey(file) === `review:${cwd}/a.ts`),
+    ).toBe(false);
     expect(files.filter(isChangesTab)).toHaveLength(1);
   });
 
@@ -501,4 +501,30 @@ describe("placePane", () => {
     expect(placePane(tree, "b", "missing", "right")).toBe(tree);
     expect(placePane(tree, "a", "a", "right")).toBe(tree);
   });
+});
+
+it("reuses delivery tabs only for the exact checkout, branch, kind and owner", () => {
+  const file = {
+    id: "pr-1",
+    path: "Pull requests",
+    cwd: "/repo",
+    delivery: {
+      kind: "pr" as const,
+      branch: "feature",
+      sourceSessionId: "owner",
+    },
+  };
+  let tab = openEditorTab(newTab("owner"), file);
+  tab = openEditorTab(tab, { ...file, id: "pr-2" });
+  expect(tab.editorPanes[0].files).toHaveLength(1);
+  expect(isFilesystemTab(file)).toBe(false);
+  for (const variant of [
+    { ...file, cwd: "/other" },
+    { ...file, delivery: { ...file.delivery, branch: "other" } },
+    { ...file, delivery: { ...file.delivery, sourceSessionId: "other" } },
+    { ...file, delivery: { ...file.delivery, kind: "ci" as const } },
+  ]) {
+    tab = openEditorTab(tab, { ...variant, id: crypto.randomUUID() });
+  }
+  expect(tab.editorPanes[0].files).toHaveLength(5);
 });

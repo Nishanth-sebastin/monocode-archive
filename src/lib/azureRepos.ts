@@ -1,3 +1,4 @@
+export const AZURE_PR_ASSOCIATIONS_CHANGED = "monocode:azure-pr-associations";
 import { invoke } from "@tauri-apps/api/core";
 import { contextFromText, type AgentContext } from "./agentContext";
 import type { LinkedWorkItem } from "./session";
@@ -534,4 +535,5 @@ export function saveAzurePrAssociation(
       },
     });
   localStorage.setItem(ASSOCIATIONS_KEY, JSON.stringify(rows.slice(0, 100)));
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(AZURE_PR_ASSOCIATIONS_CHANGED));
 }

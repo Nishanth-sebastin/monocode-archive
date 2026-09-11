@@ -1,3 +1,5 @@
+import { ContextCheckbox } from "./InboxContextPicker";
+import { repairOwnerError } from "../lib/repair";
 import { searchSessions, type SessionSummary } from "../lib/sessionStore";
 import { useEffect, useRef, useState } from "react";
 import { getVerifiedFamilies } from "../lib/repositoryFamilies";
@@ -43,8 +45,11 @@ export function AgentContextPicker({
     request.context.entries.length > 0 &&
     request.context.entries.every((entry) => !!entry.ticket);
   const [destination, setDestination] = useState(
-    request.requireDestinationSelection ? "" : request.sourceSessionId ?? "new",
+    request.requireDestinationSelection ? "" : request.repair && !sessions.some(s => s.id === request.sourceSessionId && !repairOwnerError(s, request.repair!)) ? "new" : request.sourceSessionId ?? "new",
   );
+  const [choosingDestination, setChoosingDestination] = useState(!!request.requireDestinationSelection);
+  const [instruction, setInstruction] = useState(request.context.instruction ?? "");
+  const [selected, setSelected] = useState(() => request.context.entries.map(entry => entry.id));
   const [fresh, setFresh] = useState(() => newDefaultSession(request.cwd));
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
@@ -97,7 +102,9 @@ export function AgentContextPicker({
     destination === "new"
       ? fresh
       : available.find((session) => session.id === destination);
-  const unsupported = !destination
+  const repairError = request.repair ? !selected.length || !instruction.trim() ? "Select evidence and enter an instruction." : destination === "new" ? repairOwnerError(fresh, request.repair) : sessions.find(s => s.id === destination) ? repairOwnerError(sessions.find(s => s.id === destination), request.repair) : "" : "";
+  const staleRepair = !!request.repair && /changed|no longer|stale|already attempted/i.test(error);
+  const unsupported = repairError || (!destination
     ? "Choose an agent conversation or a new conversation."
     : !target
     ? "Conversation closed. Choose another."
@@ -107,7 +114,7 @@ export function AgentContextPicker({
       ? "This agent does not support attachments."
       : destination === "new" && (!fresh.cwd || fresh.cwd === "~")
         ? "Choose a project."
-        : "";
+        : "");
   const knownProjects = [
     ...new Map(
       [
@@ -138,18 +145,36 @@ export function AgentContextPicker({
     .slice(0, 30);
   return (
     <Modal
-      title={tickets ? "Open conversation" : "Send to agent"}
+      title={request.repair ? request.repair.kind === "ci" ? "Fix CI" : "Address comments" : tickets ? "Open conversation" : "Send to agent"}
       description={
-        tickets
+        request.repair ? request.repair.kind === "comments" ? `PR #${request.repair.association.target.number} · ${request.repair.association.pr.title}` : `Run ${request.repair.run.id} · ${request.repair.job.name}` : tickets
           ? `${request.context.entries.length} selected · titles and descriptions · send when ready`
           : "Selected context · does not auto-send"
       }
       onClose={onClose}
-      className="max-h-[85vh] [&_header_h2]:text-base"
+      className="max-h-[80vh] [&_header_h2]:text-base"
     >
-      <div ref={body} className="p-2 text-[12px] text-content">
+      <div ref={body} className="space-y-3 p-3 text-[12px] text-content">
+        {request.repair ? <div className="space-y-3">
+          <div className="flex items-center justify-between text-content/60"><span>{request.repair.kind === "comments" ? "Comments" : "Log evidence"} · {selected.length} selected</span><button type="button" className="rounded px-1.5 py-1 hover:bg-content/5" disabled={pending} onClick={() => setSelected(selected.length === request.context.entries.length ? [] : request.context.entries.map(entry => entry.id))}>{selected.length === request.context.entries.length ? "Clear selection" : "Select all"}</button></div>
+          <div className="max-h-52 overflow-auto rounded-md border border-content/10">{request.context.entries.map(entry => {
+            const comment = request.repair?.kind === "comments" ? request.repair.threads.find(thread => thread.entry === entry.id)?.comment : undefined;
+            return <div key={entry.id} className="flex items-start gap-2 border-b border-content/5 p-2.5 last:border-0">
+              <ContextCheckbox label={entry.title} disabled={pending} checked={selected.includes(entry.id)} onChange={() => setSelected(ids => ids.includes(entry.id) ? ids.filter(id => id !== entry.id) : [...ids, entry.id])} />
+              <div className="min-w-0 flex-1"><label className="block text-content/70">{comment ? `${comment.author} · comment ${comment.id}` : entry.title}</label>
+                {comment?.file ? <p className="truncate text-[11px] text-content/40" title={comment.file}>{comment.file}{comment.line ? `:${comment.line}` : ""}</p> : null}
+                <p className="mt-1 whitespace-pre-wrap break-words text-content/85 line-clamp-3">{comment?.text ?? entry.text.slice(0, 500)}</p>
+                <details className="mt-1 text-[11px] text-content/45"><summary className="cursor-pointer">Context</summary><pre className="mt-1 whitespace-pre-wrap break-words font-sans">{entry.text}</pre></details>
+              </div>
+            </div>;
+          })}</div>
+          <label className="block text-content/60">Instructions<textarea aria-label="Repair instruction" maxLength={4000} rows={2} disabled={pending} className="mt-1 w-full resize-y rounded-md border border-content/10 bg-content/5 px-2 py-1.5 text-[12px] text-content outline-accent" value={instruction} onChange={event => setInstruction(event.target.value)} /></label>
+          <details className="text-[11px] text-content/50"><summary className="cursor-pointer">{request.repair.head.branch} · {request.repair.head.commit.slice(0,8)} · {wslLocation(request.repair.head.cwd) ? "WSL" : "Local checkout"}</summary><p className="mt-1 break-all">{request.repair.head.cwd}<br />{request.repair.kind === "ci" ? `Azure Pipelines · ${request.repair.source.projectName}/${request.repair.source.definitionName} · account ${request.repair.source.target.accountId}` : `Azure Repos · ${request.repair.association.projectName}/${request.repair.association.repositoryName} · account ${request.repair.association.target.accountId}`}</p></details>
+        </div> : null}
+        <details open={!request.repair || choosingDestination || !destination} onToggle={event => { if (request.repair) setChoosingDestination(event.currentTarget.open); }}>
+          <summary className={request.repair ? "cursor-pointer rounded-md bg-content/5 px-2 py-2 text-content/70" : "hidden"}>Send to · {destination === "new" ? "New conversation" : target?.title || "Choose conversation"}{target ? ` · ${HARNESS_TITLE[target.harness]}` : ""}</summary>
         <input
-          autoFocus
+          autoFocus={!request.repair}
           aria-label="Search conversations"
           placeholder="Find a conversation…"
           value={search}
@@ -166,7 +191,7 @@ export function AgentContextPicker({
               key={session.id}
               data-destination={session.id}
               aria-pressed={destination === session.id}
-              onClick={() => setDestination(session.id)}
+              onClick={() => { setDestination(session.id); setChoosingDestination(false); }}
               className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-content/5 ${destination === session.id ? "bg-content/5" : ""}`}
             >
               <Check
@@ -201,20 +226,21 @@ export function AgentContextPicker({
         <button
           type="button"
           aria-pressed={destination === "new"}
-          onClick={() => setDestination("new")}
+          onClick={() => { setDestination("new"); setChoosingDestination(false); }}
           className={`mt-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-content/5 ${destination === "new" ? "bg-content/5" : ""}`}
         >
           <Plus className="size-3.5" />
           New conversation
         </button>
+        </details>
         {destination === "new" ? (
           <div className="flex min-w-0 items-center justify-between gap-2 px-2 py-1">
-            <CwdPicker
+            {request.repair ? <span className="text-content/50">Use prepared checkout</span> : <CwdPicker
               cwd={fresh.cwd}
               recents={knownProjects}
               placement="above"
               onCwdChange={(cwd) => setFresh({ ...fresh, cwd })}
-            />
+            />}
             <span className="flex shrink-0 items-center gap-1 text-content/60">
               {HARNESS_TITLE[fresh.harness]}
               <SecondOpinionButton
@@ -232,9 +258,11 @@ export function AgentContextPicker({
             </span>
           </div>
         ) : null}
+        {request.repair ? <p className="text-[11px] text-content/40">Busy agents queue this request. Replies, pushes and merges stay manual.</p> : null}
         {error || unsupported ? (
           <p role="alert" className="px-2 py-1 text-red-400">
             {error || unsupported}
+            {request.repair && error && request.onRefreshEvidence ? <button className="ml-2 underline" disabled={pending} onClick={() => { request.onRefreshEvidence?.(instruction); onClose(); }}>Refresh evidence</button> : null}
           </p>
         ) : null}
         <div className="sticky bottom-0 mt-2 flex justify-end gap-2 border-t border-content/10 bg-background-base pt-2">
@@ -247,10 +275,10 @@ export function AgentContextPicker({
           </button>
           <button
             type="button"
-            disabled={!!unsupported || pending}
+            disabled={!!unsupported || pending || staleRepair}
             className="rounded-md bg-content/10 px-2.5 py-1.5 disabled:opacity-40"
             onClick={async () => {
-              if (submitting.current || unsupported) return;
+              if (submitting.current || unsupported || staleRepair) return;
               submitting.current = true;
               setPending(true);
               const controller = new AbortController();
@@ -259,7 +287,7 @@ export function AgentContextPicker({
                 const id = await onPrepare(
                   {
                     ...request,
-                    context: request.context,
+                    context: request.repair ? { ...request.context, entries: request.context.entries.filter(entry => selected.includes(entry.id)), instruction } : request.context,
                   },
                   destination === "new" ? fresh : destination,
                   controller.signal,
@@ -276,7 +304,8 @@ export function AgentContextPicker({
             }}
           >
             {pending
-              ? "Loading context…"
+              ? request.repair ? "Checking evidence…" : "Loading context…"
+              : request.repair ? destination === "new" ? "Start repair session" : target && "busy" in target && target.busy ? "Queue for owner" : "Send to owner"
               : tickets
                 ? "Open conversation"
                 : "Add to chat"}

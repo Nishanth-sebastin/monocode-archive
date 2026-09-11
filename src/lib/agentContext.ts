@@ -49,9 +49,11 @@ export type AgentContextRequest = {
   tickets?: readonly InboxItem[];
   sourceSessionId?: string;
   cwd?: string;
+  repair?: import("./repair").RepairEvidence;
   prepareInSource?: boolean;
   requireDestinationSelection?: boolean;
   onPrepared?: () => void;
+  onRefreshEvidence?: (instruction: string) => void;
 };
 
 export function boundAgentContext(context: AgentContext): AgentContext {

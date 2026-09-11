@@ -10,6 +10,18 @@ pub(crate) fn output(
     timeout: Duration,
     limit: usize,
 ) -> Result<Output, String> {
+    output_cancellable(command, timeout, limit, || false)
+}
+
+pub(crate) fn output_cancellable(
+    command: &mut Command,
+    timeout: Duration,
+    limit: usize,
+    cancelled: impl Fn() -> bool,
+) -> Result<Output, String> {
+    if cancelled() {
+        return Err("Command cancelled".into());
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -44,6 +56,9 @@ pub(crate) fn output(
     let mut stderr = None;
     let mut status = None;
     let result = loop {
+        if cancelled() {
+            break Err("Command cancelled".into());
+        }
         if stdout.is_none() {
             stdout = out.try_recv().ok();
         }
@@ -137,6 +152,17 @@ mod tests {
                 .unwrap_err()
                 .contains("timed out")
         );
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let start = Instant::now();
+        assert!(output_cancellable(
+            &mut command(script),
+            Duration::from_secs(10),
+            1024,
+            || checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0
+        )
+        .unwrap_err()
+        .contains("cancelled"));
         assert!(start.elapsed() < Duration::from_secs(5));
     }
 }

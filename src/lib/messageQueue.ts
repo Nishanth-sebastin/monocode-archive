@@ -33,8 +33,8 @@ export function dequeueQueuedMessage(
  * True when the idle session can send its queued head as a new turn.
  * Busy / paused / resuming / preparing-handoff / editing-the-head all wait.
  */
-export function canDispatchQueuedHead(session: Session): boolean {
-  if (session.busy) return false;
+export function canDispatchQueuedHead(session: Session, checkingRepair = false): boolean {
+  if (session.busy || checkingRepair) return false;
   if (session.queueStatus === "paused" || session.queueStatus === "resuming") {
     return false;
   }
@@ -55,7 +55,7 @@ export function queuedMessageForSubmit(
     (entry) => entry.id === messageId,
   );
   if (!message) return undefined;
-  if (mode === "steer") return message;
+  if (mode === "steer") return message.repair ? undefined : message;
   if (queuedHead(session)?.id !== messageId) return undefined;
   if (!canDispatchQueuedHead(session)) return undefined;
   return message;

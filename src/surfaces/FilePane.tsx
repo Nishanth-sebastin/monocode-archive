@@ -1,5 +1,7 @@
+import { AzurePrReview } from "../chrome/AzurePrReview";
+import { AzureCiReview } from "../chrome/AzureCiReview";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { memo, useSyncExternalStore } from "react";
+import { Activity, memo, useSyncExternalStore } from "react";
 import {
   MarkdownViewShell,
   useMarkdownMode,
@@ -36,6 +38,7 @@ import { WorkingTreeDiff } from "./WorkingTreeDiff";
 type Props = {
   pane: EditorPane;
   focused: boolean;
+  visible: boolean;
   dirtyFileIds: Set<string>;
   fileErrorCounts: Map<string, number>;
   sessions: Session[];
@@ -60,6 +63,7 @@ type Props = {
 function FilePaneComponent({
   pane,
   focused,
+  visible,
   dirtyFileIds,
   fileErrorCounts,
   sessions,
@@ -146,7 +150,14 @@ function FilePaneComponent({
                   : "hidden"
               }
             >
-              {isPlanTab(file) ? (
+              {file.delivery ? (
+                <Activity mode={visible && file.id === pane.activeFileId ? "visible" : "hidden"}><div className="flex h-full min-h-0 flex-col">
+                  {file.delivery.kind === "pr" ? <AzurePrReview cwd={file.cwd} branch={file.delivery.branch} sourceSessionId={file.delivery.sourceSessionId}
+                    linkedWorkItem={sessions.find(session => session.id === file.delivery?.sourceSessionId)?.linkedWorkItem}
+                    enabled onReveal={() => onSelectFile(pane.id, file.id)} onClose={() => onCloseFile(pane.id, file.id)} />
+                    : <AzureCiReview cwd={file.cwd} branch={file.delivery.branch} sourceSessionId={file.delivery.sourceSessionId} enabled onReveal={() => onSelectFile(pane.id, file.id)} onClose={() => onCloseFile(pane.id, file.id)} />}
+                </div></Activity>
+              ) : isPlanTab(file) ? (
                 <PlanSurface
                   file={file}
                   sessions={sessions}
@@ -200,6 +211,7 @@ export const FilePane = memo(FilePaneComponent, (previous, next) => {
   if (
     previous.pane !== next.pane ||
     previous.focused !== next.focused ||
+    previous.visible !== next.visible ||
     previous.dirtyFileIds !== next.dirtyFileIds ||
     previous.fileErrorCounts !== next.fileErrorCounts ||
     previous.onFocus !== next.onFocus ||
@@ -219,7 +231,7 @@ export const FilePane = memo(FilePaneComponent, (previous, next) => {
   }
 
   for (const file of next.pane.files) {
-    const sessionId = file.plan?.sessionId;
+    const sessionId = file.plan?.sessionId ?? file.delivery?.sourceSessionId;
     if (!sessionId) continue;
     const before = previous.sessions.find(
       (session) => session.id === sessionId,

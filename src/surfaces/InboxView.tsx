@@ -1,3 +1,4 @@
+import { Select } from "../chrome/Select";
 import { inboxComposerCard } from "../lib/githubTasks";
 import { contextTicketKey } from "../lib/agentContext";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -327,6 +328,7 @@ type Props = {
   onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   sessions?: readonly SessionSummary[];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
+  onOpenDelivery?: (sessionId: string, kind: "pr" | "ci", current: () => boolean, provider: "github" | "azure", prUrl?: string) => Promise<void>;
   /** Session-card destination to reveal after the Inbox list loads. */
   target?: LinkedWorkItem | null;
   visible?: boolean;
@@ -351,6 +353,7 @@ export function InboxView({
   onStart,
   sessions = [],
   onOpenSession,
+  onOpenDelivery,
   target = null,
   visible = true,
   conversationId,
@@ -1049,6 +1052,7 @@ export function InboxView({
                 setDiscussionOpen(true);
               }}
               onStart={onStart}
+              onOpenDelivery={onOpenDelivery}
               onOpenSession={id => { setPreviewingTicket(false); return onOpenSession?.(id); }}
             />
           </div>
@@ -1079,6 +1083,7 @@ function InboxDetailBody({
   onDiscuss,
   onStart,
   onOpenSession,
+  onOpenDelivery,
 }: {
   item: InboxItem | null;
   cwd: string;
@@ -1088,6 +1093,7 @@ function InboxDetailBody({
   onDiscuss?: (context: InboxComposerCard) => void | Promise<void>;
   onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
+  onOpenDelivery?: (sessionId: string, kind: "pr" | "ci", current: () => boolean, provider: "github" | "azure", prUrl?: string) => Promise<void>;
 }) {
   if (!item) {
     return (
@@ -1110,6 +1116,7 @@ function InboxDetailBody({
       onDiscuss={onDiscuss}
       onStart={onStart}
       onOpenSession={onOpenSession}
+      onOpenDelivery={onOpenDelivery}
     />
   );
 }
@@ -1278,6 +1285,7 @@ function InboxDetail({
   onDiscuss,
   onStart,
   onOpenSession,
+  onOpenDelivery,
 }: {
   item: InboxItem;
   cwd: string;
@@ -1287,7 +1295,41 @@ function InboxDetail({
   onDiscuss?: (context: InboxComposerCard) => void | Promise<void>;
   onStart?: (item: InboxItem, body?: string, context?: InboxComposerCard) => void | Promise<void>;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
+  onOpenDelivery?: (sessionId: string, kind: "pr" | "ci", current: () => boolean, provider: "github" | "azure", prUrl?: string) => Promise<void>;
 }) {
+  const [deliveryProviders, setDeliveryProviders] = useState<Record<string, "github" | "azure">>(() => {
+    try { const saved = JSON.parse(localStorage.getItem("monocode.inboxDeliveryProviders.v1") || "{}"); return saved && typeof saved === "object" && !Array.isArray(saved) ? Object.fromEntries(Object.entries(saved).filter(([, value]) => value === "github" || value === "azure").slice(-100)) as Record<string, "github" | "azure"> : {}; }
+    catch { return {}; }
+  });
+  const [choosingProviders, setChoosingProviders] = useState<string | null>(null);
+  const providerKey = (sessionId: string, kind: "pr" | "ci") => JSON.stringify([contextTicketKey(item), sessionId, kind]);
+  const deliveryProvider = (sessionId: string, kind: "pr" | "ci") => {
+    const saved = deliveryProviders[providerKey(sessionId, kind)];
+    return saved === "github" || saved === "azure" ? saved : item.provider === "github" || item.provider === "azure" ? item.provider : undefined;
+  };
+  const saveProvider = (sessionId: string, kind: "pr" | "ci", provider: string) => {
+    if (provider !== "" && provider !== "github" && provider !== "azure") return;
+    const key = providerKey(sessionId, kind);
+    const next = Object.fromEntries([...Object.entries(deliveryProviders).filter(([entry]) => entry !== key), ...(provider ? [[key, provider]] : [])].slice(-100));
+    try { localStorage.setItem("monocode.inboxDeliveryProviders.v1", JSON.stringify(next)); setDeliveryProviders(next); }
+    catch { setDeliveryError("Could not save delivery providers. Try again."); }
+  };
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
+  const [deliveryError, setDeliveryError] = useState("");
+  const deliveryPending = useRef(false);
+  const deliveryMounted = useRef(true);
+  useEffect(() => { deliveryMounted.current = true; return () => { deliveryMounted.current = false; }; }, []);
+  const openDelivery = async (sessionId: string, kind: "pr" | "ci") => {
+    if (!onOpenDelivery || deliveryPending.current) return;
+    const provider = deliveryProvider(sessionId, kind);
+    if (!provider) { setChoosingProviders(sessionId); return; }
+    deliveryPending.current = true;
+    setDeliveryBusy(true);
+    setDeliveryError("");
+    try { await onOpenDelivery(sessionId, kind, () => deliveryMounted.current, provider, item.provider === "github" && item.kind === "pr" ? item.url : undefined); }
+    catch (error) { if (deliveryMounted.current) setDeliveryError(error instanceof Error ? error.message : String(error)); }
+    finally { deliveryPending.current = false; if (deliveryMounted.current) setDeliveryBusy(false); }
+  };
   const linear = item.provider === "linear";
   const jira = item.provider === "jira";
   const azure = item.provider === "azure";
@@ -1750,8 +1792,8 @@ function InboxDetail({
             {relatedSessions.map((session) => {
               const title = sessionDisplayTitle(session.title, session.harness);
               return (
+                <span key={session.id} className="inline-flex items-center gap-0.5">
                 <button
-                  key={session.id}
                   type="button"
                   title={`Open thread: ${title}`}
                   onClick={() => void onOpenSession?.(session.id)}
@@ -1761,11 +1803,23 @@ function InboxDetail({
                   {session.archived ? (
                     <span className="shrink-0 text-content/40">Archived</span>
                   ) : null}
-                </button>
+                </button>                  {onOpenDelivery && session.cwd ? ([['pr', 'PRs'], ['ci', 'CI']] as const).map(([kind, label]) => (
+                    <button key={kind} type="button" aria-label={`${label} for ${title}`} title={`${label} · ${session.cwd}`} disabled={deliveryBusy}
+                      className="h-6 rounded-md px-1.5 text-[11px] text-content/50 hover:bg-content/5 hover:text-content focus-visible:outline-accent disabled:opacity-40"
+                      onClick={() => void openDelivery(session.id, kind)}>{deliveryProvider(session.id, kind) === "github" ? `GitHub ${label} ↗` : deliveryProvider(session.id, kind) === "azure" ? `Azure ${label}` : `Choose ${label}`}</button>
+                  )) : null}
+                  {onOpenDelivery && session.cwd ? <button type="button" aria-label={`Delivery providers for ${title}`} className="h-6 rounded-md px-1.5 text-[11px] text-content/40 hover:bg-content/5" onClick={() => setChoosingProviders(choosingProviders === session.id ? null : session.id)}>Providers</button> : null}
+                  {choosingProviders === session.id ? <span className="flex flex-wrap items-center gap-2 rounded-md border border-content/10 p-2">
+                    {([['pr', 'PR provider'], ['ci', 'CI provider']] as const).map(([kind, label]) => <span key={kind} className="text-[11px] text-content/60">{label}<Select label={`${label} for ${title}`} value={deliveryProvider(session.id, kind) ?? ""} options={[{value:"", label:item.provider === "github" || item.provider === "azure" ? "Use ticket provider" : "Choose provider"}, {value:"github",label:kind === "pr" ? "GitHub" : "GitHub checks"}, {value:"azure",label:kind === "pr" ? "Azure Repos" : "Azure Pipelines"}]} onChange={value => saveProvider(session.id, kind, value)} /></span>)}
+                    <button type="button" className="px-2 py-1 text-[11px]" onClick={() => setChoosingProviders(null)}>Done</button>
+                  </span> : null}
+                </span>
               );
             })}
           </div>
         ) : null}
+        {deliveryBusy ? <p role="status" className="text-[11px] text-content/50">Opening review…</p> : null}
+        {deliveryError ? <p role="alert" className="text-[12px] text-content/70">{deliveryError}</p> : null}
         <div className="flex flex-wrap items-center gap-2 pt-1">
           {onStart && item.kind !== "pr" ? (
             <>

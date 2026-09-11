@@ -1,5 +1,7 @@
 # Azure Repos PR inspection — implementation and acceptance evidence
 
+> Historical implementation evidence. The current stacked worktree replaces the PR/CI modals with workspace tabs. See [the current UI and acceptance review](delivery-ui-review.md) for updated behavior and remaining gaps.
+
 Refs #13. This is a draft implementation, not live provider/platform acceptance.
 
 ## User journey
@@ -71,3 +73,5 @@ Keep the PR draft until applicable live acceptance and performance evidence are 
 API contracts checked against Microsoft documentation: [PR lookup](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-requests?view=azure-devops-rest-7.1), [iteration changes](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-iteration-changes/get?view=azure-devops-rest-7.1), [file content](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/items/get?view=azure-devops-rest-7.1), [policy evaluations](https://learn.microsoft.com/en-us/rest/api/azure/devops/policy/evaluations/list?view=azure-devops-rest-7.1), [PR statuses](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-statuses/list?view=azure-devops-rest-7.1), [clone URL forms](https://learn.microsoft.com/en-us/azure/devops/repos/git/clone?view=azure-devops-2022).
 
 Story-link contracts: [Azure work-item PR artifact links](https://learn.microsoft.com/en-us/previous-versions/azure/devops/integrate/previous-apis/git/pull-requests/work-items?view=tfs-2017), [Jira remote issue links](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/).
+
+Current follow-up evidence and remaining limits: [delivery UI review](delivery-ui-review.md) and [session performance review](session-performance-review.md). These supersede earlier modal/on-demand descriptions where noted.

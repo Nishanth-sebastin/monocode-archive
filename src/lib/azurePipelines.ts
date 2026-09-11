@@ -1,3 +1,4 @@
+export const AZURE_CI_SOURCES_CHANGED = "monocode:azure-ci-sources";
 import { invoke } from "@tauri-apps/api/core";
 import { contextFromText } from "./agentContext";
 
@@ -286,4 +287,5 @@ export function saveCiSources(
     KEY,
     JSON.stringify([...sources.slice(0, 20), ...others].slice(0, 100)),
   );
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(AZURE_CI_SOURCES_CHANGED));
 }

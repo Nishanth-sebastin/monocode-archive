@@ -278,6 +278,8 @@ pub fn run() {
             azure_repos::azure_pr_remotes,
             azure_repos::azure_pr_story_links,
             azure_repos::azure_pr_read,
+            azure_repos::azure_pr_prepare_checkout,
+            azure_repos::azure_pr_cancel_checkout,
             linear::linear_set_token,
             linear::linear_list_teams,
             linear::linear_list_issues,

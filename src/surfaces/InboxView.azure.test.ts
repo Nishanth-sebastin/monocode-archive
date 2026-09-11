@@ -105,14 +105,14 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
     expect(invoke).toHaveBeenCalledWith("azure_image", expect.objectContaining({ attachmentId: "comment-image" }));
     await click(
       container.querySelector(
-        '[aria-label="Custom review issue Bug 141: Ticket 141"]',
+        '[aria-label^="Custom review issue Bug 141: Ticket 141"]',
       )!,
     );
     expect(container.querySelector('[aria-label="Conversation"]')).toBeNull();
     expect(button("Back to conversation")).toBeTruthy();
     await click(button("Back to conversation"));
     expect(container.querySelectorAll('[aria-label="Conversation"]')).toHaveLength(1);
-    await click(container.querySelector('[aria-label="Custom review issue Bug 141: Ticket 141"]')!);
+    await click(container.querySelector('[aria-label^="Custom review issue Bug 141: Ticket 141"]')!);
     expect(container.querySelector('[aria-label="Conversation"]')).toBeNull();
     await click(button("Send to agent"));
     expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -155,7 +155,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
       expect.objectContaining({ provider: "azure", id: "141" }),
       expect.objectContaining({ contextSummary: expect.any(String) }),
     );
-    let linked = { id: "existing", title: "Existing", linkedWorkItem: linkedWorkItemFromInboxItem(onSelectTickets.mock.calls[0][0][0])! };
+    let linked = { id: "existing", cwd: "/local/project", title: "Existing", linkedWorkItem: linkedWorkItemFromInboxItem(onSelectTickets.mock.calls[0][0][0])! };
     let finishToggle: (() => void) | undefined;
     let holdToggle = false;
     const onToggle = vi.fn(async (_id, item, selected) => {
@@ -165,11 +165,43 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
       renderLinked();
     });
     const onCloseConversation = vi.fn();
+    const onOpenDelivery = vi.fn().mockResolvedValue(undefined);
     const renderLinked = () => root.render(createElement(InboxView, {
       cwd: "/local/project", recents: [], onAsk, onAskRestart: async () => "", onAskMount: () => {}, onStart, onSelectTickets,
-      conversationId: "existing", sessions: [linked as import("../lib/sessionStore").SessionSummary], onToggleConversationTicket: onToggle, onCloseConversation,
+      onOpenDelivery, conversationId: "existing", sessions: [linked as import("../lib/sessionStore").SessionSummary], onToggleConversationTicket: onToggle, onCloseConversation,
     }));
     await act(async () => renderLinked());
+    await click(container.querySelector('button[aria-label="PRs for Existing"]')!);
+    expect(onOpenDelivery).toHaveBeenLastCalledWith("existing", "pr", expect.any(Function), "azure", undefined);
+    await click(container.querySelector('button[aria-label="CI for Existing"]')!);
+    expect(onOpenDelivery).toHaveBeenLastCalledWith("existing", "ci", expect.any(Function), "azure", undefined);
+    await click(container.querySelector('button[aria-label="Delivery providers for Existing"]')!);
+    await click(container.querySelector('button[aria-label^="PR provider for Existing:"]')!);
+    await click([...document.querySelectorAll<HTMLElement>('[role="option"]')].find(el => el.textContent?.trim() === "GitHub")!);
+    await click(container.querySelector('button[aria-label="PRs for Existing"]')!);
+    expect(onOpenDelivery).toHaveBeenLastCalledWith("existing", "pr", expect.any(Function), "github", undefined);
+    await click(container.querySelector('button[aria-label="CI for Existing"]')!);
+    expect(onOpenDelivery).toHaveBeenLastCalledWith("existing", "ci", expect.any(Function), "azure", undefined);
+    expect(localStorage.getItem("monocode.inboxDeliveryProviders.v1")).toContain("github");
+    await click(container.querySelector('button[aria-label^="PR provider for Existing:"]')!);
+    await click([...document.querySelectorAll<HTMLElement>('[role="option"]')].find(el => el.textContent?.trim() === "Use ticket provider")!);
+    await click(container.querySelector('button[aria-label="PRs for Existing"]')!);
+    expect(onOpenDelivery).toHaveBeenLastCalledWith("existing", "pr", expect.any(Function), "azure", undefined);
+    let finishReview: (() => void) | undefined;
+    let isCurrent: (() => boolean) | undefined;
+    onOpenDelivery.mockImplementationOnce((_id, _kind, current) => {
+      isCurrent = current;
+      return new Promise<void>(resolve => { finishReview = resolve; });
+    });
+    await click(container.querySelector('button[aria-label="PRs for Existing"]')!);
+    expect(isCurrent?.()).toBe(true);
+    await click(container.querySelector('[aria-label="Custom review issue Bug 142: Ticket 142"]')!);
+    expect(isCurrent?.()).toBe(false);
+    await act(async () => finishReview?.());
+    expect(container.querySelector("h1")?.textContent).toBe("Ticket 142");
+    await click(container.querySelector('[aria-label^="Custom review issue Bug 141: Ticket 141"]')!);
+
+
     await click(container.querySelector('[aria-label="Select tickets"]')!);
     expect(container.querySelector('input[aria-label="Filter inbox"]')).toBeNull();
     const selection = () => container.querySelector('input[aria-label="Select azure Bug 141 Ticket 141"]') as HTMLInputElement;
