@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-11
+
+### Added
+
+- Public macOS, Linux and Windows builds are published from this repository with a repository-owned automatic update channel.
+
+### Changed
+
+- Packaged builds and development dialogs use the MonoCode name without a downstream-distribution suffix.
+
 ## [0.1.42] - 2026-09-10
 
 ### Added
@@ -663,7 +673,8 @@ First public release. macOS (Apple Silicon) only.
 - Updater endpoint and minisign public key are injected at release time rather than committed, so forks do not inherit the maintainer's update channel.
 - macOS release builds sign with `APPLE_SIGNING_IDENTITY` via a config overlay; the committed default remains ad-hoc `-` for community builds.
 
-[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.1.42...HEAD
+[Unreleased]: https://github.com/kaceper11/monocode/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kaceper11/monocode/releases/tag/v0.2.0
 [0.1.42]: https://github.com/hardbeat920/monocode/compare/v0.1.41...v0.1.42
 [0.1.41]: https://github.com/hardbeat920/monocode/compare/v0.1.40...v0.1.41
 [0.1.40]: https://github.com/hardbeat920/monocode/compare/v0.1.39...v0.1.40

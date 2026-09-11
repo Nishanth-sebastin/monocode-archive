@@ -32,7 +32,7 @@ describe("updater", () => {
     expect(message).not.toHaveBeenCalled();
   });
 
-  it("explains the disabled fork channel without directing users to stock releases", async () => {
+  it("explains that development builds do not have an update channel", async () => {
     getVersion.mockResolvedValue("0.1.23");
     check.mockRejectedValue(new Error("Updater does not have any endpoints set"));
 
@@ -41,8 +41,10 @@ describe("updater", () => {
       currentVersion: "0.1.23",
     });
     expect(message).toHaveBeenCalledWith(
-      expect.stringContaining("Automatic updates are disabled for MonoCode Fork"),
-      { title: "MonoCode Fork" },
+      expect.stringContaining(
+        "Automatic updates are unavailable in this development build",
+      ),
+      { title: "MonoCode" },
     );
   });
 

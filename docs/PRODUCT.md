@@ -46,7 +46,7 @@ Azure PR inspection and repair handoff do not imply branch push or draft-PR crea
 - Upstream already has web/Rust checks and macOS/Windows/Linux CI. Reuse them. Revalidate tests, migrations, lifecycle, and the mixed-provider smoke matrix after merges.
 - Review upstream periodically and before a major feature; use an integration branch and merge the chosen upstream commit. Do not auto-resolve conflicts in favor of either side. Preserve both sets of behavior. If upstream adds our feature, converge and retire duplicate code after validation.
 - Check relevant upstream overlap as part of each feature and normal maintenance; record selected SHAs, conflicts and compatibility evidence when syncing. This is not a separate prerequisite project or reason to delay product work.
-- Preserve the app identity, data and disabled-release safeguards already introduced by PR #30. No further branding/setup project is on the delivery roadmap; concrete regressions should be fixed as bounded bugs. Publication remains separately authorized.
+- Preserve the app identifier and local data boundary introduced by PR #30. Release publication is owned by #64 and this repository's GitHub Actions configuration; concrete distribution regressions should be fixed as bounded bugs.
 - Upstream contribution policy currently pauses new coding-agent adapters. Respect that for upstream submissions. Our ticket/PR/CI connectors are a different concern. Submit upstream fixes only when the user asks; a PR to this repository is not an upstream submission.
 
 Example maintenance flow (run from this repository; choose a fresh branch name and review the fetched target):
