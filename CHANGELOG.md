@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-11
+
+### Fixed
+
+- Discover WSL agents installed through Linux shell managers and keep model catalogs, defaults, settings and worktree sessions tied to their execution location.
+- Refresh provider discovery after reconnect and show discovery errors without misreporting missing installations.
+- Fix duplicate WSL project labels, worktree menu placement, execution-location menu styling and Linux path presentation.
+- Avoid unrelated Git refreshes and repeated host validation when switching connected WSL projects.
+- Preserve stale-diff guards when staging or reverting reviewed changes.
+
+### Known limitations
+
+- Live Windows-to-WSL and authenticated-provider acceptance remains unverified. OpenCode's WSL transport remains unsupported.
+
 ## [0.2.0] - 2026-09-11
 
 ### Added
