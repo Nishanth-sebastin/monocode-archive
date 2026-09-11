@@ -828,44 +828,44 @@ function ChangedFiles({
         ) : null}
       </div>
       {selectingContext ? (
-        <div className="flex flex-wrap items-center gap-1 border-b border-content/10 px-2 py-1 text-[12px]">
-          {selectingContext ? (
-            <span className="min-w-0 flex-1 px-1 text-content/50">
+        <div className="border-b border-content/10">
+          <div className="flex items-center gap-1 px-2 py-1 text-[12px]">
+            <span className="min-w-0 flex-1 truncate px-1 text-content/50">
               {contextSelected.size
                 ? `${contextSelected.size} selected`
                 : "Select files"}
             </span>
-          ) : null}
-          {selectingContext && contextSelected.size > 0 ? (
-            <>
-              <button
-                type="button"
-                disabled={contextBusy}
-                className="h-7 rounded-md px-2 text-content/80 hover:bg-content/5 disabled:opacity-40"
-                onClick={() => void prepareSelected(true)}
-              >
-                {contextBusy ? "Loading…" : "Add to chat"}
-              </button>
-              <button
-                type="button"
-                disabled={contextBusy}
-                className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5 disabled:opacity-40"
-                onClick={() => void prepareSelected(false)}
-              >
-                Send to agent…
-              </button>
-            </>
-          ) : null}
-          <button
-            type="button"
-            aria-pressed={selectingContext}
-            className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5"
-            onClick={toggleContextSelection}
-          >
-            {selectingContext ? "Cancel" : "Select files for agent"}
-          </button>
+            {contextSelected.size > 0 ? (
+              <>
+                <button
+                  type="button"
+                  disabled={contextBusy}
+                  className="h-7 shrink-0 rounded-md px-2 text-content/80 hover:bg-content/5 disabled:opacity-40"
+                  onClick={() => void prepareSelected(true)}
+                >
+                  {contextBusy ? "Loading…" : "Add to chat"}
+                </button>
+                <button
+                  type="button"
+                  disabled={contextBusy}
+                  className="h-7 shrink-0 rounded-md px-2 text-accent hover:bg-accent/10 disabled:opacity-40"
+                  onClick={() => void prepareSelected(false)}
+                >
+                  Send to agent…
+                </button>
+              </>
+            ) : null}
+            <button
+              type="button"
+              aria-pressed={selectingContext}
+              className="h-7 shrink-0 rounded-md px-2 text-content/65 hover:bg-content/5"
+              onClick={toggleContextSelection}
+            >
+              Cancel
+            </button>
+          </div>
           {contextError ? (
-            <p role="alert" className="w-full px-1 text-red-400">
+            <p role="alert" className="px-3 pb-1.5 text-[11px] text-red-400">
               {contextError}
             </p>
           ) : null}
@@ -1524,6 +1524,7 @@ const ChangeRow = memo(
     const tree = depth !== undefined;
     const dir = tree ? "" : dirname(file.relative);
     const canOpen = file.status !== "deleted";
+    const selecting = onToggleContext !== undefined;
     return (
       <li>
         <div
@@ -1531,23 +1532,28 @@ const ChangeRow = memo(
           className={`group flex h-7 w-full items-center gap-1 pr-2 leading-none ${
             tree ? "" : "pl-2"
           } ${
-            active
-              ? "bg-content/10 text-content"
-              : "text-content hover:bg-content/5"
+            contextChecked
+              ? "bg-accent/10 text-content"
+              : active
+                ? "bg-content/10 text-content"
+                : "text-content hover:bg-content/5"
           }`}
         >
-          {contextChecked !== undefined ? (
+          {selecting ? (
             <ContextCheckbox
+              className=""
               label={`Select ${kind} ${file.relative}`}
-              checked={contextChecked}
-              onChange={() => onToggleContext?.(file.relative, kind)}
+              checked={contextChecked ?? false}
+              onChange={() => onToggleContext(file.relative, kind)}
             />
           ) : null}
         <button
           type="button"
           title={file.relative}
+          aria-pressed={selecting ? contextChecked : undefined}
           onClick={() => {
-            if (canOpen) onOpenFile(file.path, kind);
+            if (selecting) onToggleContext(file.relative, kind);
+            else if (canOpen) onOpenFile(file.path, kind);
           }}
           className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
         >
@@ -1560,6 +1566,7 @@ const ChangeRow = memo(
             ) : null}
           </span>
         </button>
+        {selecting ? null : (
         <div
           className={` shrink-0 items-center ${
             active ? "flex" : "hidden group-focus-within:flex group-hover:flex"
@@ -1592,6 +1599,7 @@ const ChangeRow = memo(
             </IconAction>
           )}
         </div>
+        )}
         <span
           className={`w-3.5 shrink-0 text-right font-mono text-[11px] font-semibold ${statusColor(file.status)}`}
         >

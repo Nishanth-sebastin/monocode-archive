@@ -195,6 +195,54 @@ it("moves a staged file immediately and refreshes the index once", async () => {
   }
 });
 
+it("toggles selection from the row and hides row actions while selecting", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const checkbox = () =>
+    host.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+  const onOpenFile = vi.fn();
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-row",
+          sourceSessionId: "owner",
+          enabled: true,
+          onOpenFile,
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    await act(async () =>
+      (
+        host.querySelector(
+          'button[aria-label="Select files for agent"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+    // Clicking the row body (not the checkbox) toggles selection and does
+    // not open the file.
+    await act(async () =>
+      (host.querySelector('button[title="a.ts"]') as HTMLButtonElement).click(),
+    );
+    expect(checkbox()?.checked).toBe(true);
+    expect(onOpenFile).not.toHaveBeenCalled();
+    // Stage/unstage/discard icons stay out of the way in selection mode.
+    expect(host.querySelector('button[aria-label="Stage Changes"]')).toBeNull();
+    await act(async () =>
+      (host.querySelector('button[title="a.ts"]') as HTMLButtonElement).click(),
+    );
+    expect(checkbox()?.checked).toBe(false);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
 it("updates PR and CI rows when their exact conversation associations change", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rows = new Map<string, string>();
