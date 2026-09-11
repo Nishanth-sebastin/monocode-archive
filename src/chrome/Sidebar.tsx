@@ -24,6 +24,7 @@ import {
   Search,
   Settings,
   StickyNote,
+  Task,
 } from "./icons";
 import {
   memo,
@@ -2263,7 +2264,7 @@ function SessionTaskChip({ sessionId }: { sessionId: string }) {
       aria-label={`Task ${scope.task.name}`}
       className="flex shrink-0 items-center gap-0.5 rounded bg-accent/10 px-1 py-px text-[11px] tabular-nums text-accent"
     >
-      <CircleDot className="size-3" strokeWidth={1.75} />
+      <Task className="size-3" strokeWidth={1.75} />
       <span className="max-w-36 truncate">{scope.task.name}</span>
     </span>
   );
@@ -2314,7 +2315,7 @@ function SessionCard({
   const [dragging, setDragging] = useState(false);
   const title = sessionDisplayTitle(session.title, session.harness);
   const gitLabel = formatGitLabel(session.repo, session.branch);
-  const taskScope = useTaskScope(session.id);
+
   const time = formatRelative(session.updatedAt, now);
   const model = compact
     ? null
@@ -2592,14 +2593,7 @@ function SessionCard({
         <span className="relative mt-1 flex items-center gap-2">
           {gitLabel ? (
             <span className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45">
-              {taskScope ? (
-                <CircleDot
-                  className="size-3 shrink-0 text-accent"
-                  strokeWidth={1.75}
-                />
-              ) : (
-                <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
-              )}
+              <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
               <span className="min-w-0 truncate">{gitLabel}</span>
             </span>
           ) : (

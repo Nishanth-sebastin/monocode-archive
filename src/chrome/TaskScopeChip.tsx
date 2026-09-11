@@ -18,6 +18,7 @@ import { Popover } from "./Popover";
 import {
   Check,
   ChevronDown,
+  Task,
   CircleAlert,
   CircleDot,
   Loader,
@@ -79,7 +80,7 @@ export function TaskScopeChip({
         onClick={() => setOpen((value) => !value)}
         className="flex min-w-0 items-center gap-1.5 text-content/65 hover:text-content"
       >
-        <CircleDot
+        <Task
           aria-hidden="true"
           className="size-3.5 shrink-0 text-content/50"
           strokeWidth={1.75}

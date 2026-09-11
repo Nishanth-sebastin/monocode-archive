@@ -5,7 +5,6 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
-  CircleDot,
   Folder,
   FolderOpen,
   FolderTree,
@@ -19,6 +18,7 @@ import {
   Plus,
   Search,
   SquarePlus,
+  Task,
   Settings,
   Trash2,
 } from "./icons";
@@ -1143,7 +1143,7 @@ function LiveAgentCard({
     >
       <span className="flex min-w-0 items-center gap-2">
         {taskScope ? (
-          <CircleDot
+          <Task
             className={`size-3 shrink-0 ${live ? "text-accent" : "text-content/40"}`}
             strokeWidth={1.75}
           />
@@ -1711,7 +1711,7 @@ function TaskRailRow({
         }`}
       >
         <span className="flex min-w-0 items-center gap-2">
-          <CircleDot
+          <Task
             className={`size-3 shrink-0 ${
               busy
                 ? "animate-pulse text-accent"

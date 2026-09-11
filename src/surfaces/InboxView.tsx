@@ -24,6 +24,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Task,
   type IconComponent,
 } from "../chrome/icons";
 import {
@@ -2349,7 +2350,7 @@ function SendTargetMenu({
                 className={itemClass}
                 onClick={() => onPick(task.id)}
               >
-                <CircleDot
+                <Task
                   className="size-3.5 shrink-0 text-content/50"
                   strokeWidth={1.75}
                 />
