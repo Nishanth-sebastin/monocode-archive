@@ -350,6 +350,12 @@ export function resolveGrokBinary(cwd?: string): Promise<{ path: string }> {
     : invoke("harness_resolve_grok");
 }
 
+export function resolveDevinBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "devin" })
+    : invoke("harness_resolve_devin");
+}
+
 export function freeHarnessPort(): Promise<number> {
   return invoke("harness_free_port");
 }

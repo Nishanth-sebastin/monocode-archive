@@ -5,6 +5,7 @@ import {
   resolveClaudeBinary,
   resolveCodexBinary,
   resolveCursorBinary,
+  resolveDevinBinary,
   resolveFxBinary,
   resolveGrokBinary,
   resolveOmpBinary,
@@ -34,6 +35,7 @@ const CLI: Record<HarnessId, { name: string; install?: string }> = {
   pi: { name: "Pi CLI", install: "npm i -g @earendil-works/pi-coding-agent" },
   omp: { name: "omp CLI", install: "curl -fsSL https://omp.sh/install | sh" },
   fx: { name: "fx CLI", install: "curl -fsSL https://fx.sh/setup.sh | bash" },
+  devin: { name: "Devin CLI" },
 };
 
 const emptyAvailability: HarnessAvailability = {
@@ -45,6 +47,7 @@ const emptyAvailability: HarnessAvailability = {
   pi: false,
   omp: false,
   fx: false,
+  devin: false,
 };
 const SIGN_IN: Partial<Record<HarnessId, string>> = {
   claude: "claude auth login",
@@ -52,6 +55,7 @@ const SIGN_IN: Partial<Record<HarnessId, string>> = {
   cursor: "agent login",
   grok: "grok login",
   fx: "fx login",
+  devin: "devin auth login",
 };
 
 type Probe = {
@@ -217,6 +221,7 @@ export function probeHarnessAvailability(options?: {
     omp: resolveOmpBinary,
     fx: resolveFxBinary,
     grok: resolveGrokBinary,
+    devin: resolveDevinBinary,
   };
   current.inflight = Promise.all(
     HARNESSES.map(async (id) => {
