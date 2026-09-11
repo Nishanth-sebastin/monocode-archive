@@ -124,6 +124,7 @@ import {
   removeTask,
   repositoryForChild,
   subscribeTaskWorkspaces,
+  taskChildRepoLabel,
   taskForSession,
   taskWorkspacesSnapshot,
   loadTaskWorkspaces,
@@ -1188,7 +1189,12 @@ function LiveAgentCard({
         <HarnessIcon harness={agent.harness} className="size-3 shrink-0" />
         <span className="min-w-0 flex-1 truncate">
           {taskScope
-            ? `${taskScope.task.name} · ${taskScope.task.children.length} repo${taskScope.task.children.length === 1 ? "" : "s"}`
+            ? [
+                taskScope.task.name,
+                ...taskScope.task.children.map((child) =>
+                  taskChildRepoLabel(taskScope.task, child),
+                ),
+              ].join(" · ")
             : project}
         </span>
         {elapsed ? (

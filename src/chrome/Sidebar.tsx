@@ -3,6 +3,7 @@ import type { DeliveryTabSource } from "../lib/layout";
 import { sessionWorkItems } from "../lib/sessionWorkItem";
 import {
   subscribeTaskWorkspaces,
+  taskChildRepoLabel,
   taskForSession,
   taskWorkspacesSnapshot,
 } from "../lib/taskWorkspaces";
@@ -2270,6 +2271,32 @@ function SessionTaskChip({ sessionId }: { sessionId: string }) {
   );
 }
 
+/** Sibling repositories of a multi-repo task — a compact branch list under
+ * the session's own repo·branch row so every involved copy is visible. */
+function SessionTaskBranches({ sessionId }: { sessionId: string }) {
+  const scope = useTaskScope(sessionId);
+  if (!scope) return null;
+  const rest = scope.task.children.filter(
+    (child) => child.id !== scope.child?.id,
+  );
+  if (!rest.length) return null;
+  return (
+    <span className="relative mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+      {rest.map((child) => (
+        <span
+          key={child.id}
+          className="flex min-w-0 items-center gap-1 text-[11px] text-content/35"
+        >
+          <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
+          <span className="min-w-0 truncate">
+            {taskChildRepoLabel(scope.task, child)}
+          </span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function SessionCard({
   session,
   isActive,
@@ -2612,6 +2639,7 @@ function SessionCard({
             />
           </span>
         </span>
+        <SessionTaskBranches sessionId={session.id} />
       </div>
       {onArchive ? (
         <button

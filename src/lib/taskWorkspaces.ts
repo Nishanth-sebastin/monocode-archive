@@ -504,6 +504,24 @@ export function repositoryForChild(
   return repositoryOf(projectForTask(task), child.repositoryId);
 }
 
+/** `repo/branch` display label for a child — repo name falls back to the
+ * working-copy basename when the repository record is gone. */
+export function taskChildRepoLabel(
+  task: TaskWorkspace,
+  child: TaskChild,
+): string {
+  const repo = repositoryForChild(task, child);
+  const repoName = repo
+    ? repositoryDisplay(repo)
+    : child.workingCopy
+      ? (prettyCwd(child.workingCopy)
+          .split("/")
+          .filter(Boolean)
+          .pop() ?? child.workingCopy)
+      : "Repository";
+  return child.branch ? `${repoName}/${child.branch}` : repoName;
+}
+
 function repositoryDisplay(repository: ProjectRepository): string {
   return (
     repository.label ??
