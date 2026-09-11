@@ -122,6 +122,7 @@ import { WorktreePanel } from "./WorktreePicker";
 import {
   archiveTask,
   removeTask,
+  repositoryForChild,
   subscribeTaskWorkspaces,
   taskWorkspacesSnapshot,
   loadTaskWorkspaces,
@@ -1534,12 +1535,17 @@ function TaskRailRow({
   onOpen: () => void;
   onMenu: (event: MouseEvent<HTMLElement>) => void;
 }) {
-  const repos = `${task.children.length} ${task.children.length === 1 ? "repo" : "repos"}`;
   const ticket = task.ticket?.identifier;
+  const repoNames = task.children
+    .map((entry) => {
+      const repo = repositoryForChild(task, entry);
+      return repo ? repositoryDisplayName(repo) : "Repository";
+    })
+    .join(" · ");
   const title = [
     ticket,
     task.name,
-    repos,
+    repoNames || `${task.children.length} repos`,
     needsInput ? "Needs input" : undefined,
   ]
     .filter(Boolean)
@@ -1552,24 +1558,35 @@ function TaskRailRow({
         aria-label={title}
         onClick={onOpen}
         onContextMenu={onMenu}
-        className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pl-2 pr-7 text-left text-xs text-content/55 outline-none hover:bg-content/5 hover:text-content/85 focus-visible:ring-1 focus-visible:ring-content/30"
+        className="flex w-full min-w-0 flex-col rounded-md px-2 py-1.5 pr-7 text-left outline-none hover:bg-content/8 focus-visible:ring-1 focus-visible:ring-content/30"
       >
-        <CircleDot
-          className="size-3 shrink-0 text-content/40"
-          strokeWidth={1.5}
-        />
-        <span className="min-w-0 flex-1 truncate">
-          {ticket ? `${ticket} ` : ""}
-          {task.name}
-        </span>
-        {needsInput ? (
-          <span
-            title="A repository in this task needs input"
-            className="size-1.5 shrink-0 rounded-full bg-amber-400"
+        <span className="flex min-w-0 items-center gap-2">
+          <CircleDot
+            className="size-3 shrink-0 text-content/40"
+            strokeWidth={1.5}
           />
-        ) : null}
-        <span className="shrink-0 text-[10px] text-content/35 group-hover/task:invisible">
-          {repos}
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug text-content">
+            {task.name}
+          </span>
+          {ticket ? (
+            <span className="shrink-0 text-[11px] text-content/40">
+              {ticket}
+            </span>
+          ) : null}
+        </span>
+        <span className="mt-0.5 flex min-w-0 items-center gap-1.5 pl-5 text-[11px] leading-tight">
+          {needsInput ? (
+            <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
+          ) : null}
+          <span
+            className={`min-w-0 flex-1 truncate ${
+              needsInput ? "text-amber-400" : "text-content/45"
+            }`}
+          >
+            {needsInput ? "Needs input" : ""}
+            {needsInput && repoNames ? " · " : ""}
+            {repoNames || `${task.children.length} repos`}
+          </span>
         </span>
       </button>
       <button
@@ -1709,7 +1726,7 @@ function ProjectFamilyCard(
         }
       />
       {visible && tasks.length ? (
-        <div className="my-0.5 ml-5">
+        <div className="my-1 ml-5 overflow-hidden rounded-lg bg-content/5 p-1">
           {tasks.map((task) => (
             <TaskRailRow
               key={task.id}
