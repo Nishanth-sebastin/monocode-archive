@@ -37,13 +37,16 @@ import { basename } from "../lib/fs";
 import { pathKey, prettyCwd, wslLocation, wslPath } from "../lib/paths";
 import { ContextCheckbox } from "./InboxContextPicker";
 import { Modal } from "./Modal";
+import { Popover } from "./Popover";
 import {
   Check,
   ChevronDown,
   CircleAlert,
+  Folder,
   GitBranch,
   Loader,
   RefreshCw,
+  Search,
 } from "./icons";
 
 type Ref = { name: string; commit: string };
@@ -71,8 +74,6 @@ type Props = {
 
 const inputClass =
   "w-full rounded-lg border border-content/10 bg-content/5 px-2.5 py-1.5 text-[13px] text-content outline-none ring-accent/40 focus:ring-1";
-const selectClass =
-  "w-full appearance-none rounded-lg border border-content/10 bg-content/5 px-2.5 py-1.5 pr-7 text-[12px] text-content outline-none ring-accent/40 focus:ring-1";
 
 const MODES: { value: ChildDraftState["mode"]; label: string }[] = [
   { value: "worktree", label: "New worktree" },
@@ -631,27 +632,32 @@ function ChildConfig({
 
       {draft.mode === "worktree" ? (
         <div className="flex flex-col gap-1.5">
-          <label className="relative block">
+          <div className="block">
             <span className="mb-0.5 block text-[11px] text-content/50">
               Base
             </span>
-            <select
-              value={draft.baseRef ?? ""}
-              onChange={(event) => pickBase(event.target.value)}
-              className={selectClass}
-              aria-label={`Base for ${repositoryDisplayName(repo)}`}
-            >
-              <option value="">
-                {refsLoading ? "Loading branches…" : "Choose a base…"}
-              </option>
-              {(refs ?? []).map((ref) => (
-                <option key={ref.name} value={ref.name}>
-                  {shortRef(ref.name)}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute bottom-2.5 right-2 size-3.5 text-content/40" />
-          </label>
+            <SearchablePick
+              value={draft.baseRef ? shortRef(draft.baseRef) : undefined}
+              placeholder={
+                refsLoading ? "Loading branches…" : "Choose a base…"
+              }
+              searchPlaceholder="Search branches…"
+              empty={
+                refsLoading
+                  ? "Loading branches…"
+                  : refs?.length
+                    ? "No matching branches"
+                    : "No branches found"
+              }
+              icon="branch"
+              options={(refs ?? []).map((ref) => ({
+                key: ref.name,
+                label: shortRef(ref.name),
+              }))}
+              onPick={pickBase}
+              ariaLabel={`Base for ${repositoryDisplayName(repo)}`}
+            />
+          </div>
           <label className="block">
             <span className="mb-0.5 block text-[11px] text-content/50">
               Branch
@@ -682,29 +688,33 @@ function ChildConfig({
       ) : null}
 
       {draft.mode === "existing" ? (
-        <label className="relative block">
-          <select
-            value={draft.existingPath ?? ""}
-            onChange={(event) =>
-              onChange({
-                existingPath: event.target.value || undefined,
-                sharedAccepted: false,
-              })
-            }
-            className={selectClass}
-            aria-label={`Existing worktree for ${repositoryDisplayName(repo)}`}
-          >
-            <option value="">Choose a worktree…</option>
-            {copies.map((entry: WorkingCopy) => (
-              <option key={entry.path} value={entry.path}>
-                {entry.branch?.replace("refs/heads/", "") ??
-                  basename(entry.path)}{" "}
-                · {prettyCwd(entry.path)}
-              </option>
-            ))}
-          </select>
-          <ChevronDown className="pointer-events-none absolute bottom-2.5 right-2 size-3.5 text-content/40" />
-        </label>
+        <SearchablePick
+          value={
+            draft.existingPath
+              ? (copies
+                  .find(
+                    (entry) =>
+                      pathKey(entry.path) === pathKey(draft.existingPath!),
+                  )
+                  ?.branch?.replace("refs/heads/", "") ??
+                basename(draft.existingPath))
+              : undefined
+          }
+          placeholder="Choose a worktree…"
+          searchPlaceholder="Search worktrees…"
+          empty="No worktrees besides the main checkout"
+          icon="folder"
+          options={copies.map((entry: WorkingCopy) => ({
+            key: entry.path,
+            label:
+              entry.branch?.replace("refs/heads/", "") ?? basename(entry.path),
+            detail: prettyCwd(entry.path),
+          }))}
+          onPick={(path) =>
+            onChange({ existingPath: path, sharedAccepted: false })
+          }
+          ariaLabel={`Existing worktree for ${repositoryDisplayName(repo)}`}
+        />
       ) : null}
 
       {draft.mode === "main" && main ? (
@@ -856,6 +866,118 @@ function LaunchReview({
           Done
         </button>
       </div>
+    </>
+  );
+}
+
+type PickOption = { key: string; label: string; detail?: string };
+
+/** Field-styled picker opening a searchable popover — the same pattern the
+ * worktree panel uses for its base list. */
+function SearchablePick({
+  value,
+  placeholder,
+  searchPlaceholder,
+  empty,
+  icon,
+  options,
+  onPick,
+  ariaLabel,
+}: {
+  value?: string;
+  placeholder: string;
+  searchPlaceholder: string;
+  empty: string;
+  icon: "branch" | "folder";
+  options: readonly PickOption[];
+  onPick: (key: string) => void;
+  ariaLabel: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const anchor = useRef<HTMLButtonElement>(null);
+  const shown = options
+    .filter((option) =>
+      `${option.label} ${option.detail ?? ""}`
+        .toLowerCase()
+        .includes(query.toLowerCase()),
+    )
+    .slice(0, 200);
+  const Icon = icon === "folder" ? Folder : GitBranch;
+  return (
+    <>
+      <button
+        ref={anchor}
+        type="button"
+        aria-label={ariaLabel}
+        onClick={() => {
+          setQuery("");
+          setOpen(true);
+        }}
+        className="flex w-full items-center gap-2 rounded-lg border border-content/10 bg-content/5 px-2.5 py-1.5 text-left text-[12px] outline-none ring-accent/40 focus:ring-1"
+      >
+        <Icon
+          className="size-3.5 shrink-0 text-content/40"
+          strokeWidth={1.5}
+        />
+        <span
+          className={`min-w-0 flex-1 truncate ${
+            value ? "font-mono text-content" : "text-content/45"
+          }`}
+        >
+          {value || placeholder}
+        </span>
+        <ChevronDown className="size-3.5 shrink-0 text-content/40" />
+      </button>
+      {open ? (
+        <Popover
+          anchor={anchor}
+          onDismiss={() => setOpen(false)}
+          width={anchor.current?.offsetWidth}
+          className="overflow-hidden"
+        >
+          <label className="flex items-center gap-2 border-b border-content/10 px-2 py-2 text-content/50">
+            <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
+            <input
+              autoFocus
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40"
+              aria-label={ariaLabel}
+              placeholder={searchPlaceholder}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <div className="max-h-56 overflow-y-auto overscroll-none px-1.5 py-1.5">
+            {shown.map((option) => (
+              <button
+                type="button"
+                key={option.key}
+                className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/5"
+                onClick={() => {
+                  onPick(option.key);
+                  setOpen(false);
+                }}
+              >
+                <Icon
+                  className="size-3.5 shrink-0 text-content/50"
+                  strokeWidth={1.75}
+                />
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
+                  {option.label}
+                </span>
+                {option.detail ? (
+                  <span className="shrink-0 truncate text-[10px] text-content/40">
+                    {option.detail}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+            {!shown.length ? (
+              <p className="px-2 py-2 text-[11px] text-content/45">{empty}</p>
+            ) : null}
+          </div>
+        </Popover>
+      ) : null}
     </>
   );
 }
