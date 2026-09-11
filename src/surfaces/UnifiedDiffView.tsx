@@ -62,7 +62,8 @@ export type UnifiedDiffFileModel = {
   canDiscard?: boolean;
   /** Remote snapshots use their owning review surface for identity-checked handoff. */
   contextActions?: boolean;
-  canStageHunk?: boolean;
+  hunkAction?: "stage" | "unstage";
+  contextRevision?: object;
 };
 
 type FileLayout = "stacked" | "cards";
@@ -84,7 +85,11 @@ type Props = {
   initialExpansion?: InitialExpansion;
   onStageFile?: (id: string) => void;
   onDiscardFile?: (id: string) => void;
-  onStageHunk?: (id: string, pos: number) => void;
+  onHunkAction?: (id: string, pos: number) => void;
+  onValidateContext?: (
+    id: string,
+    revision: object | undefined,
+  ) => Promise<void>;
 };
 
 export function UnifiedDiffView({
@@ -100,7 +105,8 @@ export function UnifiedDiffView({
   initialExpansion = "all",
   onStageFile,
   onDiscardFile,
-  onStageHunk,
+  onHunkAction,
+  onValidateContext,
 }: Props) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const colorScheme = useColorScheme();
@@ -264,7 +270,8 @@ export function UnifiedDiffView({
               onReveal={revealFold}
               onStageFile={onStageFile}
               onDiscardFile={onDiscardFile}
-              onStageHunk={onStageHunk}
+              onHunkAction={onHunkAction}
+              onValidateContext={onValidateContext}
               bindRef={bindFileRef}
             />
           ))}
@@ -292,7 +299,11 @@ type FileSectionProps = {
   ) => void;
   onStageFile?: (id: string) => void;
   onDiscardFile?: (id: string) => void;
-  onStageHunk?: (id: string, pos: number) => void;
+  onHunkAction?: (id: string, pos: number) => void;
+  onValidateContext?: (
+    id: string,
+    revision: object | undefined,
+  ) => Promise<void>;
   bindRef: (path: string, node: HTMLElement | null) => void;
 };
 
@@ -309,7 +320,8 @@ const FileSection = memo(function FileSection({
   onReveal,
   onStageFile,
   onDiscardFile,
-  onStageHunk,
+  onHunkAction,
+  onValidateContext,
   bindRef,
 }: FileSectionProps) {
   const Chevron = expanded ? ChevronDown : ChevronRight;
@@ -436,7 +448,8 @@ const FileSection = memo(function FileSection({
             const total = block?.kind === "fold" ? block.lines.length : 0;
             onReveal(file.id, foldId, total, direction);
           }}
-          onStageHunk={onStageHunk}
+          onHunkAction={onHunkAction}
+          onValidateContext={onValidateContext}
         />
       ) : null}
     </section>
@@ -462,7 +475,8 @@ function equalFileSectionProps(
     previous.onReveal === next.onReveal &&
     previous.onStageFile === next.onStageFile &&
     previous.onDiscardFile === next.onDiscardFile &&
-    previous.onStageHunk === next.onStageHunk &&
+    previous.onHunkAction === next.onHunkAction &&
+    previous.onValidateContext === next.onValidateContext &&
     previous.bindRef === next.bindRef
   );
 }
@@ -485,7 +499,8 @@ function equalFileModel(
     previous.canStage === next.canStage &&
     previous.canDiscard === next.canDiscard &&
     previous.contextActions === next.contextActions &&
-    previous.canStageHunk === next.canStageHunk
+    previous.hunkAction === next.hunkAction &&
+    previous.contextRevision === next.contextRevision
   );
 }
 
@@ -496,7 +511,8 @@ function FileBody({
   tokens,
   scrollerRef,
   onReveal,
-  onStageHunk,
+  onHunkAction,
+  onValidateContext,
 }: {
   file: UnifiedDiffFileModel;
   reveals: Record<string, FoldReveal>;
@@ -504,7 +520,11 @@ function FileBody({
   tokens: Map<UnifiedLine, SyntaxToken[]> | null;
   scrollerRef: React.RefObject<HTMLDivElement | null>;
   onReveal: (foldId: string, direction: "up" | "down" | "all") => void;
-  onStageHunk?: (id: string, pos: number) => void;
+  onHunkAction?: (id: string, pos: number) => void;
+  onValidateContext?: (
+    id: string,
+    revision: object | undefined,
+  ) => Promise<void>;
 }) {
   if (file.binary) return <EmptyBody>Binary file changed</EmptyBody>;
   if (file.tooLarge) return <EmptyBody>Diff is too large to display</EmptyBody>;
@@ -519,11 +539,13 @@ function FileBody({
       reveals={reveals}
       near={near}
       tokens={tokens}
-      canStageHunk={file.canStageHunk}
       contextActions={file.contextActions !== false}
+      hunkAction={file.hunkAction}
+      contextRevision={file.contextRevision}
       scrollerRef={scrollerRef}
       onReveal={onReveal}
-      onStageHunk={onStageHunk}
+      onHunkAction={onHunkAction}
+      onValidateContext={onValidateContext}
     />
   );
 }
@@ -535,11 +557,13 @@ function VirtualRows({
   reveals,
   near,
   tokens,
-  canStageHunk,
   contextActions,
+  hunkAction,
+  contextRevision,
   scrollerRef,
   onReveal,
-  onStageHunk,
+  onHunkAction,
+  onValidateContext,
 }: {
   fileId: string;
   filePath: string;
@@ -547,13 +571,24 @@ function VirtualRows({
   reveals: Record<string, FoldReveal>;
   near: boolean;
   tokens: Map<UnifiedLine, SyntaxToken[]> | null;
-  canStageHunk?: boolean;
   contextActions: boolean;
+  hunkAction?: "stage" | "unstage";
+  contextRevision?: object;
   scrollerRef: React.RefObject<HTMLDivElement | null>;
   onReveal: (foldId: string, direction: "up" | "down" | "all") => void;
-  onStageHunk?: (id: string, pos: number) => void;
+  onHunkAction?: (id: string, pos: number) => void;
+  onValidateContext?: (
+    id: string,
+    revision: object | undefined,
+  ) => Promise<void>;
 }) {
-  const [hunkMenu, setHunkMenu] = useState<{ x: number; y: number; lines: UnifiedLine[] } | null>(null);
+  const [hunkMenu, setHunkMenu] = useState<{
+    x: number;
+    y: number;
+    lines: UnifiedLine[];
+    revision?: object;
+  } | null>(null);
+  const [contextError, setContextError] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const codeRef = useRef<HTMLDivElement | null>(null);
   const mouseYRef = useRef<number | null>(null);
@@ -566,9 +601,9 @@ function VirtualRows({
       flattenVisibleRows(
         blocks,
         (foldId) => reveals[foldId],
-        !!canStageHunk && !!onStageHunk,
+        !!hunkAction && !!onHunkAction,
       ),
-    [blocks, canStageHunk, fileId, onStageHunk, reveals],
+    [blocks, fileId, hunkAction, onHunkAction, reveals],
   );
   const rowLayout = useMemo(() => layoutRows(rows), [rows]);
   const totalHeight = rowLayout.totalHeight;
@@ -751,12 +786,22 @@ function VirtualRows({
           }
           onStage={
             row.type === "line" && row.stage && row.line.pos != null
-              ? () => onStageHunk?.(fileId, row.line.pos as number)
+              ? () => onHunkAction?.(fileId, row.line.pos as number)
               : undefined
           }
+          hunkAction={hunkAction}
           onComment={
-            contextActions && lane === "gutter" && row.type === "line" && row.line.kind !== "hunk"
-              ? (anchor) => setCommentTarget({ key, line: row.line, anchor })
+            contextActions &&
+            lane === "gutter" &&
+            row.type === "line" &&
+            row.line.kind !== "hunk"
+              ? (anchor) =>
+                  setCommentTarget({
+                    key,
+                    line: row.line,
+                    anchor,
+                    revision: contextRevision,
+                  })
               : undefined
           }
         />
@@ -770,15 +815,29 @@ function VirtualRows({
         title={contextActions ? "Right-click a diff line for hunk actions" : undefined}
         onContextMenu={(event) => {
           if (!contextActions) return;
-          let y = event.clientY - event.currentTarget.getBoundingClientRect().top - range.padTop;
+          let y =
+            event.clientY -
+            event.currentTarget.getBoundingClientRect().top -
+            range.padTop;
           for (let index = range.start; index < range.end; index++) {
             const row = rows[index];
             if (y < row.height) {
               if (row.type !== "line") return;
               const lines = selectedDiffHunk(blocks, row.line);
-              if (!lines.some(line => line.kind === "add" || line.kind === "del")) return;
+              if (
+                !lines.some(
+                  (line) => line.kind === "add" || line.kind === "del",
+                )
+              )
+                return;
               event.preventDefault();
-              setHunkMenu({ x: event.clientX, y: event.clientY, lines });
+              setContextError(null);
+              setHunkMenu({
+                x: event.clientX,
+                y: event.clientY,
+                lines,
+                revision: contextRevision,
+              });
               return;
             }
             y -= row.height;
@@ -786,14 +845,26 @@ function VirtualRows({
         }}
         onKeyDown={(event) => {
           if (!contextActions) return;
-          if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-          const element = (event.target as HTMLElement).closest<HTMLElement>("[data-diff-row]");
+          if (
+            event.key !== "ContextMenu" &&
+            !(event.shiftKey && event.key === "F10")
+          )
+            return;
+          const element = (event.target as HTMLElement).closest<HTMLElement>(
+            "[data-diff-row]",
+          );
           if (!element) return;
           const row = rows[Number(element.dataset.diffRow)];
           if (!row || row.type !== "line") return;
           event.preventDefault();
           const rect = element.getBoundingClientRect();
-          setHunkMenu({ x: rect.left + 48, y: Math.max(0, rect.top), lines: selectedDiffHunk(blocks, row.line) });
+          setContextError(null);
+          setHunkMenu({
+            x: rect.left + 48,
+            y: Math.max(0, rect.top),
+            lines: selectedDiffHunk(blocks, row.line),
+            revision: contextRevision,
+          });
         }}
         className="flex"
         onMouseMove={(event) => {
@@ -817,21 +888,68 @@ function VirtualRows({
           </div>
         </div>
       </div>
-      {hunkMenu ? <ExplorerMenu x={hunkMenu.x} y={hunkMenu.y} ariaLabel="Selected hunk actions" header={<div className="truncate px-2 py-1 text-[11px] text-content/50">{filePath} · selected hunk</div>} items={[
-        { kind: "item", id: "add", label: "Add to chat" },
-        { kind: "item", id: "send", label: "Send to agent…" },
-      ]} onClose={() => setHunkMenu(null)} onPick={id => {
-        const patch = formatUnifiedHunk(hunkMenu.lines);
-        const context = contextFromText(`${filePath} · selected hunk`, patch, filePath);
-        context.entries[0].language = "diff";
-        if (id === "add") requestAddToChat(`${filePath.slice(0, 2000)}\n\n${formatCodeBlock(context.entries[0].text.slice(0, 28_000), "diff")}${context.entries[0].truncated || patch.length > 28_000 ? "\n\n_Hunk truncated to the context limit._" : ""}`, "plain");
-        else requestAgentContext({ context });
-        setHunkMenu(null);
-      }} /> : null}
+      {contextError ? (
+        <p
+          role="alert"
+          className="border-t border-content/10 px-3 py-1 text-[11px] text-red-400"
+        >
+          {contextError}
+        </p>
+      ) : null}
+      {hunkMenu ? (
+        <ExplorerMenu
+          x={hunkMenu.x}
+          y={hunkMenu.y}
+          ariaLabel="Selected hunk actions"
+          header={
+            <div className="truncate px-2 py-1 text-[11px] text-content/50">
+              {filePath} · selected hunk
+            </div>
+          }
+          items={[
+            { kind: "item", id: "add", label: "Add to chat" },
+            { kind: "item", id: "send", label: "Send to agent…" },
+          ]}
+          onClose={() => setHunkMenu(null)}
+          onPick={(id) => {
+            const selected = hunkMenu;
+            void (async () => {
+              try {
+                setContextError(null);
+                await onValidateContext?.(fileId, selected.revision);
+                const patch = formatUnifiedHunk(selected.lines);
+                const context = contextFromText(
+                  `${filePath} · selected hunk`,
+                  patch,
+                  filePath,
+                );
+                context.entries[0].language = "diff";
+                if (id === "add")
+                  requestAddToChat(
+                    `${filePath.slice(0, 2000)}\n\n${formatCodeBlock(context.entries[0].text.slice(0, 28_000), "diff")}${context.entries[0].truncated || patch.length > 28_000 ? "\n\n_Hunk truncated to the context limit._" : ""}`,
+                    "plain",
+                  );
+                else requestAgentContext({ context });
+              } catch (caught: unknown) {
+                setContextError(
+                  caught instanceof Error ? caught.message : String(caught),
+                );
+              } finally {
+                setHunkMenu(null);
+              }
+            })();
+          }}
+        />
+      ) : null}
       {commentTarget ? (
         <DiffCommentComposer
           path={filePath}
           target={commentTarget}
+          onBeforeSend={
+            onValidateContext
+              ? () => onValidateContext(fileId, commentTarget.revision)
+              : undefined
+          }
           onDismiss={() => setCommentTarget(null)}
         />
       ) : null}
@@ -845,6 +963,7 @@ type DiffCommentDraft = {
   key: string;
   line: UnifiedLine;
   anchor: DOMRect;
+  revision?: object;
 };
 
 function diffRowKey(row: DiffViewRow, index: number) {
@@ -861,6 +980,7 @@ function DiffLane({
   tokens,
   onReveal,
   onStage,
+  hunkAction,
   onComment,
 }: {
   row: DiffViewRow;
@@ -871,6 +991,7 @@ function DiffLane({
   tokens?: SyntaxToken[];
   onReveal?: (direction: "up" | "down" | "all") => void;
   onStage?: () => void;
+  hunkAction?: "stage" | "unstage";
   onComment?: (anchor: DOMRect) => void;
 }) {
   if (row.type === "fold") {
@@ -897,6 +1018,7 @@ function DiffLane({
       commenting={commenting}
       tokens={tokens}
       onStage={onStage}
+      hunkAction={hunkAction}
       onComment={onComment}
     />
   );
@@ -951,6 +1073,7 @@ const DiffLineRow = memo(function DiffLineRow({
   commenting,
   tokens,
   onStage,
+  hunkAction,
   onComment,
 }: {
   line: UnifiedLine;
@@ -960,6 +1083,7 @@ const DiffLineRow = memo(function DiffLineRow({
   commenting: boolean;
   tokens?: SyntaxToken[];
   onStage?: () => void;
+  hunkAction?: "stage" | "unstage";
   onComment?: (anchor: DOMRect) => void;
 }) {
   if (line.kind === "hunk") {
@@ -1029,14 +1153,16 @@ const DiffLineRow = memo(function DiffLineRow({
         {onStage ? (
           <button
             type="button"
-            title="Stage hunk"
-            aria-label="Stage hunk"
+            title={hunkAction === "unstage" ? "Unstage hunk" : "Stage hunk"}
+            aria-label={
+              hunkAction === "unstage" ? "Unstage hunk" : "Stage hunk"
+            }
             onClick={onStage}
             className={`absolute top-0.5 left-full z-10 ml-0.5 grid size-4 place-items-center rounded-[3px] bg-white text-[11px] font-bold text-black ${
               hovered ? "opacity-100" : "pointer-events-none opacity-0"
             }`}
           >
-            +
+            {hunkAction === "unstage" ? "−" : "+"}
           </button>
         ) : null}
       </div>

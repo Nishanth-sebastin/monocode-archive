@@ -266,6 +266,15 @@ pub struct GitFileDiff {
     pub too_large: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffGuard {
+    kind: String,
+    status: String,
+    original: String,
+    current: String,
+}
+
 /// Contents for one changed file. Staged diffs compare HEAD to the index;
 /// unstaged diffs compare the index to the working tree.
 #[tauri::command]
@@ -356,9 +365,15 @@ pub async fn git_stage_contents(
     cwd: String,
     relative: String,
     contents: String,
+    guard: GitDiffGuard,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        git_stage_contents_for(&expand_home(&cwd), &relative, contents.as_bytes())
+        git_stage_contents_for(
+            &expand_home(&cwd),
+            &relative,
+            contents.as_bytes(),
+            Some(&guard),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1497,10 +1512,41 @@ fn git_stage_file_for(root: &Path, relative: &str) -> Result<(), String> {
     git_checked(root, &["add", "--", &relative])
 }
 
-fn git_stage_contents_for(root: &Path, relative: &str, contents: &[u8]) -> Result<(), String> {
+fn git_stage_contents_for(
+    root: &Path,
+    relative: &str,
+    contents: &[u8],
+    guard: Option<&GitDiffGuard>,
+) -> Result<(), String> {
     let relative = resolve_repo_path(root, relative)?;
     if contents.len() as u64 > MAX_TEXT_FILE_BYTES {
         return Err("File too large".into());
+    }
+    if let Some(guard) = guard {
+        let staged = match guard.kind.as_str() {
+            "staged" => true,
+            "unstaged" => false,
+            _ => return Err("Invalid diff kind".into()),
+        };
+        let current = git_file_diff_for(root, &relative, staged)?;
+        if current.status != guard.status
+            || current.original != guard.original
+            || current.current != guard.current
+        {
+            return Err("This diff changed. Refresh it and try again.".into());
+        }
+        if staged && contents == current.current.as_bytes() {
+            return Ok(());
+        }
+        if !staged && contents == current.original.as_bytes() {
+            return Ok(());
+        }
+        if !staged && guard.status == "deleted" && contents.is_empty() {
+            return git_checked(root, &["update-index", "--remove", "--", &relative]);
+        }
+        if staged && guard.status == "added" && contents.is_empty() {
+            return git_checked(root, &["update-index", "--remove", "--", &relative]);
+        }
     }
     let hash = git_hash_object(root, &relative, contents)?;
     let mode = git_index_mode(root, &relative).unwrap_or_else(|| "100644".into());
@@ -4765,7 +4811,7 @@ mod tests {
             return;
         }
         std::fs::write(dir.0.join("a.txt"), "alpha\nBETA\ngamma\nDELTA\n").unwrap();
-        git_stage_contents_for(&dir.0, "a.txt", b"alpha\nBETA\ngamma\ndelta\n").unwrap();
+        git_stage_contents_for(&dir.0, "a.txt", b"alpha\nBETA\ngamma\ndelta\n", None).unwrap();
 
         let staged = git_file_diff_for(&dir.0, "a.txt", true).unwrap();
         assert_eq!(staged.original, "alpha\nbeta\ngamma\ndelta\n");
@@ -5035,7 +5081,7 @@ mod tests {
             return;
         }
         std::fs::write(dir.0.join("a.txt"), "alpha\nBETA\ngamma\nDELTA\n").unwrap();
-        git_stage_contents_for(&dir.0, "a.txt", b"alpha\nBETA\ngamma\ndelta\n").unwrap();
+        git_stage_contents_for(&dir.0, "a.txt", b"alpha\nBETA\ngamma\ndelta\n", None).unwrap();
 
         let file = git_diff_index_for(&dir.0)
             .files
@@ -5048,6 +5094,127 @@ mod tests {
         let diff = git_file_diff_for(&dir.0, "a.txt", false).unwrap();
         assert_eq!(diff.original, "alpha\nBETA\ngamma\ndelta\n");
         assert_eq!(diff.current, "alpha\nBETA\ngamma\nDELTA\n");
+    }
+
+    #[test]
+    fn git_stage_contents_rejects_a_stale_diff() {
+        let dir = tmp("git-stage-stale");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        std::fs::write(dir.0.join("a.txt"), "beta\n").unwrap();
+        let inspected = git_file_diff_for(&dir.0, "a.txt", false).unwrap();
+        let guard = GitDiffGuard {
+            kind: "unstaged".into(),
+            status: inspected.status,
+            original: inspected.original,
+            current: inspected.current,
+        };
+
+        std::fs::write(dir.0.join("a.txt"), "gamma\n").unwrap();
+        let error = git_stage_contents_for(&dir.0, "a.txt", b"beta\n", Some(&guard)).unwrap_err();
+
+        assert_eq!(error, "This diff changed. Refresh it and try again.");
+        assert!(!git_diff_index_for(&dir.0).files[0].staged);
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("a.txt")).unwrap(),
+            "gamma\n"
+        );
+    }
+
+    #[test]
+    fn git_stage_contents_unstages_one_hunk_without_changing_the_worktree() {
+        let dir = tmp("git-unstage-hunk");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\nbeta\ngamma\ndelta\n")]) {
+            return;
+        }
+        let working = "alpha\nBETA\ngamma\nDELTA\n";
+        std::fs::write(dir.0.join("a.txt"), working).unwrap();
+        git_stage_file_for(&dir.0, "a.txt").unwrap();
+        let inspected = git_file_diff_for(&dir.0, "a.txt", true).unwrap();
+        let guard = GitDiffGuard {
+            kind: "staged".into(),
+            status: inspected.status,
+            original: inspected.original,
+            current: inspected.current,
+        };
+
+        git_stage_contents_for(
+            &dir.0,
+            "a.txt",
+            b"alpha\nbeta\ngamma\nDELTA\n",
+            Some(&guard),
+        )
+        .unwrap();
+
+        let staged = git_file_diff_for(&dir.0, "a.txt", true).unwrap();
+        assert_eq!(staged.current, "alpha\nbeta\ngamma\nDELTA\n");
+        let unstaged = git_file_diff_for(&dir.0, "a.txt", false).unwrap();
+        assert_eq!(unstaged.original, "alpha\nbeta\ngamma\nDELTA\n");
+        assert_eq!(unstaged.current, working);
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("a.txt")).unwrap(),
+            working
+        );
+    }
+
+    #[test]
+    fn git_stage_contents_stages_a_guarded_deletion() {
+        let dir = tmp("git-stage-deletion");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        std::fs::remove_file(dir.0.join("a.txt")).unwrap();
+        let inspected = git_file_diff_for(&dir.0, "a.txt", false).unwrap();
+        let guard = GitDiffGuard {
+            kind: "unstaged".into(),
+            status: inspected.status,
+            original: inspected.original,
+            current: inspected.current,
+        };
+
+        git_stage_contents_for(&dir.0, "a.txt", b"", Some(&guard)).unwrap();
+
+        let file = git_diff_index_for(&dir.0)
+            .files
+            .into_iter()
+            .find(|file| file.relative == "a.txt")
+            .unwrap();
+        assert!(file.staged);
+        assert!(!file.unstaged);
+        assert_eq!(file.status, "deleted");
+    }
+
+    #[test]
+    fn git_stage_contents_unstages_a_new_file_without_leaving_an_empty_entry() {
+        let dir = tmp("git-unstage-new-file");
+        if !init_git_commit(&dir.0, &[]) {
+            return;
+        }
+        std::fs::write(dir.0.join("a.txt"), "alpha\n").unwrap();
+        git_stage_file_for(&dir.0, "a.txt").unwrap();
+        let inspected = git_file_diff_for(&dir.0, "a.txt", true).unwrap();
+        let guard = GitDiffGuard {
+            kind: "staged".into(),
+            status: inspected.status,
+            original: inspected.original,
+            current: inspected.current,
+        };
+
+        git_stage_contents_for(&dir.0, "a.txt", b"", Some(&guard)).unwrap();
+
+        let file = git_diff_index_for(&dir.0)
+            .files
+            .into_iter()
+            .find(|file| file.relative == "a.txt")
+            .unwrap();
+        assert!(!file.staged);
+        assert!(file.unstaged);
+        assert_eq!(file.status, "untracked");
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("a.txt")).unwrap(),
+            "alpha\n"
+        );
     }
 
     #[test]

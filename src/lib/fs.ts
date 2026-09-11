@@ -106,6 +106,13 @@ export type GitFileDiff = {
 
 export type GitFileDiffKind = "staged" | "unstaged";
 
+export type GitDiffGuard = {
+  kind: GitFileDiffKind;
+  status: string;
+  original: string;
+  current: string;
+};
+
 export function gitFileDiff(
   cwd: string,
   relative: string,
@@ -162,8 +169,14 @@ export function gitStageContents(
   cwd: string,
   relative: string,
   contents: string,
+  guard: GitDiffGuard,
 ): Promise<void> {
-  return invoke<void>("git_stage_contents", { cwd, relative, contents });
+  return invoke<void>("git_stage_contents", {
+    cwd,
+    relative,
+    contents,
+    guard,
+  });
 }
 
 export function gitStageFile(cwd: string, relative: string): Promise<void> {

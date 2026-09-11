@@ -50,6 +50,8 @@ import {
   readTextFile,
   subscribeGitChanged,
   writeTextFile,
+  type GitDiffGuard,
+  type GitFileDiffKind,
 } from "../lib/fs";
 import { syncWatchedMtime, watchFile } from "../lib/fileWatch";
 import { displayPath } from "../lib/paths";
@@ -119,8 +121,8 @@ export function FileEditor({
   const [draft, setDraft] = useState("");
   const [gitBase, setGitBase] = useState<{
     path: string;
-    original: string | null;
-  }>({ path, original: null });
+    guard: GitDiffGuard | null;
+  }>({ path, guard: null });
   const markdown = isMarkdownPath(path);
   const svg = isSvgPath(path);
   const [mode, setMode] = useMarkdownMode(path);
@@ -200,38 +202,48 @@ export function FileEditor({
 
   useEffect(() => {
     if (!showDiff) {
-      setGitBase({ path, original: null });
+      setGitBase({ path, guard: null });
       return;
     }
     const relative = displayPath(path, cwd);
     if (!cwd || cwd === "~" || !relative || relative === path) {
-      setGitBase({ path, original: null });
+      setGitBase({ path, guard: null });
       return;
     }
     let cancelled = false;
-    setGitBase({ path, original: null });
+    setGitBase({ path, guard: null });
 
     const load = () => {
       void (async () => {
+        let kind: GitFileDiffKind = "unstaged";
         let diff = await gitFileDiff(cwd, relative, "unstaged");
         // A review tab opened from a clean staged file has no index-to-disk
         // delta. Fall back to HEAD-to-index so the staged patch is still
         // visible in the editor-style diff view.
         if (!diff.binary && !diff.tooLarge && diff.original === diff.current) {
+          kind = "staged";
           diff = await gitFileDiff(cwd, relative, "staged");
         }
-        return diff;
+        return { diff, kind };
       })()
-        .then((diff) => {
+        .then(({ diff, kind }) => {
           if (cancelled) return;
           if (diff.binary || diff.tooLarge) {
-            setGitBase({ path, original: null });
+            setGitBase({ path, guard: null });
             return;
           }
-          setGitBase({ path, original: diff.original });
+          setGitBase({
+            path,
+            guard: {
+              kind,
+              status: diff.status,
+              original: diff.original,
+              current: diff.current,
+            },
+          });
         })
         .catch(() => {
-          if (!cancelled) setGitBase({ path, original: null });
+          if (!cancelled) setGitBase({ path, guard: null });
         });
     };
 
@@ -264,7 +276,8 @@ export function FileEditor({
     };
   }, [cwd, path, reloadFromDisk, showDiff]);
 
-  const gitOriginal = gitBase.path === path ? gitBase.original : null;
+  const gitGuard = gitBase.path === path ? gitBase.guard : null;
+  const gitOriginal = gitGuard?.original ?? null;
 
   useEffect(() => {
     if (loadState.status !== "ready") return;
@@ -317,16 +330,18 @@ export function FileEditor({
       if (!cwd || cwd === "~" || !relative || relative === path) {
         throw new Error("Can't stage this file");
       }
+      if (!gitGuard) throw new Error("Refresh this diff before staging it");
       try {
-        await gitStageContents(cwd, relative, contents);
+        await gitStageContents(cwd, relative, contents, gitGuard);
         notifyGitChanged(cwd);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setSaveState({ status: "error", message });
+        notifyGitChanged(cwd);
         throw error;
       }
     },
-    [cwd, path],
+    [cwd, gitGuard, path],
   );
 
   const dirtyChange = useCallback(
