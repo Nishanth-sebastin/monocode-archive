@@ -52,7 +52,7 @@ import {
 type Ref = { name: string; commit: string };
 
 type ChildDraftState = {
-  mode: "worktree" | "existing" | "main" | "later";
+  mode: "worktree" | "existing" | "later";
   baseRef?: string;
   baseCommit?: string;
   branch?: string;
@@ -78,8 +78,6 @@ const inputClass =
 const MODES: { value: ChildDraftState["mode"]; label: string }[] = [
   { value: "worktree", label: "New worktree" },
   { value: "existing", label: "Existing" },
-  { value: "main", label: "Main" },
-  { value: "later", label: "Later" },
 ];
 
 const shortRef = (name: string) =>
@@ -300,10 +298,6 @@ export function TaskCreateSheet({
       const location = wslLocation(mainCheckout(repo, family));
       return location ? wslPath(location.distribution, draft.path) : draft.path;
     }
-    if (draft.mode === "main") {
-      const checkout = mainCheckout(repo, family);
-      return family ? checkout : undefined;
-    }
     return draft.existingPath;
   };
 
@@ -350,7 +344,7 @@ export function TaskCreateSheet({
 
   const buildDrafts = (): TaskChildDraft[] =>
     selected
-      .map((repoId) => {
+      .map((repoId): TaskChildDraft | null => {
         const repo = repositories.find((entry) => entry.id === repoId);
         const draft = drafts.get(repoId);
         if (!repo || !draft) return null;
@@ -569,10 +563,10 @@ function ChildConfig({
   onLoadRefs: () => void;
 }) {
   const location = wslLocation(repo.anchor);
+  // The main checkout is one of the existing copies — no separate mode.
   const copies = (family?.worktrees ?? []).filter(
-    (entry) => !entry.main && !entry.missing && !entry.prunable,
+    (entry) => !entry.missing && !entry.prunable,
   );
-  const main = family?.worktrees.find((entry) => entry.main);
 
   const pickBase = (refName: string) => {
     const ref = refs?.find((entry) => entry.name === refName);
@@ -596,39 +590,48 @@ function ChildConfig({
             WSL · {location.distribution}
           </span>
         ) : null}
+        <button
+          type="button"
+          onClick={() =>
+            onChange({ mode: draft.mode === "later" ? "worktree" : "later" })
+          }
+          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-content/40 hover:bg-content/5 hover:text-content/70"
+        >
+          {draft.mode === "later" ? "Set up now" : "Skip for now"}
+        </button>
       </div>
 
-      <div
-        role="radiogroup"
-        aria-label={`Working copy for ${repositoryDisplayName(repo)}`}
-        className="mb-2 grid grid-cols-4 gap-0.5 rounded-md border border-content/10 p-0.5 text-[11px]"
-      >
-        {MODES.map((option) => {
-          const disabled =
-            (option.value === "existing" && !copies.length) ||
-            (option.value === "main" && !main);
-          return (
-            <button
-              key={option.value}
-              type="button"
-              role="radio"
-              aria-checked={draft.mode === option.value}
-              disabled={disabled}
-              onClick={() => {
-                onChange({ mode: option.value });
-                if (option.value === "worktree") onLoadRefs();
-              }}
-              className={`rounded-[5px] px-1 py-1 disabled:opacity-40 ${
-                draft.mode === option.value
-                  ? "bg-content/10 text-content"
-                  : "text-content/50 hover:text-content"
-              }`}
-            >
-              {option.label}
-            </button>
-          );
-        })}
-      </div>
+      {draft.mode !== "later" ? (
+        <div
+          role="radiogroup"
+          aria-label={`Working copy for ${repositoryDisplayName(repo)}`}
+          className="mb-2 grid grid-cols-2 gap-0.5 rounded-md border border-content/10 p-0.5 text-[11px]"
+        >
+          {MODES.map((option) => {
+            const disabled = option.value === "existing" && !copies.length;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={draft.mode === option.value}
+                disabled={disabled}
+                onClick={() => {
+                  onChange({ mode: option.value });
+                  if (option.value === "worktree") onLoadRefs();
+                }}
+                className={`rounded-[5px] px-1 py-1 disabled:opacity-40 ${
+                  draft.mode === option.value
+                    ? "bg-content/10 text-content"
+                    : "text-content/50 hover:text-content"
+                }`}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
 
       {draft.mode === "worktree" ? (
         <div className="flex flex-col gap-1.5">
@@ -691,23 +694,28 @@ function ChildConfig({
         <SearchablePick
           value={
             draft.existingPath
-              ? (copies
-                  .find(
+              ? (() => {
+                  const picked = copies.find(
                     (entry) =>
                       pathKey(entry.path) === pathKey(draft.existingPath!),
-                  )
-                  ?.branch?.replace("refs/heads/", "") ??
-                basename(draft.existingPath))
+                  );
+                  return picked?.main
+                    ? "Main checkout"
+                    : (picked?.branch?.replace("refs/heads/", "") ??
+                        basename(draft.existingPath!));
+                })()
               : undefined
           }
-          placeholder="Choose a worktree…"
-          searchPlaceholder="Search worktrees…"
-          empty="No worktrees besides the main checkout"
+          placeholder="Choose a working copy…"
+          searchPlaceholder="Search working copies…"
+          empty="No working copies on disk"
           icon="folder"
           options={copies.map((entry: WorkingCopy) => ({
             key: entry.path,
-            label:
-              entry.branch?.replace("refs/heads/", "") ?? basename(entry.path),
+            label: entry.main
+              ? "Main checkout"
+              : (entry.branch?.replace("refs/heads/", "") ??
+                basename(entry.path)),
             detail: prettyCwd(entry.path),
           }))}
           onPick={(path) =>
@@ -717,16 +725,10 @@ function ChildConfig({
         />
       ) : null}
 
-      {draft.mode === "main" && main ? (
-        <p className="truncate rounded-lg border border-content/10 px-2.5 py-1.5 font-mono text-[11px] text-content/55">
-          {prettyCwd(main.path)}
-        </p>
-      ) : null}
-
       {draft.mode === "later" ? (
         <p className="text-[11px] leading-4 text-content/45">
-          The child stays in the task with no working copy yet — prepare it
-          later from the task.
+          Skipped for now — the repository stays in the task with no working
+          copy or session yet.
         </p>
       ) : null}
 
