@@ -336,6 +336,31 @@ export function createTask(input: {
   return task;
 }
 
+/** Links an inbox item onto a task — as the primary ticket when none is set,
+ * otherwise deduped into `additionalItems`. */
+export function linkTicketToTask(
+  taskId: string,
+  ticket: LinkedWorkItem,
+): void {
+  updateTask(taskId, (current) => {
+    if (!current.ticket) return { ...current, ticket };
+    if (
+      current.ticket.url === ticket.url ||
+      (current.ticket.additionalItems ?? []).some(
+        (entry) => entry.url === ticket.url,
+      )
+    )
+      return current;
+    return {
+      ...current,
+      ticket: {
+        ...current.ticket,
+        additionalItems: [...(current.ticket.additionalItems ?? []), ticket],
+      },
+    };
+  });
+}
+
 export function updateTask(
   taskId: string,
   update: (task: TaskWorkspace) => TaskWorkspace,

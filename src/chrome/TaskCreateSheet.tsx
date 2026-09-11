@@ -76,6 +76,8 @@ type Props = {
   projectId: string;
   /** Present → edit mode: rename, retune children, add/remove repositories. */
   editingTaskId?: string;
+  /** An inbox item the new task starts linked to. */
+  initialTicket?: LinkedWorkItem;
   onClose: () => void;
 };
 
@@ -99,6 +101,7 @@ const shortRef = (name: string) =>
 export function TaskCreateSheet({
   projectId,
   editingTaskId,
+  initialTicket,
   onClose,
 }: Props) {
   const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
@@ -129,7 +132,8 @@ export function TaskCreateSheet({
   );
   const [tickets, setTickets] = useState<LinkedWorkItem[]>(() => {
     const first = editingTask?.ticket;
-    return first ? [first, ...(first.additionalItems ?? [])] : [];
+    if (first) return [first, ...(first.additionalItems ?? [])];
+    return initialTicket ? [initialTicket] : [];
   });
   /** Editable responsibilities for children that already exist — keyed by
    * child id, since existing children are not drafts. */

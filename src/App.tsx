@@ -223,6 +223,7 @@ import { TaskCreateSheet } from "./chrome/TaskCreateSheet";
 import {
   composeTaskPrompt,
   composeTaskSessionPrompt,
+  linkTicketToTask,
   loadTaskWorkspaces,
   projectForTask,
   recordTaskActiveChild,
@@ -4446,6 +4447,7 @@ export default function App({
   const [taskSheet, setTaskSheet] = useState<{
     projectId: string;
     editingTaskId?: string;
+    initialTicket?: LinkedWorkItem;
   } | null>(null);
   const onNewTask = useCallback(
     (path: string, projectId?: string) => {
@@ -4697,6 +4699,41 @@ export default function App({
       if (child) void onOpenTaskChild(taskId, child.id);
     },
     [launchTaskChildren, onOpenTaskChild, onSelectHistorySession],
+  );
+
+  /** Send-to-agent routing through the task model: link the item onto an
+   * existing task and open it, or open the create sheet with the item
+   * pre-linked. `null` taskId means a new task. */
+  const onStartItemToTask = useCallback(
+    (item: InboxItem, taskId: string | null) => {
+      const linked = linkedWorkItemFromInboxItem(item);
+      if (taskId) {
+        if (linked) linkTicketToTask(taskId, linked);
+        setInboxViewOpen(false);
+        onOpenTask(taskId);
+        return;
+      }
+      const path =
+        item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
+      const project = path
+        ? ensureProjectForPath(
+            path,
+            getVerifiedFamilies().get(pathKey(path)),
+          )
+        : undefined;
+      if (!project) return;
+      setInboxViewOpen(false);
+      setTaskSheet({
+        projectId: project.id,
+        ...(linked ? { initialTicket: linked } : {}),
+      });
+    },
+    [
+      active?.cwd,
+      onOpenTask,
+      projectCwd,
+      sessionDefaults?.cwd,
+    ],
   );
 
   const onUpdatePlan = useCallback(
@@ -6081,6 +6118,7 @@ export default function App({
         <TaskCreateSheet
           projectId={taskSheet.projectId}
           editingTaskId={taskSheet.editingTaskId}
+          initialTicket={taskSheet.initialTicket}
           onClose={() => setTaskSheet(null)}
         />
       )}
@@ -6316,6 +6354,7 @@ export default function App({
             onClose={onLeaveInbox}
             onToggleSidebar={onToggleSidebar}
             onStart={onStartInboxItem}
+            onStartTask={onStartItemToTask}
             onOpenSettings={() => openSettings("inbox")}
             onAsk={onAskInboxItem}
             onAskRestart={onRestartInboxAsk}
