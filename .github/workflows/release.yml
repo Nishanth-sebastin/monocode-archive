@@ -24,17 +24,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Prepare optional Apple notarization key
+        id: apple_signing
         env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          if [[ -z "${APPLE_API_KEY:-}" || -z "${APPLE_API_KEY_P8:-}" ]]; then
+          if [[ -z "${APPLE_SIGNING_IDENTITY:-}" || -z "${APPLE_CERTIFICATE:-}" || -z "${APPLE_CERTIFICATE_PASSWORD:-}" || -z "${APPLE_API_KEY:-}" || -z "${APPLE_API_KEY_P8:-}" || -z "${APPLE_API_ISSUER:-}" ]]; then
             echo "Apple notarization credentials are not configured; building an ad-hoc-signed macOS artifact."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           mkdir -p "$HOME/private_keys"
           printf '%s\n' "$APPLE_API_KEY_P8" > "$HOME/private_keys/AuthKey_${APPLE_API_KEY}.p8"
           echo "APPLE_API_KEY_PATH=$HOME/private_keys/AuthKey_${APPLE_API_KEY}.p8" >> "$GITHUB_ENV"
+          echo "configured=true" >> "$GITHUB_OUTPUT"
 
       - run: npm ci
 
@@ -98,13 +105,21 @@ jobs:
           );
           NODE
 
-      - name: Build macOS packages
+      - name: Build signed macOS packages
+        if: steps.apple_signing.outputs.configured == 'true'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --bundles app,dmg --config "$RUNNER_TEMP/tauri.release.conf.json"
+
+      - name: Build ad-hoc-signed macOS packages
+        if: steps.apple_signing.outputs.configured != 'true'
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --bundles app,dmg --config "$RUNNER_TEMP/tauri.release.conf.json"
