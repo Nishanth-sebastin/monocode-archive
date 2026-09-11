@@ -89,6 +89,22 @@ it("marks attached files, toggles by click, and offers native browse", async () 
   }
 });
 
+it("falls back to browse on Enter when the list is empty", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const { host, root, handlers, run } = render({ files: [], query: "zzz" });
+  try {
+    await act(async () => run());
+    const input = host.querySelector("input")!;
+    await act(async () => key(input, "Enter"));
+    expect(handlers.onBrowse).toHaveBeenCalled();
+    expect(handlers.onToggle).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
 it("closes when a pointer lands outside the popover", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const { host, root, handlers, run } = render();

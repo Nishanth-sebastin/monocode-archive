@@ -105,6 +105,7 @@ export function AttachPicker({
       event.preventDefault();
       const file = files[active];
       if (file) onToggle(file);
+      else onBrowse();
     } else if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -132,7 +133,7 @@ export function AttachPicker({
           ref={inputRef}
           type="text"
           role="combobox"
-          aria-expanded={files.length > 0}
+          aria-expanded
           aria-label="Attach files"
           placeholder="Attach files"
           spellCheck={false}
@@ -217,6 +218,7 @@ export function AttachPicker({
       <div className="border-t border-content/10 p-1">
         <button
           type="button"
+          onMouseDown={(e) => e.preventDefault()}
           onClick={onBrowse}
           className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[12px] text-content/60 hover:bg-content/10 hover:text-content"
         >

@@ -52,6 +52,7 @@ import {
   fileMentionParts,
   mentionLabel,
   mentionTokenAt,
+  rankAttachFiles,
   rankMentionFiles,
   replaceMentionToken,
   type MentionIndex,
@@ -505,6 +506,7 @@ export function Composer({
   const [attachOpen, setAttachOpen] = useState(false);
   const [attachQuery, setAttachQuery] = useState("");
   const [attachActive, setAttachActive] = useState(0);
+  const attachPending = useRef(new Set<string>());
   const [runnerEnabled, setRunnerEnabled] = useState(loadComposerRunner);
   const [runnerLive, setRunnerLive] = useState(
     () => busy && loadComposerRunner(),
@@ -581,9 +583,7 @@ export function Composer({
   }, [cwd, files, mention?.query, mentionOpen, notes, notesEnabled]);
   const attachRanked = useMemo(() => {
     if (!attachOpen || !looksLikeProject(cwd)) return [];
-    return rankMentionFiles(files, attachQuery, recentOpenedFiles(cwd)).filter(
-      (file) => !file.isDir,
-    );
+    return rankAttachFiles(files, attachQuery, recentOpenedFiles(cwd));
   }, [attachOpen, files, attachQuery, cwd]);
 
   const syncHasValue = useCallback(
@@ -604,20 +604,23 @@ export function Composer({
   }, [contextDraft, inboxCard, noteCard, handoffCard, syncHasValue]);
 
   const addAttachments = useCallback(
-    (incoming: Attachment[]) => {
-      if (!harnessSupportsAttachments(harness) || incoming.length === 0) return;
+    (incoming: Attachment[], focus = true) => {
+      if (!harnessSupportsAttachments(harness) || incoming.length === 0)
+        return;
       setAttachments((prev) => {
         const next = mergeAttachments(prev, incoming);
-        syncHasValue(ref.current?.value ?? "", next);
+        if (next.length !== prev.length) {
+          syncHasValue(ref.current?.value ?? "", next);
+        }
         return next;
       });
-      ref.current?.focus();
+      if (focus) ref.current?.focus();
     },
     [harness, syncHasValue],
   );
 
   const removeAttachment = useCallback(
-    (id: string) => {
+    (id: string, focus = true) => {
       setAttachments((prev) => {
         const removed = prev.find((file) => file.id === id);
         if (removed) revokeAttachment(removed);
@@ -625,7 +628,7 @@ export function Composer({
         syncHasValue(ref.current?.value ?? "", next);
         return next;
       });
-      ref.current?.focus();
+      if (focus) ref.current?.focus();
     },
     [syncHasValue],
   );
@@ -1003,6 +1006,7 @@ export function Composer({
       setPlusOpen(false);
       setSlash(null);
       setMention(null);
+      setAttachOpen(false);
       setCreatingSkill(false);
       setCreateError(null);
       syncHasValue("", attachments);
@@ -1182,16 +1186,28 @@ export function Composer({
   };
 
   const openAttachPicker = () => {
-    if (!attachmentsSupported) return;
+    if (!enabled || !attachmentsSupported) return;
     setAttachQuery("");
     setAttachActive(0);
     setMention(null);
+    setSlash(null);
+    setCreatingSkill(false);
+    setSessionFolderOpen(false);
+    setPlusOpen(false);
     setAttachOpen(true);
   };
 
+  const syncTokensRef = useRef(syncTokensFromTextarea);
+  syncTokensRef.current = syncTokensFromTextarea;
+
   const closeAttachPicker = useCallback(() => {
     setAttachOpen(false);
-    ref.current?.focus();
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Re-derive an `@`/slash token under the caret so the picker it was
+    // covering resurfaces instead of waiting for the next input event.
+    syncTokensRef.current(el);
   }, []);
 
   const attachedPaths = new Set(
@@ -1206,18 +1222,27 @@ export function Composer({
       if (contextFiles.some((item) => item.id === existing.id)) {
         onInboxCardDismiss?.(existing.id);
       } else {
-        removeAttachment(existing.id);
+        removeAttachment(existing.id, false);
       }
       return;
     }
+    // The picker stays open and keeps focus, so guard against a second pick
+    // while the first inspect_paths is still in flight.
+    if (attachPending.current.has(file.path)) return;
+    if (attachments.length >= MAX_ATTACHMENTS) {
+      setAttachmentError(`At most ${MAX_ATTACHMENTS} attachments.`);
+      return;
+    }
+    attachPending.current.add(file.path);
     setAttachmentError("");
     void attachmentsFromPaths([file.path])
-      .then(addAttachments)
+      .then((incoming) => addAttachments(incoming, false))
       .catch((error: unknown) =>
         setAttachmentError(
           error instanceof Error ? error.message : String(error),
         ),
-      );
+      )
+      .finally(() => attachPending.current.delete(file.path));
   };
 
   const browseAttachments = () => {
@@ -1551,7 +1576,7 @@ export function Composer({
                   </p>
                   <button
                     type="button"
-                    disabled={!attachmentsSupported}
+                    disabled={!enabled || !attachmentsSupported}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       setPlusOpen(false);
