@@ -1,3 +1,8 @@
+import { invoke } from "@tauri-apps/api/core";
+import { getVerifiedFamilies } from "./repositoryFamilies";
+import { loadRecents } from "./recents";
+import { wslLocation } from "./paths";
+import { notifyGitChanged } from "./fs";
 import { boundAgentContext, type AgentContext } from "./agentContext";
 import {
   azurePrContext,
@@ -14,6 +19,7 @@ import {
   ciMatches,
   ciRead,
   type CiHead,
+  type CiCheckout,
   type CiSource,
   type CiRun,
   type CiJob,
@@ -31,7 +37,7 @@ export type RepairEvidence = {
       kind: "comments";
       association: AzurePrAssociation;
       skip: number;
-      threads: { id: number; digest: string; entry: string }[];
+      threads: { id: number; digest: string; entry: string; comment?: { id: number; author: string; text: string; file?: string; line?: number } }[];
     }
   | {
       kind: "ci";
@@ -226,24 +232,51 @@ export async function commentsRepair(
   association: AzurePrAssociation,
   threads: AzurePrThread[],
   skip: number,
+  current: () => boolean = () => true,
+  commentId?: number,
+  signal?: AbortSignal,
 ) {
-  const selected = threads.filter(unresolvedThread).slice(0, 20);
+  const selected = threads.filter(unresolvedThread).flatMap(thread => thread.comments.filter(comment => !comment.isDeleted && (commentId === undefined || comment.id === commentId)).map(comment => ({ thread, comment }))).slice(0, 20);
   if (!selected.length) throw new Error("Load unresolved comments first.");
-  const checkout = await ciContext(association.cwd);
-  const remote =
-    `${association.target.site}/${encodeURIComponent(association.projectName)}/_git/${encodeURIComponent(association.repositoryName)}`.toLowerCase();
-  if (
-    !checkout.remotes.some((row) => row.url === remote) ||
-    checkout.branch !== association.branch ||
-    checkout.commit !== association.pr.lastMergeSourceCommit?.commitId ||
-    association.pr.sourceRefName !== `refs/heads/${checkout.branch}`
-  )
-    throw new Error(
-      "The checkout must match this PR repository, source branch and head before repair.",
-    );
-  const entries = selected.map(
-    (thread) => azurePrContext(association, thread).entries[0],
-  );
+  const remote = `${association.target.site}/${encodeURIComponent(association.projectName)}/_git/${encodeURIComponent(association.repositoryName)}`.toLowerCase();
+  const branch = association.pr.sourceRefName.replace(/^refs\/heads\//, "");
+  const commit = association.pr.lastMergeSourceCommit?.commitId;
+  if (!commit || !association.pr.sourceRefName.startsWith("refs/heads/")) throw new Error("Refresh this PR to read its source branch and commit.");
+  const matches = (value: CiCheckout) => value.remotes.some(row => row.url === remote) && value.branch === branch && value.commit === commit;
+  let checkout = await ciContext(association.cwd);
+  if (!matches(checkout)) {
+    const paths = [...new Set([
+      ...[...getVerifiedFamilies().values()].flatMap(family => family.worktrees.filter(tree => !tree.missing && !tree.prunable && !tree.locked).map(tree => tree.path)),
+      ...loadRecents().map(project => project.path),
+    ])].filter(path => path !== association.cwd && wslLocation(path)?.distribution === wslLocation(association.cwd)?.distribution).slice(0, 20);
+    for (const path of paths) {
+      if (!current()) throw new Error("Checkout preparation cancelled.");
+      const candidate = await ciContext(path).catch(() => null);
+      if (candidate && matches(candidate)) { checkout = candidate; break; }
+    }
+    if (!matches(checkout)) {
+      if (!current()) throw new Error("Checkout preparation cancelled.");
+      const requestId = crypto.randomUUID();
+      const cancel = () => { void invoke("azure_pr_cancel_checkout", { requestId }).catch(() => undefined); };
+      signal?.throwIfAborted();
+      signal?.addEventListener("abort", cancel, { once: true });
+      let path: string;
+      try { path = await invoke<string>("azure_pr_prepare_checkout", { cwd: association.cwd, target: association.target, expectedRevision: association.revision, requestId }); }
+      finally { signal?.removeEventListener("abort", cancel); }
+      signal?.throwIfAborted();
+      notifyGitChanged();
+      if (!current()) throw new Error("Checkout preparation cancelled.");
+      checkout = await ciContext(path);
+      if (!matches(checkout)) throw new Error("Prepared checkout no longer matches the PR. Refresh and retry.");
+    }
+  }
+  if (!current()) throw new Error("Checkout preparation cancelled.");
+  association = { ...association, cwd: checkout.cwd, branch, sourceSessionId: checkout.cwd === association.cwd ? association.sourceSessionId : undefined };
+  const entries = selected.map(({ thread, comment }) => {
+    const entry = azurePrContext(association, { ...thread, comments: [comment] }).entries[0];
+    return { ...entry, title: `PR #${association.target.number} · ${comment.author?.displayName ?? "Unknown author"} · comment ${comment.id}` };
+  });
+  const digests = new Map(await Promise.all([...new Map(selected.map(({thread}) => [thread.id, thread])).values()].map(async thread => [thread.id, await digest(thread)] as const)));
   const evidence: RepairEvidence = {
     kind: "comments",
     scope: azurePrKey(association.target),
@@ -255,13 +288,10 @@ export async function commentsRepair(
     },
     association,
     skip,
-    threads: await Promise.all(
-      selected.map(async (thread, i) => ({
-        id: thread.id,
-        digest: await digest(thread),
-        entry: entries[i].id,
-      })),
-    ),
+    threads: selected.map(({ thread, comment }, i) => ({
+      id: thread.id, digest: digests.get(thread.id)!, entry: entries[i].id,
+      comment: { id: comment.id, author: comment.author?.displayName ?? "Unknown author", text: (comment.content ?? "").slice(0, 2000), file: thread.threadContext?.filePath, line: thread.threadContext?.rightFileStart?.line ?? thread.threadContext?.leftFileStart?.line },
+    })),
   };
   return {
     evidence,

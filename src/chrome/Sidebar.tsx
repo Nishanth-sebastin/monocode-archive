@@ -1,3 +1,4 @@
+import type { DeliveryTabSource } from "../lib/layout";
 import { sessionWorkItems } from "../lib/sessionWorkItem";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -213,6 +214,7 @@ type Props = {
   onGoBack?: () => void;
   onGoForward?: () => void;
   onOpenDiff?: (path: string, kind?: GitFileDiffKind) => void;
+  onOpenDelivery?: (cwd: string, source: DeliveryTabSource) => void;
   onOpenAllChanges?: () => void;
   onOpenCommit?: (commit: GitHistoryCommit) => void;
   selectedDiffPath?: string;
@@ -289,6 +291,7 @@ function SidebarComponent({
   onGoForward,
   onOpenDiff,
   onOpenAllChanges,
+  onOpenDelivery,
   onOpenCommit,
   selectedDiffPath,
   selectedDiffKind,
@@ -1412,7 +1415,6 @@ function SidebarComponent({
         {tab === "changes" ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <SourceControl
-              linkedWorkItem={sessions.find((session) => session.id === activeSessionId)?.linkedWorkItem}
               sourceSessionId={activeSessionId}
               cwd={gitRoot}
               enabled={open}
@@ -1421,6 +1423,7 @@ function SidebarComponent({
               selectedKind={selectedDiffKind}
               selectedSha={selectedCommitSha}
               onOpenFile={onOpenDiff ?? onOpenFile}
+              onOpenDelivery={onOpenDelivery}
               onOpenAllChanges={onOpenAllChanges ?? (() => {})}
               onOpenCommit={onOpenCommit ?? (() => {})}
             />

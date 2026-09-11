@@ -1,9 +1,11 @@
 // @vitest-environment happy-dom
-import { act, createElement } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { AzureCiReview } from "./AzureCiReview";
+import { FilePane } from "../surfaces/FilePane";
+import { AZURE_CHANGE_EVENT } from "../lib/azure";
 import { PREPARE_AGENT_CONTEXT } from "../lib/agentContext";
 import { saveCiSources, type CiSource } from "../lib/azurePipelines";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -43,8 +45,10 @@ const run = {
   queuedAt: "now",
 };
 let stale = false;
+let accountId = target.accountId;
 beforeEach(() => {
   stale = false;
+  accountId = target.accountId;
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rows = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -68,7 +72,7 @@ beforeEach(() => {
         return {
           connected: true,
           site: target.site,
-          accountId: target.accountId,
+          accountId,
           account: "Ada",
           project: "Project",
           capabilities: ["Pipelines"],
@@ -154,6 +158,28 @@ const find = (text: string) =>
 const click = async (text: string) => {
   await act(async () => find(text).click());
 };
+function ReviewNavigation(
+  props: Omit<Parameters<typeof AzureCiReview>[0], "onClose">,
+) {
+  const [open, setOpen] = useState(false);
+  return createElement(
+    "div",
+    null,
+    createElement("button", { onClick: () => setOpen(true) }, "CI"),
+    createElement(
+      "button",
+      { onClick: () => setOpen(false), "aria-label": "Files" },
+      "Files",
+    ),
+    createElement(FilePane, {
+      pane: { id: "review-pane", files: [{ id: "ci", path: "ci", cwd: props.cwd, delivery: { kind: "ci", branch: props.branch, sourceSessionId: props.sourceSessionId } }], activeFileId: "ci" },
+      focused: open, visible: open, dirtyFileIds: new Set<string>(), fileErrorCounts: new Map<string, number>(), sessions: [],
+      onFocus: () => {}, onSelectFile: () => setOpen(true), onCloseFile: () => setOpen(false),
+      onDirtyChange: () => {}, onErrorCountChange: () => {}, onReorderFiles: () => {},
+      onOpenFile: () => {}, onUpdatePlan: () => {}, onBuildPlan: () => {},
+    }),
+  );
+}
 async function setup(sources: CiSource[] = [source]) {
   saveCiSources(sources, source.cwd, source.branch, source.session);
   const host = document.createElement("div");
@@ -161,7 +187,7 @@ async function setup(sources: CiSource[] = [source]) {
   const root = createRoot(host);
   await act(async () =>
     root.render(
-      createElement(AzureCiReview, {
+      createElement(ReviewNavigation, {
         cwd: source.cwd,
         branch: source.branch,
         sourceSessionId: source.session,
@@ -187,9 +213,11 @@ it("loads independent source errors, selected jobs and bounded logs, and prepare
   window.addEventListener(PREPARE_AGENT_CONTEXT, handoff);
   try {
     expect(invoke).not.toHaveBeenCalled();
-    await click("Azure Pipelines · 2 configured");
+    await click("CI");
     expect(document.body.textContent).toContain("Pipeline access denied");
     expect(document.body.textContent).toContain("Old commit");
+    expect(document.body.textContent).toContain("Selected run 12");
+    expect(document.body.textContent).toContain("Load log · Unit tests");
     expect(
       vi
         .mocked(invoke)
@@ -204,8 +232,15 @@ it("loads independent source errors, selected jobs and bounded logs, and prepare
     await click("Load jobs");
     await click("Load log · Unit tests");
     expect(document.body.textContent).toContain("expected 1, got 2");
-    await act(async () => [...document.querySelectorAll("button")].find(button => button.textContent?.trim() === "Refresh runs")!.click());
+    await act(async () =>
+      [...document.querySelectorAll("button")]
+        .find((button) => button.textContent?.trim() === "Refresh runs")!
+        .click(),
+    );
     expect(document.body.textContent).toContain("expected 1, got 2");
+    await click("Refresh");
+    expect(document.body.textContent).toContain("expected 1, got 2");
+    expect(document.body.textContent).toContain("Selected run 12");
     await act(async () => {
       find("Send log to agent").click();
       find("Send log to agent").click();
@@ -215,6 +250,12 @@ it("loads independent source errors, selected jobs and bounded logs, and prepare
     expect(request.sourceSessionId).toBe("owner");
     expect(request.cwd).toBe(source.cwd);
     expect(JSON.stringify(request.context)).toContain("attempt: 2");
+    const lookups = vi.mocked(invoke).mock.calls.filter(([command]) => command === "azure_ci_lookup").length;
+    await click("Files");
+    await act(async () => request.onRefreshEvidence("Keep this repair instruction"));
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "azure_ci_lookup").length).toBeGreaterThan(lookups);
+    await click("Fix CI");
+    expect((handoff.mock.calls[1][0] as CustomEvent).detail.context.instruction).toBe("Keep this repair instruction");
   } finally {
     window.removeEventListener(PREPARE_AGENT_CONTEXT, handoff);
     await cleanup();
@@ -225,7 +266,7 @@ it("prevents a stale run or an old successful commit from being handed to an age
   const handoff = vi.fn();
   window.addEventListener(PREPARE_AGENT_CONTEXT, handoff);
   try {
-    await click("Azure Pipelines · 1 configured");
+    await click("CI");
     await click("Run 11 · 12 · PassedOld commit · old · refs/heads/feature");
     await click("Load jobs");
     await click("Load log · Unit tests");
@@ -243,4 +284,119 @@ it("prevents a stale run or an old successful commit from being handed to an age
     window.removeEventListener(PREPARE_AGENT_CONTEXT, handoff);
     await cleanup();
   }
+});
+
+it("uses the app picker for repository selection and preserves it on Escape", async () => {
+  const cleanup = await setup([]);
+  try {
+    await click("CI");
+    expect(document.querySelector("select")).toBeNull();
+    expect(
+      document.querySelector('input[aria-label="Azure pipeline link"]'),
+    ).toBeNull();
+    await click("Connect a pipeline");
+    const trigger = () =>
+      document.querySelector(
+        'button[aria-label^="Pipeline repository remote:"]',
+      ) as HTMLButtonElement;
+    await act(async () => trigger().click());
+    const list = () =>
+      document.querySelector('[role="listbox"]') as HTMLElement;
+    expect(list()).not.toBeNull();
+    await act(async () => {
+      list().dispatchEvent(
+        new KeyboardEvent("keydown", { key: "End", bubbles: true }),
+      );
+    });
+    await act(async () =>
+      list().dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      ),
+    );
+    expect(trigger().textContent).toContain("origin");
+    expect(document.activeElement).toBe(trigger());
+    await act(async () => trigger().click());
+    await act(async () =>
+      list().dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(list()).toBeNull();
+    expect(trigger().textContent).toContain("origin");
+  } finally {
+    await cleanup();
+  }
+});
+
+
+it("clears previous account evidence after reconnecting another account", async () => {
+  const cleanup = await setup();
+  try {
+    await click("CI");
+    await click("Run 12 · 12 · FailedCurrent checkout commit · head · refs/heads/feature");
+    await click("Load jobs");
+    await click("Load log · Unit tests");
+    expect(document.body.textContent).toContain("expected 1, got 2");
+    accountId = "another-account";
+    await act(async () => window.dispatchEvent(new Event(AZURE_CHANGE_EVENT)));
+    expect(document.body.textContent).not.toContain("expected 1, got 2");
+    expect(document.body.textContent).not.toContain("Selected run 12");
+    expect(document.body.textContent).toContain("Reconnect the mapped Azure");
+  } finally {
+    await cleanup();
+  }
+});
+
+
+it("preserves selected evidence and scroll across tab switches without hidden reads", async () => {
+  const cleanup = await setup();
+  try {
+    await click("CI");
+    await click("Run 12 · 12 · FailedCurrent checkout commit · head · refs/heads/feature");
+    await click("Load jobs");
+    await click("Load log · Unit tests");
+    const panel = document.querySelector('[aria-label="Azure pipeline runs"]')!;
+    panel.scrollTop = 180;
+    await click("Files");
+    const count = vi.mocked(invoke).mock.calls.length;
+    await act(async () => window.dispatchEvent(new Event(AZURE_CHANGE_EVENT)));
+    expect(invoke).toHaveBeenCalledTimes(count);
+    await click("CI");
+    expect(document.querySelector('[aria-label="Azure pipeline runs"]')).toBe(panel);
+    expect(panel.scrollTop).toBe(180);
+    expect(document.body.textContent).toContain("expected 1, got 2");
+    expect(document.body.textContent).toContain("Selected run 12");
+  } finally { await cleanup(); }
+});
+
+it("limits initial pipeline reads to two and skips queued reads after hiding", async () => {
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  let active = 0, peak = 0, calls = 0;
+  const releases: (() => void)[] = [];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command !== "azure_ci_lookup") return original(command, args);
+    calls++; active++; peak = Math.max(peak, active);
+    await new Promise<void>(resolve => releases.push(resolve));
+    active--;
+    return { target: (args as {input:{target:unknown}}).input.target, projectName:"Project",definitionName:"Tests",items:[],continuation:null,checkedAt:Date.now() };
+  });
+  const cleanup = await setup(Array.from({length: 5}, (_, index) => ({...source,target:{...source.target,definition:7+index}})));
+  try {
+    await click("CI");
+    expect(calls).toBe(2);
+    expect(peak).toBe(2);
+    await click("Files");
+    await act(async () => { releases.splice(0).forEach(release => release()); });
+    expect(calls).toBe(2);
+  } finally { releases.splice(0).forEach(release => release()); await cleanup(); }
+});
+
+it("opens details only for the first pipeline while loading every source status", async () => {
+  const cleanup = await setup([source, {...source, target: {...target, definition: 9}}]);
+  try {
+    await click("CI");
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "azure_ci_lookup")).toHaveLength(2);
+    const reads = vi.mocked(invoke).mock.calls.filter(([command]) => command === "azure_ci_read");
+    expect(reads.map(([, args]) => (args as { input: { section: string } }).input.section)).toEqual(["summary", "jobs"]);
+  } finally { await cleanup(); }
 });

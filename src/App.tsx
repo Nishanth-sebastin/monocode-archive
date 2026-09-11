@@ -1,3 +1,7 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { gitPrStatus } from "./lib/fs";
+import { ciContext } from "./lib/azurePipelines";
+import type { DeliveryTabSource } from "./lib/layout";
 import { RepairStatus } from "./chrome/RepairStatus";
 import { assertRepairOwner, repairOwnerError, reserveRepair, updateRepair, validateRepair, OPEN_REPAIR, repairRecords, type RepairDelivery } from "./lib/repair";
 import { composeAgentContext } from "./lib/agentContext";
@@ -938,6 +942,7 @@ export default function App({
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
   const active =
     sessions.find((session) => session.id === activeTab?.focusedId) ??
+    sessions.find((session) => activeTab && session.id === focusedFileTab(activeTab)?.delivery?.sourceSessionId) ??
     sessions.find(
       (session) => activeTab && leafIds(activeTab.layout).includes(session.id),
     );
@@ -2601,6 +2606,13 @@ export default function App({
     [onOpenDiff],
   );
 
+  const onOpenDelivery = useCallback((cwd: string, delivery: DeliveryTabSource) => {
+    setTabs(previous => previous.map(tab => tab.id === activeTabId
+      ? openEditorTab(tab, { id: crypto.randomUUID(), path: delivery.kind === "pr" ? "Pull requests" : "CI", cwd, delivery })
+      : tab));
+    setComposerFocused(false);
+  }, [activeTabId]);
+
   /** Stack every working-tree change in one review, whatever the diff-view setting. */
   const onOpenAllChanges = useCallback(() => {
     setTabs((prev) =>
@@ -3721,6 +3733,10 @@ export default function App({
   );
 
   const onSelectFileSurface = useCallback((paneId: string, fileId: string) => {
+    const owner = tabsRef.current.find(tab => findSurfacePane(tab, paneId)?.pane.files.some(file => file.id === fileId));
+    if (!owner) return;
+    activateTab(owner.id);
+    setInboxViewOpen(false);
     setTabs((prev) =>
       prev.map((tab) => {
         const found = findSurfacePane(tab, paneId);
@@ -3735,7 +3751,7 @@ export default function App({
       }),
     );
     setComposerFocused(false);
-  }, []);
+  }, [activateTab]);
 
   const onModelChange = useCallback(
     (sessionId: string, harness: HarnessId, model: string) => {
@@ -5064,6 +5080,45 @@ export default function App({
     setInboxTarget(null);
   }, []);
 
+  const onOpenInboxDelivery = useCallback(async (sessionId: string, kind: "pr" | "ci", current: () => boolean, provider: "github" | "azure", prUrl?: string) => {
+    const session = await ensureOpenSession(sessionId);
+    if (!current()) return;
+    if (!session || session.inboxAsk) throw new Error("Open a workspace conversation for this item before reviewing PRs or CI.");
+    const cwd = sessionWorkCwd(session);
+    if (provider === "github") {
+      const url = prUrl ?? (await gitPrStatus(cwd))?.url;
+      if (!current()) return;
+      if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
+        throw new Error("The conversation checkout changed. Open its review again.");
+      if (!url) throw new Error("No GitHub PR found for this conversation’s branch. Open the PR branch or choose another delivery provider.");
+      const target = new URL(url);
+      if (target.protocol !== "https:" || target.username || target.password || !/^\/[^/]+\/[^/]+\/pull\/\d+\/?$/.test(target.pathname))
+        throw new Error("GitHub returned an invalid PR link.");
+      target.search = "";
+      target.hash = "";
+      target.pathname = target.pathname.replace(/\/$/, "") + (kind === "ci" ? "/checks" : "");
+      await openUrl(target.href);
+      return;
+    }
+    const checkout = await ciContext(cwd);
+    if (!current()) return;
+    if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
+      throw new Error("The conversation checkout changed. Open its review again.");
+    const existing = tabsRef.current.find(tab => leafIds(tab.layout).includes(sessionId));
+    const base = existing ?? newTab(sessionId);
+    const file = { id: crypto.randomUUID(), path: kind === "pr" ? "Pull requests" : "CI", cwd, delivery: { kind, branch: checkout.branch, sourceSessionId: sessionId } };
+    if (existing) {
+      setTabs(previous => previous.map(tab => tab.id === existing.id ? openEditorTab(tab, file) : tab));
+      activateTab(existing.id);
+    } else {
+      appendTab(openEditorTab(base, file), cwd);
+      setActiveTabId(base.id);
+    }
+    setInboxViewOpen(false);
+    setSidebarTab("changes");
+    setComposerFocused(false);
+  }, [ensureOpenSession, activateTab, appendTab]);
+
   const onOpenInboxSession = useCallback(
     async (sessionId: string) => {
       await onSelectHistorySession(sessionId);
@@ -5644,6 +5699,7 @@ export default function App({
         onGoBack={onRailBack}
         onGoForward={onRailForward}
         onOpenDiff={onOpenWorkingTreeDiff}
+        onOpenDelivery={onOpenDelivery}
         onOpenAllChanges={onOpenAllChanges}
         onOpenCommit={onOpenCommit}
         onShowSourceControl={onToggleChanges}
@@ -5926,6 +5982,7 @@ export default function App({
             onAskMount={setInboxAskPortal}
             sessions={inboxRelatedSessions}
             onOpenSession={onOpenInboxSession}
+            onOpenDelivery={onOpenInboxDelivery}
             target={inboxTarget}
             visible={inboxViewOpen}
             conversationId={inboxConversationId}

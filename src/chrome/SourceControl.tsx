@@ -1,10 +1,9 @@
-import type { LinkedWorkItem } from "../lib/session";
+import type { DeliveryTabSource } from "../lib/layout";
 import type { HarnessId } from "../lib/session";
 import type { GitFileDiffKind, GitHistoryCommit } from "../lib/fs";
 import { GitChangesPanel } from "./GitChangesPanel";
 
 type Props = {
-  linkedWorkItem?: LinkedWorkItem;
   sourceSessionId?: string;
   cwd: string;
   enabled: boolean;
@@ -13,13 +12,13 @@ type Props = {
   selectedKind?: GitFileDiffKind;
   selectedSha?: string;
   onOpenFile: (path: string, kind: GitFileDiffKind) => void;
+  onOpenDelivery?: (cwd: string, source: DeliveryTabSource) => void;
   onOpenAllChanges: () => void;
   onOpenCommit: (commit: GitHistoryCommit) => void;
 };
 
 export function SourceControl({
   sourceSessionId,
-  linkedWorkItem,
   cwd,
   enabled,
   textHarness,
@@ -28,13 +27,13 @@ export function SourceControl({
   selectedSha,
   onOpenFile,
   onOpenAllChanges,
+  onOpenDelivery,
   onOpenCommit,
 }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
       <GitChangesPanel
         sourceSessionId={sourceSessionId}
-        linkedWorkItem={linkedWorkItem}
         cwd={cwd}
         enabled={enabled}
         textHarness={textHarness}
@@ -42,6 +41,7 @@ export function SourceControl({
         selectedKind={selectedKind}
         selectedSha={selectedSha}
         onOpenFile={onOpenFile}
+        onOpenDelivery={onOpenDelivery}
         onOpenAllChanges={onOpenAllChanges}
         onOpenCommit={onOpenCommit}
       />

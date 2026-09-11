@@ -46,12 +46,19 @@ export type SessionChangesSource = {
   sessionId: string;
 };
 
+export type DeliveryTabSource = {
+  kind: "pr" | "ci";
+  branch: string;
+  sourceSessionId?: string;
+};
+
 export type FilePaneTab = {
   id: string;
   path: string;
   cwd: string;
   plan?: PlanTabSource;
   releaseNotes?: ReleaseNotesTabSource;
+  delivery?: DeliveryTabSource;
   review?: boolean;
   /** Single working-tree review of every changed file (unified diff). */
   changes?: boolean;
@@ -148,7 +155,10 @@ export function newSessionChangesTab(
   };
 }
 
-export function newCommitTab(cwd: string, commit: CommitTabSource): FilePaneTab {
+export function newCommitTab(
+  cwd: string,
+  commit: CommitTabSource,
+): FilePaneTab {
   return {
     id: crypto.randomUUID(),
     path: `commit:${commit.sha}`,
@@ -304,14 +314,17 @@ export function isTerminalTab(file: FilePaneTab): boolean {
 }
 
 export function isVirtualDocumentTab(file: FilePaneTab): boolean {
-  return isPlanTab(file) || isReleaseNotesTab(file) || isCommitTab(file);
+  return (
+    isPlanTab(file) ||
+    isReleaseNotesTab(file) ||
+    isCommitTab(file) ||
+    !!file.delivery
+  );
 }
 
 export function isFilesystemTab(file: FilePaneTab): boolean {
   return (
-    !isTerminalTab(file) &&
-    !isVirtualDocumentTab(file) &&
-    !file.sessionChanges
+    !isTerminalTab(file) && !isVirtualDocumentTab(file) && !file.sessionChanges
   );
 }
 
@@ -382,6 +395,8 @@ export function isSessionChangesTab(
 }
 
 export function editorTabKey(file: FilePaneTab): string {
+  if (file.delivery)
+    return `delivery:${JSON.stringify([file.cwd, file.delivery.kind, file.delivery.branch, file.delivery.sourceSessionId])}`;
   if (file.terminal) return `terminal:${file.id}`;
   if (file.plan) return `plan:${file.plan.blockId}`;
   if (file.releaseNotes) return `release-notes:${file.releaseNotes.version}`;
@@ -530,7 +545,9 @@ export function openSessionChangesTab(
   );
   if (!existingPane || !existingFile) return openEditorTab(tab, next);
 
-  const updated = focusPath ? { ...existingFile, path: focusPath } : existingFile;
+  const updated = focusPath
+    ? { ...existingFile, path: focusPath }
+    : existingFile;
   return {
     ...tab,
     focusedId: existingPane.id,

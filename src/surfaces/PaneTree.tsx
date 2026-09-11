@@ -331,6 +331,7 @@ function PaneTreeComponent({
             {editorPane ? (
               <FilePane
                 pane={editorPane}
+                visible={visible}
                 focused={focusedId === editorPane.id}
                 dirtyFileIds={dirtyFileIds}
                 fileErrorCounts={fileErrorCounts}

@@ -34,7 +34,6 @@ import {
   type AzurePrThread,
 } from "../lib/azureRepos";
 import { AgentMarkdown } from "../surfaces/AgentMarkdown";
-import { Modal } from "./Modal";
 
 const button =
   "rounded-md px-2 py-1 text-[12px] text-content hover:bg-content/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-40";
@@ -51,18 +50,20 @@ export function AzurePrReview({
   sourceSessionId,
   enabled,
   linkedWorkItem,
+  onClose,
+  onReveal,
 }: {
   cwd: string;
   branch: string;
   sourceSessionId?: string;
   enabled: boolean;
   linkedWorkItem?: LinkedWorkItem;
+  onClose: () => void;
+  onReveal?: () => void;
 }) {
   const [association, setAssociation] = useState(() =>
     loadAzurePrAssociation(cwd, branch, sourceSessionId),
   );
-  const [open, setOpen] = useState(false);
-  const trigger = useRef<HTMLButtonElement>(null);
   const update = (value: AzurePrAssociation | null) => {
     saveAzurePrAssociation(
       value,
@@ -77,54 +78,23 @@ export function AzurePrReview({
   };
   useEffect(() => {
     setAssociation(loadAzurePrAssociation(cwd, branch, sourceSessionId));
-    setOpen(false);
   }, [cwd, branch, sourceSessionId]);
-  const close = () => {
-    setOpen(false);
-    trigger.current?.focus();
-  };
-  return (
-    <div className="shrink-0 border-b border-content/10 px-2 py-1">
-      <button
-        ref={trigger}
-        type="button"
-        disabled={!enabled}
-        className={`${button} w-full text-left`}
-        onClick={() => setOpen(true)}
-      >
-        {association ? (
-          <>
-            <span className="block truncate">
-              Azure PR #{association.pr.pullRequestId} · {association.pr.title}
-            </span>
-            <span className="text-content/50">
-              {association.pr.status} ·{" "}
-              {association.pr.reviewers.some((reviewer) => reviewer.vote < 0)
-                ? "Review needs attention"
-                : "Open review"}{" "}
-              · saved revision {association.revision.slice(0, 8)}
-            </span>
-          </>
-        ) : (
-          "Review Azure PRs"
-        )}
-      </button>
-      {open && enabled ? (
-        <AzurePrDialog
-          cwd={cwd}
-          branch={branch}
-          sourceSessionId={sourceSessionId}
-          linkedWorkItem={linkedWorkItem}
-          association={association}
-          onChange={update}
-          onClose={close}
-        />
-      ) : null}
-    </div>
-  );
+  return enabled ? (
+    <AzurePrPanel
+      key={azurePrScope(cwd, branch, sourceSessionId)}
+      cwd={cwd}
+      branch={branch}
+      sourceSessionId={sourceSessionId}
+      linkedWorkItem={linkedWorkItem}
+      association={association}
+      onChange={update}
+      onClose={onClose}
+      onReveal={onReveal}
+    />
+  ) : null;
 }
 
-function AzurePrDialog({
+function AzurePrPanel({
   cwd,
   branch,
   sourceSessionId,
@@ -132,6 +102,7 @@ function AzurePrDialog({
   linkedWorkItem,
   onChange,
   onClose,
+  onReveal,
 }: {
   cwd: string;
   branch: string;
@@ -140,9 +111,12 @@ function AzurePrDialog({
   linkedWorkItem?: LinkedWorkItem;
   onChange: (value: AzurePrAssociation | null) => void;
   onClose: () => void;
+  onReveal?: () => void;
 }) {
   const [status, setStatus] = useState<AzureStatus | null>(null);
   const [choosing, setChoosing] = useState(!association);
+  const [linking, setLinking] = useState(false);
+  const [repairRefresh, setRepairRefresh] = useState(0);
   const [discovery, setDiscovery] = useState<{
     groups: AzurePrDiscoveryGroup[];
     errors: string[];
@@ -172,6 +146,7 @@ function AzurePrDialog({
   const generation = useRef(0);
   const pending = useRef(false);
   const body = useRef<HTMLDivElement>(null);
+  const repairDraft = useRef<{ key: string; instruction: string } | null>(null);
   useEffect(() => {
     const refresh = () => {
       const run = ++generation.current;
@@ -278,6 +253,7 @@ function AzurePrDialog({
       setVerified(true);
       setCandidates(null);
       setChoosing(false);
+      setLinking(false);
       drafts.delete(scope);
     });
   useEffect(() => {
@@ -312,38 +288,57 @@ function AzurePrDialog({
     !!association &&
     status?.site === association.target.site &&
     status?.accountId === association.target.accountId;
+  useEffect(() => {
+    if (sameAccount) void refresh();
+    // Read once on opening or reconnecting; saving the result must not poll.
+  }, [status, repairRefresh]);
   return (
-    <Modal
-      trapFocus
-      title="Azure PR review"
-      onClose={onClose}
-      className="max-h-[80vh]"
+    <section
+      aria-label="Azure pull requests"
+      className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
     >
-      <div ref={body} className="space-y-3 p-4 text-[12px]">
-        <p className="break-words text-content/60">
-          {status
-            ? connected
-              ? `${status.account} · ${status.site} · credentials on this device`
-              : "Connect the shared Azure DevOps account to inspect PRs."
-            : "Checking Azure connection…"}
-        </p>
-        <p className="break-all text-content/50">
-          Worktree: {cwd}
-          <br />
-          Branch: {branch || "detached"} · Session:{" "}
-          {sourceSessionId ?? "Choose an agent when sending"}
-        </p>
-        <button
-          className={button}
-          onClick={() => {
-            void emit("open_settings", { section: "general" })
-              .then(onClose)
-              .catch((error) => setError(message(error)));
-          }}
-        >
-          {" "}
-          {connected ? "Connection settings" : "Connect Azure DevOps"}
-        </button>
+      <div
+        ref={body}
+        className="mx-auto w-full max-w-3xl space-y-3 px-5 py-4 text-[12px]"
+      >
+        <header className="flex items-center justify-between gap-3 border-b border-content/10 pb-3">
+          <h2 className="text-[13px] font-medium">Pull requests</h2>
+          <span className="truncate text-content/50" title={cwd}>
+            {branch || "Detached checkout"}
+          </span>
+        </header>
+        <details className="text-content/60" open={!connected}>
+          <summary className="cursor-pointer focus-visible:outline-accent">
+            Azure Repos
+            {connected && status?.account
+              ? ` · ${status.account}`
+              : " · Connect account"}
+          </summary>
+          <p className="break-words text-content/60">
+            {status
+              ? connected
+                ? `${status.account} · ${status.site} · credentials on this device`
+                : "Connect the shared Azure DevOps account to inspect PRs."
+              : "Checking Azure connection…"}
+          </p>
+          <p className="break-all text-content/50">
+            Worktree: {cwd}
+            <br />
+            Branch: {branch || "detached"} · Session:{" "}
+            {sourceSessionId ?? "Choose an agent when sending"}
+          </p>
+          <button
+            className={button}
+            onClick={() => {
+              void emit("open_settings", { section: "general" })
+                .then(onClose)
+                .catch((error) => setError(message(error)));
+            }}
+          >
+            {" "}
+            {connected ? "Connection settings" : "Connect Azure DevOps"}
+          </button>
+        </details>
         {!choosing && association ? (
           <button className={button} onClick={() => setChoosing(true)}>
             Choose another PR
@@ -352,7 +347,7 @@ function AzurePrDialog({
         {choosing ? (
           <section className="space-y-2" aria-label="Related Azure PRs">
             <div className="flex items-center justify-between">
-              <h3 className="font-medium">PRs for this work</h3>
+              <h3 className="font-medium">Linked to this work</h3>
               <button
                 className={button}
                 disabled={discovering || !connected}
@@ -372,7 +367,8 @@ function AzurePrDialog({
             {discovery &&
             !discovery.groups.some((group) => group.items.length) ? (
               <p className="text-content/60">
-                No accessible PR matches found. Link another PR below.
+                No accessible PR found for this story or branch. Link an
+                existing PR to review it here.
               </p>
             ) : null}
             {discovery?.groups.map((group, groupIndex) => (
@@ -462,18 +458,20 @@ function AzurePrDialog({
             )}
           </section>
         ) : null}
-        {choosing ? (
-          <details open={!!link}>
-            <summary className="cursor-pointer text-content/60">
-              Link another PR manually
-            </summary>
+        {choosing && !linking ? (
+          <button className={`${button} bg-content/10`} disabled={!connected || busy} onClick={() => setLinking(true)}>
+            Link a PR
+          </button>
+        ) : null}
+        {choosing && linking ? (
             <form
-              className="space-y-2"
+              className="max-w-lg space-y-3 rounded-md border border-content/10 p-3"
               onSubmit={(event) => {
                 event.preventDefault();
                 void find();
               }}
             >
+              <p className="font-medium">Link a PR</p>
               <label className="block">
                 PR link or repository remote
                 <input
@@ -491,29 +489,34 @@ function AzurePrDialog({
                   placeholder="https://dev.azure.com/org/project/_git/repo/pullrequest/13"
                 />
               </label>
-              <label className="block">
-                Branch (for repository lookup)
-                <input
-                  maxLength={1024}
-                  className={field}
-                  value={lookupBranch}
-                  disabled={busy}
-                  onChange={(event) => {
-                    setLookupBranch(event.target.value);
-                    rememberDraft(link, event.target.value);
-                    setCandidates(null);
-                    setLookup(null);
-                  }}
-                />
-              </label>
+              <details className="text-content/60">
+                <summary className="cursor-pointer">Find by branch</summary>
+                <label className="mt-2 block">
+                  Branch (for repository lookup)
+                  <input
+                    maxLength={1024}
+                    className={field}
+                    value={lookupBranch}
+                    disabled={busy}
+                    onChange={(event) => {
+                      setLookupBranch(event.target.value);
+                      rememberDraft(link, event.target.value);
+                      setCandidates(null);
+                      setLookup(null);
+                    }}
+                  />
+                </label>
+              </details>
               <button
                 className={button}
                 disabled={busy || !connected || !link.trim()}
               >
-                {busy ? "Loading…" : "Find PR"}
+                {busy ? "Verifying…" : "Find PR"}
+              </button>
+              <button type="button" className={button} disabled={busy} onClick={() => { setLinking(false); setCandidates(null); setLookup(null); }}>
+                Cancel
               </button>
             </form>
-          </details>
         ) : null}
         {error ? (
           <p role="alert" className="break-words text-content">
@@ -561,10 +564,10 @@ function AzurePrDialog({
             <h3 className="font-medium">
               #{association.pr.pullRequestId} {association.pr.title}
             </h3>
-            <p>
-              {association.pr.isDraft ? "Draft · " : ""}
-              {association.pr.status} · {association.projectName}/
-              {association.repositoryName}
+            <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-content/55">
+              <span className="rounded bg-content/5 px-1.5 py-0.5 text-[11px] text-content/75">{association.pr.isDraft ? "Draft" : association.pr.status === "active" ? "Open" : association.pr.status}</span>
+              <span>{association.projectName}/{association.repositoryName}</span>
+              <span className="min-w-0 truncate" title={`${association.pr.sourceRefName} → ${association.pr.targetRefName}`}>{association.pr.sourceRefName.replace(/^refs\/heads\//, "")} → {association.pr.targetRefName.replace(/^refs\/heads\//, "")}</span>
             </p>
             <details>
               <summary className="cursor-pointer text-content/60">
@@ -579,6 +582,21 @@ function AzurePrDialog({
                 <br />
                 Source / target revision: {association.revision}
               </p>
+              <button
+                className={button}
+                disabled={busy}
+                onClick={() => {
+                  try {
+                    onChange(null);
+                    setVerified(false);
+                    setChoosing(true);
+                  } catch (error) {
+                    setError(message(error));
+                  }
+                }}
+              >
+                Unlink PR
+              </button>
             </details>
             <div className="flex flex-wrap gap-1">
               <button
@@ -598,21 +616,6 @@ function AzurePrDialog({
               >
                 Open in Azure
               </button>
-              <button
-                className={button}
-                disabled={busy}
-                onClick={() => {
-                  try {
-                    onChange(null);
-                    setVerified(false);
-                    setChoosing(true);
-                  } catch (error) {
-                    setError(message(error));
-                  }
-                }}
-              >
-                Unlink PR
-              </button>
             </div>
             {!sameAccount ? (
               <p role="alert">
@@ -621,24 +624,29 @@ function AzurePrDialog({
               </p>
             ) : !verified ? (
               <p>
-                Saved snapshot. Refresh PR before loading or sending review
-                context.
+                {busy ? "Updating PR…" : "Could not update this saved PR. Retry with Refresh PR."}
               </p>
             ) : null}
-            <p>
-              Reviewers:{" "}
-              {association.pr.reviewers
-                .slice(0, 50)
-                .map(
-                  (reviewer) =>
-                    `${reviewer.displayName}: ${vote(reviewer.vote)}${reviewer.isRequired ? " (required)" : ""}`,
-                )
-                .join("; ") || "None listed"}
-            </p>
-            {verified && sameAccount ? (
+            <details className="text-content/60">
+              <summary className="cursor-pointer">
+                Reviewers ({association.pr.reviewers.length})
+              </summary>
+              <p>
+                {association.pr.reviewers
+                  .slice(0, 50)
+                  .map(
+                    (reviewer) =>
+                      `${reviewer.displayName}: ${vote(reviewer.vote)}${reviewer.isRequired ? " (required)" : ""}`,
+                  )
+                  .join("; ") || "None listed"}
+              </p>
+            </details>
+            {sameAccount ? (
+              <fieldset disabled={!verified || busy} className="min-w-0">
               <AzurePrDetails
-                key={`${association.revision}:${association.target.repository}:${association.target.number}`}
+                key={`${association.revision}:${azurePrKey(association.target)}`}
                 association={association}
+                verified={verified}
                 onStale={() => {
                   setVerified(false);
                   setError(
@@ -646,16 +654,19 @@ function AzurePrDialog({
                   );
                 }}
                 onHandoff={onClose}
+                repairInstruction={repairDraft.current?.key === azurePrKey(association.target) ? repairDraft.current.instruction : undefined}
+                onRefreshEvidence={(instruction) => {
+                  repairDraft.current = { key: azurePrKey(association.target), instruction };
+                  onReveal?.();
+                  setRepairRefresh(value => value + 1);
+                }}
               />
+              </fieldset>
             ) : null}
-            <p className="text-content/45">
-              Push the branch and create the PR in your Git/Azure tools.
-              Inspection and agent context do not publish or merge.
-            </p>
           </section>
         ) : null}
       </div>
-    </Modal>
+    </section>
   );
 }
 
@@ -675,12 +686,18 @@ function vote(value: number) {
 
 function AzurePrDetails({
   association,
+  verified,
   onStale,
   onHandoff,
+  onRefreshEvidence,
+  repairInstruction,
 }: {
   association: AzurePrAssociation;
+  verified: boolean;
   onStale: () => void;
   onHandoff: () => void;
+  onRefreshEvidence: (instruction: string) => void;
+  repairInstruction?: string;
 }) {
   const [threads, setThreads] = useState<AzurePrPage<AzurePrThread> | null>(
     null,
@@ -697,6 +714,7 @@ function AzurePrDetails({
     threadSelections.get(selectionKey)?.id ?? null,
   );
   const pageRef = useRef(threadSelections.get(selectionKey)?.page ?? 0);
+  const preparation = useRef<AbortController | null>(null);
   const rememberThread = (id: number | null) => {
     threadSelections.delete(selectionKey);
     threadSelections.set(selectionKey, { id, page: pageRef.current });
@@ -704,78 +722,118 @@ function AzurePrDetails({
       threadSelections.delete(threadSelections.keys().next().value!);
     setExpanded(id);
   };
+  const generation = useRef(0);
   const mounted = useRef(true),
     pending = useRef(false);
   useEffect(() => {
     mounted.current = true;
+    pending.current = false;
+    setBusy(false);
     return () => {
       mounted.current = false;
+      preparation.current?.abort();
+      generation.current++;
     };
   }, []);
-  const read = async (action: () => Promise<void>) => {
+  const read = async (action: (current: () => boolean) => Promise<void>) => {
     if (pending.current) return;
+    const id = generation.current;
+    const current = () => mounted.current && generation.current === id;
     pending.current = true;
     setBusy(true);
     setError("");
     try {
-      await action();
+      await action(current);
     } catch (error) {
-      if (mounted.current) setError(message(error));
+      if (current()) setError(message(error));
     } finally {
-      if (mounted.current) {
+      if (current()) {
         pending.current = false;
         setBusy(false);
       }
     }
   };
   const load = (skip = pageRef.current) =>
-    read(async () => {
+    read(async (current) => {
       const next = await readAzurePrSection<AzurePrThread>(
         association.target,
         association.revision,
         "threads",
         skip,
       );
-      if (mounted.current) {
+      if (current()) {
         pageRef.current = skip;
         setThreads(next);
       }
     });
+  useEffect(() => {
+    if (verified) void load();
+  }, [verified]);
   const send = (thread: AzurePrThread) =>
-    read(async () => {
+    read(async (current) => {
       // Recheck the revision before opening the existing #8 destination picker.
       try {
         await readAzurePr(association.target, association.revision);
       } catch (error) {
-        if (mounted.current) onStale();
+        if (current()) onStale();
         throw error;
       }
-      if (!mounted.current) return;
+      if (!current()) return;
       requestAgentContext({
         context: azurePrContext(association, thread),
         cwd: association.cwd,
         sourceSessionId: association.sourceSessionId,
         requireDestinationSelection: !association.sourceSessionId,
+        onPrepared: onHandoff,
       });
-      onHandoff();
     });
-  const repairComments = () => read(async () => {
-    const draft = await commentsRepair(association, threads?.items ?? [], pageRef.current);
-    if (!mounted.current) return;
-    requestAgentContext({ context: draft.context, repair: draft.evidence, cwd: association.cwd, sourceSessionId: association.sourceSessionId, requireDestinationSelection: !association.sourceSessionId });
-    onHandoff();
-  });
+  const repairComments = (selected = threads?.items ?? [], commentId?: number) =>
+    read(async (current) => {
+      const controller = new AbortController();
+      preparation.current = controller;
+      const draft = await commentsRepair(
+        association,
+        selected,
+        pageRef.current,
+        () => current() && !controller.signal.aborted,
+        commentId,
+        controller.signal,
+      ).finally(() => { if (preparation.current === controller) preparation.current = null; });
+      if (!current()) return;
+      requestAgentContext({
+        context: { ...draft.context, instruction: repairInstruction ?? draft.context.instruction },
+        repair: draft.evidence,
+        onRefreshEvidence,
+        cwd: draft.evidence.head.cwd,
+        sourceSessionId: draft.evidence.kind === "comments" ? draft.evidence.association.sourceSessionId : undefined,
+        requireDestinationSelection: false,
+        onPrepared: onHandoff,
+      });
+    });
   return (
     <div className="space-y-2">
-      <RepairStatus scope={azurePrKey(association.target)} cwd={association.cwd} />
-      {association.pr.status === "active" && threads?.items.some(unresolvedThread) ? <button className={button} disabled={busy} onClick={() => void repairComments()}>Address comments · this page</button> : null}
+      <RepairStatus
+        scope={azurePrKey(association.target)}
+        cwd={association.cwd}
+      />
+      {association.pr.status === "active" &&
+      threads?.items.some(unresolvedThread) ? (
+        <button
+          className={button}
+          disabled={busy}
+          onClick={() => void repairComments()}
+        >
+          Address comments{threads.items.filter(unresolvedThread).reduce((count, thread) => count + thread.comments.filter(comment => !comment.isDeleted).length, 0) > 20 ? " · first 20 comments" : ""}
+        </button>
+      ) : null}
       <button className={button} disabled={busy} onClick={() => void load()}>
         {busy
-          ? "Loading review…"
+          ? preparation.current ? "Preparing checkout…" : "Loading review…"
           : threads
-            ? "Refresh threads"
-            : "Load threads"}
+            ? "Refresh comments"
+            : "Load comments"}
       </button>
+      {busy && preparation.current ? <button className={button} onClick={() => preparation.current?.abort()}>Cancel preparation</button> : null}
       {error ? <p role="alert">{error}</p> : null}
       {threads?.items.length === 0 ? <p>No review threads.</p> : null}
       {threads?.items
@@ -815,6 +873,7 @@ function AzurePrDetails({
                         text={(comment.content ?? "").slice(0, 32_000)}
                         cwd={association.cwd}
                       />
+                      {association.pr.status === "active" && unresolvedThread(thread) ? <button className={button} disabled={busy} onClick={() => void repairComments([thread], comment.id)}>Address this comment</button> : null}
                     </div>
                   ))}
                 {thread.comments.length > 50 ? (
@@ -849,21 +908,26 @@ function AzurePrDetails({
           Next threads
         </button>
       ) : null}
-      <AzureReviewSection
-        association={association}
-        section="iterations"
-        onHandoff={onHandoff}
-      />
-      <AzureReviewSection
-        association={association}
-        section="policies"
-        onHandoff={onHandoff}
-      />
-      <AzureReviewSection
-        association={association}
-        section="statuses"
-        onHandoff={onHandoff}
-      />
+      <details className="border-t border-content/10 pt-2 text-content/60">
+        <summary className="cursor-pointer">
+          Files, policies and statuses
+        </summary>
+        <AzureReviewSection
+          association={association}
+          section="iterations"
+          onHandoff={onHandoff}
+        />
+        <AzureReviewSection
+          association={association}
+          section="policies"
+          onHandoff={onHandoff}
+        />
+        <AzureReviewSection
+          association={association}
+          section="statuses"
+          onHandoff={onHandoff}
+        />
+      </details>
     </div>
   );
 }
@@ -901,12 +965,16 @@ function AzureReviewSection({
   );
   const [pageSkip, setPageSkip] = useState(0);
   const [filePath, setFilePath] = useState<string | null>(null);
+  const generation = useRef(0);
   const mounted = useRef(true),
     pending = useRef(false);
   useEffect(() => {
     mounted.current = true;
+    pending.current = false;
+    setBusy(false);
     return () => {
       mounted.current = false;
+      generation.current++;
     };
   }, []);
   const label = {
@@ -917,6 +985,8 @@ function AzureReviewSection({
   }[section];
   const load = async (skip = 0) => {
     if (pending.current) return;
+    const id = generation.current;
+    const current = () => mounted.current && generation.current === id;
     pending.current = true;
     setBusy(true);
     setError("");
@@ -928,15 +998,15 @@ function AzureReviewSection({
         skip,
         iteration,
       );
-      if (mounted.current) {
+      if (current()) {
         setPage(next);
         setPageSkip(skip);
         setFilePath(null);
       }
     } catch (error) {
-      if (mounted.current) setError(message(error));
+      if (current()) setError(message(error));
     } finally {
-      if (mounted.current) {
+      if (current()) {
         pending.current = false;
         setBusy(false);
       }
@@ -1068,13 +1138,15 @@ function AzurePrFile({
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
   const [sending, setSending] = useState(false);
+  const generation = useRef(0);
   const mounted = useRef(true),
     pending = useRef(false);
   useEffect(() => {
     mounted.current = true;
+    pending.current = false;
+    setSending(false);
     let cancelled = false;
     setError("");
-    setFile(null);
     void readAzurePrFile(
       association.target,
       association.revision,
@@ -1091,6 +1163,7 @@ function AzurePrFile({
     return () => {
       cancelled = true;
       mounted.current = false;
+      generation.current++;
     };
   }, [association.target, association.revision, iteration, path, skip, retry]);
   const diff = useMemo(
@@ -1099,12 +1172,14 @@ function AzurePrFile({
   );
   const send = async () => {
     if (!file || !diff || pending.current) return;
+    const id = generation.current;
+    const current = () => mounted.current && generation.current === id;
     pending.current = true;
     setSending(true);
     setError("");
     try {
       await readAzurePr(association.target, association.revision);
-      if (!mounted.current) return;
+      if (!current()) return;
       const origin = `${azurePrUrl(association.target)} · account ${association.target.accountId} · checkout ${association.cwd} · session ${association.sourceSessionId ?? "not assigned"} · revision ${association.revision} · iteration ${iteration} · ${file.baseCommit} → ${file.sourceCommit}`;
       const context = contextFromText(
         `Azure PR #${association.target.number} · ${path}`,
@@ -1117,12 +1192,12 @@ function AzurePrFile({
         cwd: association.cwd,
         sourceSessionId: association.sourceSessionId,
         requireDestinationSelection: !association.sourceSessionId,
+        onPrepared: onHandoff,
       });
-      onHandoff();
     } catch (error) {
-      if (mounted.current) setError(message(error));
+      if (current()) setError(message(error));
     } finally {
-      if (mounted.current) {
+      if (current()) {
         pending.current = false;
         setSending(false);
       }

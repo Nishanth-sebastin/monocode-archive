@@ -2,7 +2,7 @@
 
 Refs #16. Stacked on #14 at `59b99a0008703fe127b9faefccf680fc47c3b16e`, with user approval. No merges.
 
-From Changes → Azure PR review → loaded unresolved threads, **Address comments · this page** opens the existing #8 destination picker with at most 20 selected threads. From Azure Pipelines → a current failed run → a failed job's bounded log, **Fix CI** opens the same review sheet. The sheet shows evidence, account/repository/revision, exact worktree/host and agent. Users can deselect evidence and edit the instruction. A source agent is preselected only when still eligible for that checkout; otherwise selection is required. New sessions use the existing agent/project controls.
+From Changes → Azure PR review → loaded unresolved threads, **Address comments** opens the existing #8 destination picker with at most 20 selected threads. From Azure Pipelines → a current failed run → a failed job's bounded log, **Fix CI** opens the same review sheet. The sheet shows evidence, account/repository/revision, exact worktree/host and agent. Users can deselect evidence and edit the instruction. A source agent is preselected only when still eligible for that checkout; otherwise selection is required. New sessions use the existing agent/project controls.
 
 **Send to owner**, **Queue for owner**, or **Start repair session** uses App's existing session-ID-targeted submit path. Busy owners queue a separate turn while the app remains open. Repair steering is disabled because the existing mid-turn transport cannot independently correlate repair completion. Generic messages retain their existing behavior. Queue evidence is sealed; cancel it and reopen the review sheet to change it.
 
@@ -34,4 +34,20 @@ A failed run's selected failing job/log is the initial CI repair unit. Review se
 
 ## Remaining acceptance
 
-Live Azure Repos/Pipelines, native authenticated agent delivery (Codex plus another provider), native Windows/Windows→WSL and response under actual streaming require unavailable accounts/platforms. The user has no Azure DevOps account and is not expected to supply a credit card. Browser fixtures/local tests do not certify those boundaries. Representative native release CPU/memory/latency remains unmeasured; reads and retained data are bounded, but that is not performance acceptance. Hosted CI is subject to the repository's billing restriction.
+Live Azure Repos/Pipelines, native authenticated agent delivery (Codex plus another provider), native Windows/Windows→WSL and response under actual streaming require unavailable accounts/platforms. The user has since connected an Azure test account; a live review/CI repair flow is still unverified. Browser fixtures/local tests do not certify those boundaries. Representative native release CPU/memory/latency remains unmeasured; reads and retained data are bounded, but that is not performance acceptance. Hosted CI is subject to the repository's billing restriction.
+
+### Review UI follow-up — 2026-09-11
+
+- Replaced the Azure PR/CI modals with the existing workspace file-tab surface. Two compact Changes rows open or focus a review for the exact checkout, branch and conversation; PR and CI remain independent. Provider metadata stays expandable, CI setup is requested on demand, and file-context selection uses the existing file-section toolbar.
+- Moved the existing Settings dropdown into `chrome/Select.tsx` and reused it for pipeline repositories. The keyboard selection, Escape/focus return, theme tokens and Popover frame are shared.
+- Added PRs/CI links beside each Inbox item's related conversation, so multiple related conversations expose separate destinations. A stale Inbox-item request cannot navigate after selection changes. No agent message or provider write is triggered by these links.
+- Saved PR and CI changes immediately update the matching sidebar rows; another conversation's associations stay separate. Multiple PRs remain linked. Saved state is labelled as saved, not current CI acceptance.
+- Review-tab metadata restores through the existing workspace snapshot validation; malformed or conflicting tab kinds are rejected and provider evidence is re-read. No credential or provider-body persistence was added.
+- Validation: 1,605 web tests plus TypeScript passed; production web build passed (5.97 seconds; existing chunk-size advisory). Fresh independent review passed after fixing the stale Inbox navigation guard. Native macOS dark UI checked for compact rows, workspace-tab navigation, Inbox-to-owner PR navigation and the themed repository picker. No new polling was added.
+- Live Azure account is connected and Test task is visible. Its live PR discovery currently reports no accessible match for the story or monocode/main checkout. A supplied PR URL is still needed to verify that reported lookup; no live PR/CI association or repair acceptance is claimed. Light-theme, Windows/WSL and streaming-agent acceptance were not newly exercised in this follow-up.
+
+The [2026-09-11 UI and acceptance review](delivery-ui-review.md) records the current follow-up fixes and requirements still missing; earlier clean code-review statements do not certify whole-issue acceptance.
+
+Local recovery follow-up: review tabs now preserve state while hidden, and the repair sheet has a direct Refresh evidence action with artifact-scoped instruction retention. Link a PR matches the Connect pipeline inline form. See the current review report for the 1,611-test validation and remaining live acceptance.
+
+Current follow-up evidence and remaining limits: [delivery UI review](delivery-ui-review.md) and [session performance review](session-performance-review.md). These supersede earlier modal/on-demand descriptions where noted.

@@ -83,6 +83,10 @@ export function surfaceTabMenuItems(file: FilePaneTab): ExplorerMenuItem[] {
 export function surfaceTabPresentation(
   file: FilePaneTab,
 ): SurfaceTabPresentation {
+  if (file.delivery) {
+    const title = file.delivery.kind === "pr" ? "Pull requests" : "CI";
+    return { name: title, label: title, iconName: "CHANGES", tooltip: `${title} · ${file.delivery.branch || "detached"} · ${file.cwd}` };
+  }
   if (isReleaseNotesTab(file)) {
     const title = releaseNotesTitle(file.releaseNotes.version);
     return {
@@ -322,7 +326,7 @@ export function SurfaceTabs({
             >
               {terminal ? (
                 <Terminal className="size-3.5 shrink-0" strokeWidth={1.75} />
-              ) : changes || commit ? (
+              ) : changes || commit || file.delivery ? (
                 <GitCompare className="size-3.5 shrink-0" strokeWidth={1.75} />
               ) : (
                 <FileTypeIcon name={iconName} isDir={false} size={15} />

@@ -1,3 +1,4 @@
+import { publishRepositoryFamilies } from "./repositoryFamilies";
 // @vitest-environment happy-dom
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
@@ -87,6 +88,7 @@ const delivery = (): RepairDelivery => ({
   },
 });
 beforeEach(() => {
+  publishRepositoryFamilies(new Map());
   const store = new Map<string, string>();
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => store.get(key) ?? null,
@@ -192,7 +194,7 @@ it("verifies selected unresolved comments as well as PR revision", async () => {
     {
       id: 1,
       status: "active",
-      comments: [{ id: 3, content: "Handle failure" }],
+      comments: [{ id: 3, content: "Handle failure" }, { id: 4, content: "Keep retry behavior" }],
     },
     { id: 2, status: "fixed", comments: [] },
   ];
@@ -212,7 +214,13 @@ it("verifies selected unresolved comments as well as PR revision", async () => {
           },
   );
   const draft = await commentsRepair(association, threads, 50);
-  expect(draft.context.entries).toHaveLength(1);
+  expect(draft.context.entries).toHaveLength(2);
+  expect(draft.context.entries[0].text).toContain("Handle failure");
+  expect(draft.context.entries[0].text).not.toContain("Keep retry behavior");
+  const one = await commentsRepair(association, threads, 50, () => true, 4);
+  expect(one.context.entries).toHaveLength(1);
+  expect(one.context.entries[0].text).toContain("Keep retry behavior");
+  expect(one.context.entries[0].text).not.toContain("Handle failure");
   await validateRepair(draft.evidence, draft.context);
   expect(invoke).toHaveBeenLastCalledWith(
     "azure_pr_read",
@@ -235,4 +243,32 @@ it("does not reserve a second scope while its destination is being checked", () 
     "Another repair is checking",
   );
   expect(repairRecords().some((row) => row.id === draft.id)).toBe(false);
+});
+
+it("prepares comments in a verified PR checkout without retargeting the source conversation", async () => {
+  const association: AzurePrAssociation = { cwd: "/work/story", branch: "main", sourceSessionId: "owner", target: { site: "https://dev.azure.com/org", accountId: "account", project: "p", repository: "r", number: 9 }, account: "Ada", projectName: "Project", repositoryName: "Repo", revision: "rev", pr: { pullRequestId: 9, title: "Work", status: "active", sourceRefName: "refs/heads/feature", targetRefName: "refs/heads/main", lastMergeSourceCommit: {commitId:"head"}, reviewers: [] } };
+  const threads: AzurePrThread[] = [{id:1,status:"active",comments:[{id:2,content:"Fix this"}]}];
+  localStorage.setItem("monocode.recentProjects", JSON.stringify([{path:"/work/repo",openedAt:1}]));
+  const remote = "https://dev.azure.com/org/project/_git/repo";
+  let existing = true;
+  let cancelled = false;
+  vi.mocked(invoke).mockImplementation(async (command, raw) => {
+    const args = raw as Record<string, string>;
+    if (command === "azure_ci_context") return { cwd: args.cwd, branch: args.cwd === "/work/story" || (!existing && args.cwd === "/work/repo") ? "main" : "feature", commit: "head", remotes:[{name:"origin",url:args.cwd === "/work/story" ? "https://github.com/team/story" : remote}] };
+    if (command === "azure_pr_prepare_checkout") return "/work/repo-pr-9";
+    throw new Error(`Unexpected ${command}`);
+  });
+  const reused = await commentsRepair(association, threads, 0);
+  expect(reused.evidence.head.cwd).toBe("/work/repo");
+  expect(reused.evidence.kind === "comments" && reused.evidence.association.sourceSessionId).toBeUndefined();
+  expect(association.cwd).toBe("/work/story");
+  expect(vi.mocked(invoke).mock.calls.some(([name]) => name === "azure_pr_prepare_checkout")).toBe(false);
+  existing = false;
+  const created = await commentsRepair(association, threads, 0, () => !cancelled);
+  expect(created.evidence.head.cwd).toBe("/work/repo-pr-9");
+  expect(invoke).toHaveBeenCalledWith("azure_pr_prepare_checkout", { cwd:"/work/story", target: association.target, expectedRevision: "rev", requestId: expect.any(String) });
+  cancelled = true;
+  vi.mocked(invoke).mockClear();
+  await expect(commentsRepair(association, threads, 0, () => !cancelled)).rejects.toThrow("cancelled");
+  expect(vi.mocked(invoke).mock.calls.some(([name]) => name === "azure_pr_prepare_checkout")).toBe(false);
 });

@@ -1,5 +1,7 @@
 # Azure Pipelines inspection — implementation and acceptance evidence
 
+> Historical implementation evidence. The current stacked worktree replaces the PR/CI modals with workspace tabs. See [the current UI and acceptance review](delivery-ui-review.md) for updated behavior and remaining gaps.
+
 Refs #14. Source/fixture implementation; live Azure and Windows/WSL acceptance remains unverified.
 
 ## User journey
@@ -32,10 +34,12 @@ The shared Modal now supports opt-in keyboard containment; Azure PR review and C
 
 ## Remaining acceptance
 
-- Live Azure Repos + Pipelines and GitHub PR + Pipelines, including genuine merge-ref metadata, new PR heads, reruns/parallel jobs, cancelled runs, pagination and restricted log access, require an authorized existing Azure organization. The user has no Azure account and is not expected to supply a credit card for development testing.
+- Live Azure Repos + Pipelines and GitHub PR + Pipelines, including genuine merge-ref metadata, new PR heads, reruns/parallel jobs, cancelled runs, pagination and restricted log access, require an authorized existing Azure organization. The user has since connected an Azure test account; authorized PR/pipeline resources and the listed live scenarios remain unverified.
 - Ordinary native-app/provider preparation, real Windows UI → WSL operation and responsiveness during real agent streaming remain unverified. Native local Git tests and browser fixtures do not prove those boundaries.
 - Representative native release CPU/memory/latency has not been measured. Bounded/on-demand design and a successful web build are not performance acceptance.
 - Hosted CI is subject to the repository's GitHub billing/spending restriction; inspect the actual PR run state.
 - Historical timeline-attempt logs, unsupported repository types and oversized content use Open in Azure. No automatic writes, reruns, pipeline edits, pushes or merges are exposed.
 
 API references: [Build list](https://learn.microsoft.com/en-us/rest/api/azure/devops/build/builds/list?view=azure-devops-rest-7.1), [definition metadata](https://learn.microsoft.com/en-us/rest/api/azure/devops/build/definitions/get?view=azure-devops-rest-7.1), [timeline records and attempts](https://learn.microsoft.com/en-us/rest/api/azure/devops/build/timeline/get?view=azure-devops-rest-7.1), [bounded log ranges](https://learn.microsoft.com/en-us/rest/api/azure/devops/build/builds/get-build-log?view=azure-devops-rest-7.1).
+
+Current follow-up evidence and remaining limits: [delivery UI review](delivery-ui-review.md) and [session performance review](session-performance-review.md). These supersede earlier modal/on-demand descriptions where noted.

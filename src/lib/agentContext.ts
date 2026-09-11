@@ -53,6 +53,7 @@ export type AgentContextRequest = {
   prepareInSource?: boolean;
   requireDestinationSelection?: boolean;
   onPrepared?: () => void;
+  onRefreshEvidence?: (instruction: string) => void;
 };
 
 export function boundAgentContext(context: AgentContext): AgentContext {

@@ -1,12 +1,14 @@
-import { AzureCiReview } from "./AzureCiReview";
-import type { LinkedWorkItem } from "../lib/session";
+import { loadAzurePrAssociations, AZURE_PR_ASSOCIATIONS_CHANGED } from "../lib/azureRepos";
+import { loadCiSources, ciState, AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
+import type { DeliveryTabSource } from "../lib/layout";
 import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
 import { ContextCheckbox } from "./InboxContextPicker";
-import { AzurePrReview } from "./AzurePrReview";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Check,
+  CircleDashed,
+  SquarePlus,
   ChevronDown,
   ChevronRight,
   CloudUpload,
@@ -95,7 +97,6 @@ const indexByCwd = new Map<string, GitDiffIndex>();
 const prByCwd = new Map<string, GitPr | null>();
 
 type Props = {
-  linkedWorkItem?: LinkedWorkItem;
   sourceSessionId?: string;
   cwd: string;
   enabled: boolean;
@@ -104,13 +105,13 @@ type Props = {
   selectedKind?: GitFileDiffKind;
   selectedSha?: string;
   onOpenFile: (path: string, kind: GitFileDiffKind) => void;
+  onOpenDelivery?: (cwd: string, source: DeliveryTabSource) => void;
   onOpenAllChanges: () => void;
   onOpenCommit: (commit: GitHistoryCommit) => void;
 };
 
 export function GitChangesPanel({
   sourceSessionId,
-  linkedWorkItem,
   cwd,
   enabled,
   textHarness,
@@ -119,10 +120,26 @@ export function GitChangesPanel({
   selectedSha,
   onOpenFile,
   onOpenAllChanges,
+  onOpenDelivery,
   onOpenCommit,
 }: Props) {
   const { index, reload } = useDiffIndex(cwd, enabled);
   const files = index?.files ?? [];
+  const [, refreshDelivery] = useState(0);
+  useEffect(() => {
+    const refresh = () => refreshDelivery(value => value + 1);
+    window.addEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, refresh);
+    window.addEventListener(AZURE_CI_SOURCES_CHANGED, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, refresh);
+      window.removeEventListener(AZURE_CI_SOURCES_CHANGED, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
+  const prs = loadAzurePrAssociations(cwd, index?.branch ?? "", sourceSessionId);
+  const pipelines = loadCiSources(cwd, index?.branch ?? "", sourceSessionId);
+
   const paneRef = useRef<HTMLDivElement>(null);
   const [graphHeight, setGraphHeight] = useState(loadGraphPanelHeight);
   const [graphExpanded, setGraphExpanded] = useState(graphOpen);
@@ -169,8 +186,53 @@ export function GitChangesPanel({
           <span className="ml-auto" />
         )}
       </header>
-      <AzurePrReview linkedWorkItem={linkedWorkItem} key={JSON.stringify([cwd, index?.branch, sourceSessionId])} cwd={cwd} branch={index?.branch ?? ""} sourceSessionId={sourceSessionId} enabled={enabled} />
-      <AzureCiReview key={JSON.stringify(["ci",cwd,index?.branch,sourceSessionId])} cwd={cwd} branch={index?.branch ?? ""} sourceSessionId={sourceSessionId} enabled={enabled} />
+      <div className="shrink-0 border-b border-content/10 py-1">
+        {(
+          [
+            ["pr", "Pull requests", "Azure Repos"],
+            ["ci", "CI", "Azure Pipelines"],
+          ] as const
+        ).map(([kind, label, provider]) => (
+          <button
+            key={kind}
+            type="button"
+            aria-label={label}
+            disabled={!enabled || !index || !onOpenDelivery}
+            className="group flex min-h-9 w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-content/70 hover:bg-content/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent disabled:opacity-40"
+            onClick={() =>
+              onOpenDelivery?.(cwd, {
+                kind,
+                branch: index?.branch ?? "",
+                sourceSessionId,
+              })
+            }
+          >
+            {kind === "pr" ? (
+              <GitPullRequest
+                className="size-3.5 shrink-0 text-content/45"
+                strokeWidth={1.75}
+              />
+            ) : (
+              <CircleDashed
+                className="size-3.5 shrink-0 text-content/45"
+                strokeWidth={1.75}
+              />
+            )}
+            <span className="min-w-0 flex-1">
+            <span className="block truncate" title={kind === "pr" ? prs[0]?.pr.title : pipelines.map(source => source.definitionName).join(", ")}>
+              {kind === "pr" && prs.length ? `#${prs[0].pr.pullRequestId} ${prs[0].pr.title}${prs.length > 1 ? ` +${prs.length - 1}` : ""}` : kind === "ci" && pipelines.length ? `CI · ${pipelines.map(source => source.definitionName).join(", ")}` : label}
+            </span>
+            <span className="block truncate text-[11px] text-content/45">
+              {kind === "pr" && prs.length ? `${prs[0].pr.status === "active" && prs[0].pr.reviewers.some(reviewer => reviewer.vote < 0) ? "Needs attention" : prs[0].pr.status === "active" ? "Open" : prs[0].pr.status} · saved` : kind === "ci" && pipelines.length ? (pipelines.length === 1 && pipelines[0].last ? `${ciState(pipelines[0].last.run.status, pipelines[0].last.run.result)} · ${pipelines[0].last.run.commit?.slice(0, 8) || "unknown commit"} · saved` : `${pipelines.length} linked`) : provider}
+            </span>
+            </span>
+            <ChevronRight
+              className="size-3 shrink-0 text-content/30"
+              strokeWidth={1.75}
+            />
+          </button>
+        ))}
+      </div>
       <ChangedFiles
         cwd={cwd}
         textHarness={textHarness}
@@ -191,22 +253,19 @@ export function GitChangesPanel({
         }}
       />
       {graphExpanded ? (
-      <GraphResizeSash
-        height={graphHeight}
-        onHeightPaint={setGraphHeight}
-        onHeightCommit={(next) => {
-          setGraphHeight(next);
-          saveGraphPanelHeight(next);
-        }}
-        maxHeight={() => {
-          const pane = paneRef.current;
-          if (!pane) return GRAPH_PANEL_DEFAULT * 2;
-          return Math.max(
-            GRAPH_PANEL_MIN,
-            pane.clientHeight - 160,
-          );
-        }}
-      />
+        <GraphResizeSash
+          height={graphHeight}
+          onHeightPaint={setGraphHeight}
+          onHeightCommit={(next) => {
+            setGraphHeight(next);
+            saveGraphPanelHeight(next);
+          }}
+          maxHeight={() => {
+            const pane = paneRef.current;
+            if (!pane) return GRAPH_PANEL_DEFAULT * 2;
+            return Math.max(GRAPH_PANEL_MIN, pane.clientHeight - 160);
+          }}
+        />
       ) : null}
       <div
         className={`shrink-0 overflow-hidden border-t border-content/10 ${
@@ -258,7 +317,9 @@ function ChangedFiles({
   onMutated: (paths?: string[]) => void;
 }) {
   const [selectingContext, setSelectingContext] = useState(false);
-  const [contextSelected, setContextSelected] = useState<Set<string>>(new Set());
+  const [contextSelected, setContextSelected] = useState<Set<string>>(
+    new Set(),
+  );
   const [contextBusy, setContextBusy] = useState(false);
   const [contextError, setContextError] = useState("");
   const contextGeneration = useRef(0);
@@ -283,6 +344,20 @@ function ChangedFiles({
         },
       }
     : undefined;
+  const toggleContextSelection = () => {
+    contextGeneration.current++;
+    setContextSelected(new Set());
+    setSelectingContext((value) => !value);
+    setContextBusy(false);
+    setContextError("");
+  };
+  const selectContextAction = {
+    title: selectingContext
+      ? "Cancel file selection"
+      : "Select files for agent",
+    icon: <SquarePlus className="size-3.5" strokeWidth={1.75} />,
+    onClick: toggleContextSelection,
+  };
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const menuRef = useRef<HTMLDivElement>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
@@ -534,11 +609,17 @@ function ChangedFiles({
         );
       const context = await contextFromChanges(cwd, selections);
       if (generation === contextGeneration.current) {
-        requestAgentContext({ context, cwd, sourceSessionId, prepareInSource, onPrepared: () => {
-          if (generation !== contextGeneration.current) return;
-          setContextSelected(new Set());
-          setSelectingContext(false);
-        } });
+        requestAgentContext({
+          context,
+          cwd,
+          sourceSessionId,
+          prepareInSource,
+          onPrepared: () => {
+            if (generation !== contextGeneration.current) return;
+            setContextSelected(new Set());
+            setSelectingContext(false);
+          },
+        });
       }
     } catch (reason) {
       if (generation === contextGeneration.current)
@@ -552,23 +633,6 @@ function ChangedFiles({
     <aside
       className={`flex min-h-0 min-w-0 flex-col ${fill ? "flex-1" : "shrink-0"}`}
     >
-      <div className="flex flex-wrap items-center gap-1 border-b border-content/10 px-2 py-1 text-[12px]">
-        {selectingContext ? <span className="min-w-0 flex-1 px-1 text-content/50">{contextSelected.size ? `${contextSelected.size} selected` : "Select files"}</span> : null}
-        {selectingContext && contextSelected.size > 0 ? <>
-          <button type="button" disabled={contextBusy} className="h-7 rounded-md px-2 text-content/80 hover:bg-content/5 disabled:opacity-40" onClick={() => void prepareSelected(true)}>
-            {contextBusy ? "Loading…" : "Add to chat"}
-          </button>
-          <button type="button" disabled={contextBusy} className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5 disabled:opacity-40" onClick={() => void prepareSelected(false)}>Send to agent…</button>
-        </> : null}
-        <button type="button" aria-pressed={selectingContext} className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5" onClick={() => {
-          contextGeneration.current++;
-          setContextSelected(new Set());
-          setSelectingContext(value => !value);
-          setContextBusy(false);
-          setContextError("");
-        }}>{selectingContext ? "Done" : "Select changes"}</button>
-        {contextError ? <p role="alert" className="w-full px-1 text-red-400">{contextError}</p> : null}
-      </div>
       <div className="shrink-0 border-b border-content/10 p-2">
         <div className="relative">
           <textarea
@@ -667,6 +731,50 @@ function ChangedFiles({
           />
         ) : null}
       </div>
+      {selectingContext ? (
+        <div className="flex flex-wrap items-center gap-1 border-b border-content/10 px-2 py-1 text-[12px]">
+          {selectingContext ? (
+            <span className="min-w-0 flex-1 px-1 text-content/50">
+              {contextSelected.size
+                ? `${contextSelected.size} selected`
+                : "Select files"}
+            </span>
+          ) : null}
+          {selectingContext && contextSelected.size > 0 ? (
+            <>
+              <button
+                type="button"
+                disabled={contextBusy}
+                className="h-7 rounded-md px-2 text-content/80 hover:bg-content/5 disabled:opacity-40"
+                onClick={() => void prepareSelected(true)}
+              >
+                {contextBusy ? "Loading…" : "Add to chat"}
+              </button>
+              <button
+                type="button"
+                disabled={contextBusy}
+                className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5 disabled:opacity-40"
+                onClick={() => void prepareSelected(false)}
+              >
+                Send to agent…
+              </button>
+            </>
+          ) : null}
+          <button
+            type="button"
+            aria-pressed={selectingContext}
+            className="h-7 rounded-md px-2 text-content/65 hover:bg-content/5"
+            onClick={toggleContextSelection}
+          >
+            {selectingContext ? "Cancel" : "Select files for agent"}
+          </button>
+          {contextError ? (
+            <p role="alert" className="w-full px-1 text-red-400">
+              {contextError}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <div
         ref={lockOverscroll}
         className="min-h-0 flex-1 overflow-y-auto overscroll-none py-1"
@@ -693,6 +801,7 @@ function ChangedFiles({
                 view={view}
                 onToggleView={toggleView}
                 headerActions={[
+                  selectContextAction,
                   {
                     title: "Open All Changes",
                     icon: <FileDiff className="size-3.5" strokeWidth={1.75} />,
@@ -730,6 +839,7 @@ function ChangedFiles({
                 view={view}
                 onToggleView={toggleView}
                 headerActions={[
+                  ...(staged.length ? [] : [selectContextAction]),
                   {
                     title: "Open All Changes",
                     icon: <FileDiff className="size-3.5" strokeWidth={1.75} />,
@@ -1293,7 +1403,15 @@ function ChangeRow({
             : "text-content hover:bg-content/5"
         }`}
       >
-        {contextSelection ? <ContextCheckbox label={`Select ${kind} ${file.relative}`} checked={contextSelection.selected.has(JSON.stringify([file.relative, kind]))} onChange={() => contextSelection.toggle(file.relative, kind)} /> : null}
+        {contextSelection ? (
+          <ContextCheckbox
+            label={`Select ${kind} ${file.relative}`}
+            checked={contextSelection.selected.has(
+              JSON.stringify([file.relative, kind]),
+            )}
+            onChange={() => contextSelection.toggle(file.relative, kind)}
+          />
+        ) : null}
         <button
           type="button"
           title={file.relative}
@@ -1404,8 +1522,8 @@ function useDiffIndex(
   index: GitDiffIndex | null;
   reload: () => void;
 } {
-  const [index, setIndex] = useState<GitDiffIndex | null>(
-    () => cachedIndex(cwd),
+  const [index, setIndex] = useState<GitDiffIndex | null>(() =>
+    cachedIndex(cwd),
   );
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => setNonce((value) => value + 1), []);
