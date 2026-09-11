@@ -159,17 +159,24 @@ export function TaskScopeChip({
                           : "Prepare later"}
                   </span>
                   </button>
-                  {failed && onRetryChild ? (
+                  {(failed ||
+                    (!ready &&
+                      entry.launch.state !== "working" &&
+                      entry.workingCopy)) &&
+                  onRetryChild ? (
                     <button
                       type="button"
-                      title={entry.launch.error ?? "Retry launch"}
+                      title={
+                        entry.launch.error ??
+                        (failed ? "Retry launch" : "Start this repository")
+                      }
                       onClick={() => {
                         setOpen(false);
                         onRetryChild(task.id, entry.id);
                       }}
                       className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-content/60 hover:bg-content/8 hover:text-content"
                     >
-                      Retry
+                      {failed ? "Retry" : "Start"}
                     </button>
                   ) : null}
                 </div>

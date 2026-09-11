@@ -76,8 +76,6 @@ type Props = {
   projectId: string;
   /** Present → edit mode: rename, retune children, add/remove repositories. */
   editingTaskId?: string;
-  /** Launches all unresolved children, or just the given ones (retry). */
-  onLaunchChildren: (taskId: string, childIds?: readonly string[]) => void;
   onClose: () => void;
 };
 
@@ -101,7 +99,6 @@ const shortRef = (name: string) =>
 export function TaskCreateSheet({
   projectId,
   editingTaskId,
-  onLaunchChildren,
   onClose,
 }: Props) {
   const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
@@ -461,24 +458,18 @@ export function TaskCreateSheet({
               : { lastActiveChildId: undefined }),
           };
         });
-        const added = addTaskChildren(editingTask.id, buildDrafts());
-        if (added.length)
-          onLaunchChildren(
-            editingTask.id,
-            added.map((child) => child.id),
-          );
+        addTaskChildren(editingTask.id, buildDrafts());
         onClose();
         return;
       }
-      const created = createTask({
+      createTask({
         projectId,
         name,
         ...(linked ? { ticket: linked } : {}),
         brief,
         children: buildDrafts(),
       });
-      // Work starts immediately — close straight into the sessions.
-      onLaunchChildren(created.id);
+      // Prepared only — sessions start when the task is opened.
       onClose();
     } catch (err) {
       setError(String(err));
@@ -669,9 +660,7 @@ export function TaskCreateSheet({
                 onClick={submit}
                 className="rounded-md bg-content/10 px-3 py-1.5 text-[12px] font-medium text-content hover:bg-content/15 disabled:opacity-40"
               >
-                {editingTask
-                  ? "Save changes"
-                  : "Create task and start sessions"}
+                {editingTask ? "Save changes" : "Create task"}
               </button>
             </div>
           </>

@@ -4649,6 +4649,11 @@ export default function App({
     (taskId: string) => {
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       if (!task) return;
+      // No sessions yet — opening the task is what starts the work.
+      if (!task.children.some((entry) => entry.sessionIds.length)) {
+        void launchTaskChildren(taskId);
+        return;
+      }
       const child =
         task.children.find(
           (entry) =>
@@ -4659,7 +4664,7 @@ export default function App({
         task.children[0];
       if (child) void onOpenTaskChild(taskId, child.id);
     },
-    [onOpenTaskChild],
+    [launchTaskChildren, onOpenTaskChild],
   );
 
   const onUpdatePlan = useCallback(
@@ -6044,9 +6049,6 @@ export default function App({
         <TaskCreateSheet
           projectId={taskSheet.projectId}
           editingTaskId={taskSheet.editingTaskId}
-          onLaunchChildren={(taskId, childIds) =>
-            void launchTaskChildren(taskId, childIds)
-          }
           onClose={() => setTaskSheet(null)}
         />
       )}
