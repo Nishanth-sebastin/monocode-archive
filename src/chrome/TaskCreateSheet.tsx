@@ -64,8 +64,12 @@ type ChildDraftState = {
   baseRef?: string;
   baseCommit?: string;
   branch?: string;
+  /** True while the branch is the auto suggestion — re-suggested on rename. */
+  branchAuto?: boolean;
   /** Display path — the Linux path for WSL repositories. */
   path?: string;
+  /** True while the location follows the branch-derived default. */
+  pathAuto?: boolean;
   existingPath?: string;
   responsibility?: string;
   sharedAccepted?: boolean;
@@ -237,7 +241,9 @@ export function TaskCreateSheet({
         mode: "worktree",
         ...(base ? { baseRef: base.name, baseCommit: base.commit } : {}),
         branch,
+        branchAuto: true,
         path: `${location?.path ?? mainCheckout(repo, family)}-${branch.replace(/\//g, "-")}`,
+        pathAuto: true,
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -267,6 +273,36 @@ export function TaskCreateSheet({
       return changed ? next : prev;
     });
   }, [repositories, families, refsTick, defaultBase]);
+
+  // Keep branch/location suggestions in step with the task name for drafts
+  // the user has not hand-edited.
+  useEffect(() => {
+    setDrafts((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const repo of repositories) {
+        const draft = next.get(repo.id);
+        if (!draft || draft.mode !== "worktree" || !draft.branchAuto)
+          continue;
+        const refs = refsCache.current.get(repo.id) ?? [];
+        const branch = suggestTaskBranch(name || "task", refs);
+        if (branch === draft.branch) continue;
+        const family = familyForRepository(repo, families);
+        const location = wslLocation(mainCheckout(repo, family));
+        changed = true;
+        next.set(repo.id, {
+          ...draft,
+          branch,
+          ...(draft.pathAuto
+            ? {
+                path: `${location?.path ?? mainCheckout(repo, family)}-${branch.replace(/\//g, "-")}`,
+              }
+            : {}),
+        });
+      }
+      return changed ? next : prev;
+    });
+  }, [name, repositories, families, refsTick, mainCheckout]);
 
   const selectRepository = (repo: ProjectRepository, on: boolean) => {
     setError("");
@@ -609,6 +645,7 @@ export function TaskCreateSheet({
                 <ChildConfig
                   key={repoId}
                   repo={repo}
+                  taskName={name}
                   draft={draft}
                   family={familyForRepository(repo, families)}
                   refs={refsCache.current.get(repo.id)}
@@ -677,6 +714,7 @@ export function TaskCreateSheet({
 
 function ChildConfig({
   repo,
+  taskName,
   draft,
   family,
   refs,
@@ -686,6 +724,7 @@ function ChildConfig({
   onLoadRefs,
 }: {
   repo: ProjectRepository;
+  taskName: string;
   draft: ChildDraftState;
   family: RepositoryFamily | undefined;
   refs: Ref[] | undefined;
@@ -699,6 +738,24 @@ function ChildConfig({
   const copies = (family?.worktrees ?? []).filter(
     (entry) => !entry.missing && !entry.prunable,
   );
+
+  /** Branch + location defaults for a draft switching to worktree mode —
+   * skipped once a branch exists. */
+  const worktreeDefaults = (): Partial<ChildDraftState> => {
+    if (draft.branch) return {};
+    const branch = suggestTaskBranch(taskName || "task", refs ?? []);
+    const main =
+      family?.worktrees.find((entry) => entry.main)?.path ??
+      family?.checkout ??
+      repo.anchor;
+    const loc = wslLocation(main);
+    return {
+      branch,
+      branchAuto: true,
+      path: `${loc?.path ?? main}-${branch.replace(/\//g, "-")}`,
+      pathAuto: true,
+    };
+  };
 
   const pickBase = (refName: string) => {
     const ref = refs?.find((entry) => entry.name === refName);
@@ -725,7 +782,10 @@ function ChildConfig({
         <button
           type="button"
           onClick={() =>
-            onChange({ mode: draft.mode === "later" ? "worktree" : "later" })
+            onChange({
+              mode: draft.mode === "later" ? "worktree" : "later",
+              ...(draft.mode === "later" ? worktreeDefaults() : {}),
+            })
           }
           className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-content/40 hover:bg-content/5 hover:text-content/70"
         >
@@ -749,7 +809,12 @@ function ChildConfig({
                 aria-checked={draft.mode === option.value}
                 disabled={disabled}
                 onClick={() => {
-                  onChange({ mode: option.value });
+                  onChange({
+                    mode: option.value,
+                    ...(option.value === "worktree"
+                      ? worktreeDefaults()
+                      : {}),
+                  });
                   if (option.value === "worktree") onLoadRefs();
                 }}
                 className={`rounded-[5px] px-1 py-1 disabled:opacity-40 ${
@@ -800,7 +865,10 @@ function ChildConfig({
             <input
               value={draft.branch ?? ""}
               onChange={(event) =>
-                onChange({ branch: event.target.value.trim() || undefined })
+                onChange({
+                  branch: event.target.value.trim() || undefined,
+                  branchAuto: false,
+                })
               }
               className={`${inputClass} py-1.5 text-[12px]`}
               aria-label={`Branch for ${repositoryDisplayName(repo)}`}
@@ -813,7 +881,10 @@ function ChildConfig({
             <input
               value={draft.path ?? ""}
               onChange={(event) =>
-                onChange({ path: event.target.value || undefined })
+                onChange({
+                  path: event.target.value || undefined,
+                  pathAuto: false,
+                })
               }
               className={`${inputClass} py-1.5 font-mono text-[12px]`}
               aria-label={`Location for ${repositoryDisplayName(repo)}`}
