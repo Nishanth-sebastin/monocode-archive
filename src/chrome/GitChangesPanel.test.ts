@@ -113,8 +113,8 @@ it("keeps changes selected until the chosen recipient accepts context", async ()
         (item) => item.textContent?.trim() === text,
       ) as HTMLButtonElement;
     await act(async () => checkbox().click());
-    // The Task menu opens; the selection stays until a target accepts it.
-    await act(async () => button("Task").click());
+    // The task menu opens; the selection stays until a target accepts it.
+    await act(async () => button("Send to task").click());
     expect(checkbox().checked).toBe(true);
     await act(async () => menuItem("Fix billing").click());
     expect(checkbox().checked).toBe(true);

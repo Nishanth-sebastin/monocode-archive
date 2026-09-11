@@ -752,7 +752,7 @@ function ChangedFiles({
   };
   return (
     <aside
-      className={`flex min-h-0 min-w-0 flex-col ${fill ? "flex-1" : "shrink-0"}`}
+      className={`relative flex min-h-0 min-w-0 flex-col ${fill ? "flex-1" : "shrink-0"}`}
     >
       <div className="shrink-0 border-b border-content/10 p-2">
         <div className="relative">
@@ -852,68 +852,9 @@ function ChangedFiles({
           />
         ) : null}
       </div>
-      {selectingContext ? (
-        <div className="border-b border-content/10">
-          <div className="flex items-center gap-1 px-2 py-1 text-[12px]">
-            <span className="min-w-0 flex-1 truncate px-1 text-content/50">
-              {contextSelected.size
-                ? `${contextSelected.size} selected`
-                : "Select files"}
-            </span>
-            {contextSelected.size > 0 ? (
-              <>
-                <button
-                  type="button"
-                  disabled={contextBusy}
-                  className="h-7 shrink-0 rounded-md px-2 text-content/80 hover:bg-content/5 disabled:opacity-40"
-                  onClick={() => void prepareSelected({ prepareInSource: true })}
-                >
-                  {contextBusy ? "Loading…" : "Add to chat"}
-                </button>
-                <button
-                  ref={taskMenuButton}
-                  type="button"
-                  disabled={contextBusy}
-                  aria-haspopup="menu"
-                  aria-expanded={taskMenuOpen}
-                  title="Send the selected changes to a task"
-                  className="flex h-7 shrink-0 items-center gap-0.5 rounded-md px-2 text-accent hover:bg-accent/10 disabled:opacity-40"
-                  onClick={() => setTaskMenuOpen((open) => !open)}
-                >
-                  Task
-                  <ChevronDown className="size-3" strokeWidth={1.75} />
-                </button>
-              </>
-            ) : null}
-            <button
-              type="button"
-              aria-label="Cancel selection"
-              title="Cancel selection"
-              className="grid size-7 shrink-0 place-items-center rounded-md text-content/65 hover:bg-content/5"
-              onClick={toggleContextSelection}
-            >
-              <X className="size-3.5" strokeWidth={1.75} />
-            </button>
-          </div>
-          {taskMenuOpen ? (
-            <ContextTaskMenu
-              anchor={taskMenuButton}
-              tasks={contextTasks}
-              onPick={(taskId) => void prepareSelected({ taskId })}
-              onNewTask={() => void prepareSelected({ newTask: true })}
-              onClose={() => setTaskMenuOpen(false)}
-            />
-          ) : null}
-          {contextError ? (
-            <p role="alert" className="px-3 pb-1.5 text-[11px] text-red-400">
-              {contextError}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
       <div
         ref={lockOverscroll}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-none py-1"
+        className={`relative min-h-0 flex-1 overflow-y-auto overscroll-none py-1 ${selectingContext ? "pb-20" : ""}`}
       >
         {files.length === 0 ? (
           <p className="px-3 py-2 text-[12px] text-content/45">
@@ -1009,6 +950,65 @@ function ChangedFiles({
           </>
         )}
       </div>
+      {selectingContext ? (
+        <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10">
+          <div className="pointer-events-auto overflow-hidden rounded-xl border border-content/15 bg-background-base/85 shadow-xl backdrop-blur-xl">
+            <div className="flex items-center gap-2 border-b border-content/10 px-3 py-1.5">
+              <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-content/70">
+                {contextSelected.size
+                  ? `${contextSelected.size} file${contextSelected.size === 1 ? "" : "s"} selected`
+                  : "Select files to send"}
+              </span>
+              <button
+                type="button"
+                aria-label="Cancel selection"
+                title="Cancel selection"
+                className="grid size-5.5 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/8 hover:text-content"
+                onClick={toggleContextSelection}
+              >
+                <X className="size-3.5" strokeWidth={1.75} />
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5 px-2 py-1.5">
+              <button
+                type="button"
+                disabled={!contextSelected.size || contextBusy}
+                className="h-7 flex-1 rounded-md text-[12px] text-content/80 hover:bg-content/5 disabled:opacity-40"
+                onClick={() => void prepareSelected({ prepareInSource: true })}
+              >
+                {contextBusy ? "Loading…" : "Add to chat"}
+              </button>
+              <button
+                ref={taskMenuButton}
+                type="button"
+                disabled={!contextSelected.size || contextBusy}
+                aria-haspopup="menu"
+                aria-expanded={taskMenuOpen}
+                title="Send the selected changes to a task"
+                className="flex h-7 flex-1 items-center justify-center gap-1 rounded-md bg-accent/15 text-[12px] font-medium text-accent hover:bg-accent/25 disabled:opacity-40"
+                onClick={() => setTaskMenuOpen((open) => !open)}
+              >
+                Send to task
+                <ChevronDown className="size-3" strokeWidth={1.75} />
+              </button>
+            </div>
+            {contextError ? (
+              <p role="alert" className="px-3 pb-2 text-[11px] text-red-400">
+                {contextError}
+              </p>
+            ) : null}
+          </div>
+          {taskMenuOpen ? (
+            <ContextTaskMenu
+              anchor={taskMenuButton}
+              tasks={contextTasks}
+              onPick={(taskId) => void prepareSelected({ taskId })}
+              onNewTask={() => void prepareSelected({ newTask: true })}
+              onClose={() => setTaskMenuOpen(false)}
+            />
+          ) : null}
+        </div>
+      ) : null}
     </aside>
   );
 }
