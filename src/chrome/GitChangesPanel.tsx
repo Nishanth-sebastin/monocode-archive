@@ -293,7 +293,7 @@ export function GitChangesPanel({
         onOpenAllChanges={onOpenAllChanges}
         onMutated={(paths) => {
           reload();
-          notifyGitChanged();
+          notifyGitChanged(cwd);
           invalidateWatchedFiles(paths);
           window.setTimeout(() => invalidateWatchedFiles(paths), 150);
         }}
@@ -1612,7 +1612,7 @@ function useDiffIndex(
         if (prev) {
           const paths = changedFilePaths(prev, next);
           invalidateWatchedFiles(paths);
-          notifyGitChanged();
+          notifyGitChanged(cwd);
         }
       } catch {
         if (!cancelled) {
@@ -1635,7 +1635,7 @@ function useDiffIndex(
     const timer = window.setInterval(onResume, GIT_POLL_MS);
     window.addEventListener("focus", onResume);
     document.addEventListener("visibilitychange", onResume);
-    const unsubGit = subscribeGitChanged(onResume);
+    const unsubGit = subscribeGitChanged(onResume, cwd);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

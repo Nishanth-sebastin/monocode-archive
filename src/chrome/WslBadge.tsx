@@ -4,7 +4,13 @@ import { pathKey, wslLocation } from "../lib/paths";
 import { connectWslProject } from "../lib/wsl";
 import { Popover } from "./Popover";
 
-export function WslBadge({ cwd }: { cwd: string }) {
+export function WslBadge({
+  cwd,
+  compact = false,
+}: {
+  cwd: string;
+  compact?: boolean;
+}) {
   const location = wslLocation(cwd);
   const anchor = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
@@ -49,7 +55,7 @@ export function WslBadge({ cwd }: { cwd: string }) {
         }}
         className="my-auto max-w-28 shrink-0 truncate rounded bg-content/5 px-1.5 py-0.5 text-[10px] text-content outline-none hover:bg-content/10 focus-visible:ring-1 focus-visible:ring-content/30"
       >
-        WSL · {location.distribution}
+        {compact ? "WSL" : `WSL · ${location.distribution}`}
       </button>
       {open && (
         <Popover
@@ -96,7 +102,7 @@ export function WslBadge({ cwd }: { cwd: string }) {
               request.current = controller;
               setBusy(true);
               setError("");
-              void connectWslProject(cwd, controller.signal)
+              void connectWslProject(cwd, controller.signal, true)
                 .then((canonical) => {
                   if (pathKey(canonical) !== pathKey(cwd))
                     throw new Error(

@@ -440,7 +440,7 @@ async function startLive(
   const state = stateFor(flavor);
   const { liveByThread } = state;
   const { path } = await state.resolveBinary(input.cwd);
-  const native = nativeModelId(input.model);
+  const native = nativeModelId(input.model, input.cwd);
   const modelRef = parsePiModelRef(native);
   const liveRef: { current: Live | null } = { current: null };
 
@@ -984,7 +984,7 @@ async function applyModel(
   live: Live,
   input: HarnessSessionInput,
 ): Promise<void> {
-  const native = nativeModelId(input.model);
+  const native = nativeModelId(input.model, input.cwd);
   const ref = parsePiModelRef(native);
   if (ref && native !== live.nativeModel) {
     const result = await live.rpc.request({

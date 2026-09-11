@@ -1,5 +1,6 @@
+import { wslLocation } from "../paths";
 import { homeDir } from "../fs";
-import { setHarnessModels } from "../models";
+import { refreshModelCatalog } from "../models";
 import { AcpClient } from "./acp";
 import {
   execChild,
@@ -18,7 +19,6 @@ import {
   modelsFromSessionNew,
 } from "./grokProtocol";
 
-const PROBE_ID = "monocode-grok-probe";
 const DISCOVERY_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -27,40 +27,29 @@ const CLIENT_CAPABILITIES = {
   terminal: false,
 };
 
-let inflight: Promise<void> | null = null;
-
-export function refreshGrokCatalog(): Promise<void> {
-  if (inflight) return inflight;
-  inflight = discoverGrokModels()
-    .then((models) => {
-      if (models.length > 0) setHarnessModels("grok", models);
-    })
-    .catch((error: unknown) => {
-      console.debug("[monocode] grok catalog", error);
-    })
-    .finally(() => {
-      inflight = null;
-    });
-  return inflight;
+export function refreshGrokCatalog(cwd?: string): Promise<void> {
+  return refreshModelCatalog("grok", cwd, () => discoverGrokModels(cwd));
 }
 
-async function discoverGrokModels() {
-  const fromAcp = await discoverViaAcp().catch((error: unknown) => {
+async function discoverGrokModels(projectCwd?: string) {
+  const fromAcp = await discoverViaAcp(projectCwd).catch((error: unknown) => {
     console.debug("[monocode] grok ACP catalog failed", error);
     return [];
   });
   if (fromAcp.length > 0) return fromAcp;
-  const fromCli = await discoverViaCli().catch((error: unknown) => {
+  const fromCli = await discoverViaCli(projectCwd).catch((error: unknown) => {
     console.debug("[monocode] grok CLI catalog failed", error);
     return [];
   });
   if (fromCli.length > 0) return fromCli;
+  if (projectCwd && wslLocation(projectCwd)) throw new Error("Grok model discovery failed. Check the Linux CLI account and retry.");
   return fallbackGrokModels();
 }
 
-async function discoverViaAcp() {
-  const { path } = await resolveGrokBinary();
-  const cwd = await homeDir();
+async function discoverViaAcp(projectCwd?: string) {
+  const { path } = await resolveGrokBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
+  const PROBE_ID = `monocode-grok-probe-${crypto.randomUUID()}`;
   const acp = new AcpClient(PROBE_ID, {
     onRequest: (id) => {
       void acp.respond(id, {}).catch(() => undefined);
@@ -118,9 +107,9 @@ async function discoverViaAcp() {
   }
 }
 
-async function discoverViaCli() {
-  const { path } = await resolveGrokBinary();
-  const cwd = await homeDir();
+async function discoverViaCli(projectCwd?: string) {
+  const { path } = await resolveGrokBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
   const stdout = await execChild(path, ["models"], cwd);
   return modelsFromGrokModelsOutput(stdout);
 }

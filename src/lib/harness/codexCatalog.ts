@@ -1,6 +1,6 @@
 import { homeDir } from "../fs";
 import {
-  setHarnessModels,
+  refreshModelCatalog,
   type AgentModel,
   type ModelSetting,
   type ModelSettingChoice,
@@ -15,7 +15,6 @@ import {
 import { asRecord, stringField } from "./codexProtocol";
 import { JsonRpcClient } from "./jsonRpc";
 
-const PROBE_ID = "monocode-codex-probe";
 const DISCOVERY_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -30,26 +29,14 @@ const REASONING_LABELS: Record<string, string> = {
   ultra: "Ultra",
 };
 
-let inflight: Promise<void> | null = null;
-
-export function refreshCodexCatalog(): Promise<void> {
-  if (inflight) return inflight;
-  inflight = discoverCodexModels()
-    .then((models) => {
-      if (models.length > 0) setHarnessModels("codex", models);
-    })
-    .catch((error: unknown) => {
-      console.debug("[monocode] codex catalog", error);
-    })
-    .finally(() => {
-      inflight = null;
-    });
-  return inflight;
+export function refreshCodexCatalog(cwd?: string): Promise<void> {
+  return refreshModelCatalog("codex", cwd, () => discoverCodexModels(cwd));
 }
 
-async function discoverCodexModels(): Promise<AgentModel[]> {
-  const { path } = await resolveCodexBinary();
-  const cwd = await homeDir();
+async function discoverCodexModels(projectCwd?: string): Promise<AgentModel[]> {
+  const { path } = await resolveCodexBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
+  const PROBE_ID = `monocode-codex-probe-${crypto.randomUUID()}`;
   const rpc = new JsonRpcClient(
     PROBE_ID,
     {

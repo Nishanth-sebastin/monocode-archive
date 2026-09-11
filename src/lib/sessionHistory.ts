@@ -96,6 +96,7 @@ export function summaryFromSession(
   return {
     id: session.id,
     cwd: session.cwd,
+    ...(session.worktreeCwd ? { worktreeCwd: session.worktreeCwd } : {}),
     harness: session.harness,
     model: session.model,
     runtimeMode: session.runtimeMode,

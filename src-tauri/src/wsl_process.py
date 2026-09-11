@@ -71,19 +71,24 @@ def start(config):
     os.write(1, (json.dumps({"nonce": config["nonce"], "pid": os.getpid(), "started": identity(os.getpid()), "boot": boot_id()}) + "\n").encode())
     # Read exactly the barrier, without buffering the first provider message.
     barrier = bytearray()
-    while len(barrier) < 256:
+    while len(barrier) < 1024 * 1024:
         byte = os.read(0, 1)
         if not byte:
             return 125
         barrier.extend(byte)
         if byte == b"\n":
             break
-    if barrier.decode() != config["nonce"] + "\n":
+    acknowledgement = json.loads(barrier)
+    if acknowledgement.get("nonce") != config["nonce"]:
         raise ValueError("Invalid process-start acknowledgement")
+    environment = acknowledgement["environment"]
+    if not isinstance(environment, dict) or any(not isinstance(k, str) or not isinstance(v, str) or "\0" in k + v or "=" in k for k, v in environment.items()):
+        raise ValueError("Invalid Linux environment")
+    environment["PWD"] = config["cwd"]
     child = None
     code = 125
     try:
-        child = subprocess.Popen([command, *args], cwd=config["cwd"])
+        child = subprocess.Popen([command, *args], cwd=config["cwd"], env=environment)
         code = child.wait()
     except InterruptedError:
         cancelled = True

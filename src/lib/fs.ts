@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { slash, wslLocation } from "./paths";
+import { pathKey, slash, wslLocation } from "./paths";
 
 export type FsEntry = {
   name: string;
@@ -302,13 +302,21 @@ export function restoreSessionCheckout<
 const GIT_CHANGED = "monocode-git-changed";
 
 /** Tell git UIs (diff pane, branch picker) to reload after a local git mutation. */
-export function notifyGitChanged() {
-  window.dispatchEvent(new Event(GIT_CHANGED));
+export function notifyGitChanged(cwd?: string) {
+  window.dispatchEvent(new CustomEvent(GIT_CHANGED, { detail: cwd }));
 }
 
-export function subscribeGitChanged(listener: () => void): () => void {
-  window.addEventListener(GIT_CHANGED, listener);
-  return () => window.removeEventListener(GIT_CHANGED, listener);
+export function subscribeGitChanged(listener: (changedCwd?: string) => void, cwd?: string): () => void {
+  const onChange = (event: Event) => {
+    const changed = (event as CustomEvent<string | undefined>).detail;
+    if (cwd && changed) {
+      const own = pathKey(cwd), target = pathKey(changed);
+      if (own !== target && !own.startsWith(`${target}/`) && !target.startsWith(`${own}/`)) return;
+    }
+    listener(changed);
+  };
+  window.addEventListener(GIT_CHANGED, onChange);
+  return () => window.removeEventListener(GIT_CHANGED, onChange);
 }
 
 export function createPath(

@@ -20,6 +20,7 @@ import { HARNESSES, RUNTIME_MODES } from "./session";
 export type SessionSummary = {
   id: string;
   cwd: string;
+  worktreeCwd?: string;
   harness: HarnessId;
   model: string;
   runtimeMode: RuntimeMode;

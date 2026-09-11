@@ -64,7 +64,7 @@ export function SessionReview({
     });
     const unsubGit = subscribeGitChanged(() => {
       if (filesRef.current.length > 0) schedule();
-    });
+    }, cwd);
     const onResume = () => {
       if (filesRef.current.length > 0) schedule();
     };
@@ -114,7 +114,7 @@ export function SessionReview({
     void op
       .then((status) => {
         setFiles(status.files);
-        notifyGitChanged();
+        notifyGitChanged(cwd);
         invalidateWatchedFiles(previous);
         invalidateProjectFiles(cwd);
       })

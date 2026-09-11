@@ -32,7 +32,6 @@ import {
   subscribeModels,
   subscribePickerVisibility,
 } from "../lib/models";
-import { wslLocation } from "../lib/paths";
 import { LAYER } from "../lib/layers";
 import { secondOpinionTargets } from "../lib/secondOpinion";
 import { HARNESS_TITLE, type HarnessId } from "../lib/session";
@@ -179,8 +178,12 @@ export function SecondOpinionButton({
   }, [open, cwd]);
 
   useEffect(() => {
-    if (!open || !activeHarness || (cwd && wslLocation(cwd))) return;
-    void refreshHarnessCatalogs([activeHarness]);
+    if (open && !hasProbedHarnessAvailability(cwd)) void probeHarnessAvailability({ cwd });
+  }, [open, cwd, availabilityVersion]);
+
+  useEffect(() => {
+    if (!open || !activeHarness) return;
+    void refreshHarnessCatalogs([activeHarness], cwd);
   }, [open, activeHarness, cwd]);
 
   useEffect(() => {

@@ -216,7 +216,7 @@ pub fn agent_command(
     location: &Location,
     command: &str,
     args: &[String],
-) -> Result<(Command, String), String> {
+) -> Result<(Command, String, String), String> {
     // Check the app-open connection before starting a separate streaming process.
     let _: String = request(location, "canonical", json!({}))?;
     if command.is_empty() || command.contains(['\\', ':', '\0']) || args.len() > 512 {
@@ -250,7 +250,9 @@ pub fn agent_command(
             config,
         ],
     ));
-    Ok((cmd, nonce))
+    let environment: Value = request(location, "agent_environment", json!({}))?;
+    let acknowledgement = json!({"nonce": nonce, "environment": environment}).to_string();
+    Ok((cmd, nonce, acknowledgement))
 }
 
 pub fn agent_handshake(
@@ -367,7 +369,10 @@ struct BridgeIo {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
 }
+static NEXT_BRIDGE_GENERATION: AtomicUsize = AtomicUsize::new(1);
+
 struct Bridge {
+    generation: AtomicUsize,
     io: Mutex<Option<BridgeIo>>,
     available: Condvar,
     reads: Option<Box<Bridge>>,
@@ -399,6 +404,7 @@ impl Bridge {
         let stdin = child.stdin.take().ok_or("Missing WSL input")?;
         let stdout = BufReader::new(child.stdout.take().ok_or("Missing WSL output")?);
         Ok(Self {
+            generation: AtomicUsize::new(NEXT_BRIDGE_GENERATION.fetch_add(1, Ordering::SeqCst)),
             io: Mutex::new(Some(BridgeIo { stdin, stdout })),
             available: Condvar::new(),
             reads: None,
@@ -611,7 +617,31 @@ pub fn wsl_connect(
     app: tauri::AppHandle,
     distribution: String,
     path: String,
-) -> Result<Location, String> {
+    refresh: Option<bool>,
+) -> Result<Value, String> {
+    let location = Location::new(&distribution, &path)?;
+    let existing = HOSTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&distribution.to_lowercase())
+        .cloned();
+    if let Some(bridge) = existing.filter(|bridge| bridge.alive.load(Ordering::SeqCst)) {
+        if refresh.unwrap_or(false) {
+            bridge.request(json!({"op":"refresh_environment", "path":"/"}))?;
+            if let Some(reads) = &bridge.reads {
+                reads.request(json!({"op":"refresh_environment", "path":"/"}))?;
+            }
+            bridge.generation.store(
+                NEXT_BRIDGE_GENERATION.fetch_add(1, Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+        }
+        let path = bridge.request(json!({"op":"canonical_directory", "path":location.path}))?;
+        return Ok(
+            json!({"distribution": distribution, "path": path, "generation": bridge.generation.load(Ordering::SeqCst)}),
+        );
+    }
     if CONNECTING.fetch_add(1, Ordering::SeqCst) >= 4 {
         CONNECTING.fetch_sub(1, Ordering::SeqCst);
         return Err(
@@ -638,11 +668,21 @@ pub fn wsl_connect(
         "/usr/bin/python3",
         &["-u".into(), "-c".into(), SCRIPT.into()],
     ));
-    connect_bridge(
+    let connected = connect_bridge(
         HOSTS.get_or_init(Mutex::default),
         &location,
         &mut command,
         Some((app, distribution.to_owned())),
+    )?;
+    let generation = HOSTS
+        .get()
+        .unwrap()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&distribution.to_lowercase())
+        .map(|bridge| bridge.generation.load(Ordering::SeqCst));
+    Ok(
+        json!({"distribution": connected.distribution, "path": connected.path, "generation": generation}),
     )
 }
 
@@ -832,6 +872,61 @@ pub fn git(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn shell_environment_discovers_and_launches_user_tools_without_windows_path() {
+        use super::*;
+        let fixture = r#"
+import tempfile, types
+from unittest.mock import patch
+with tempfile.TemporaryDirectory(prefix='monocode-env-') as directory:
+    home = Path(directory)
+    tools = home / '.nvm/versions/node/fixture/bin'
+    tools.mkdir(parents=True)
+    shell = home / 'fixture-shell'
+    shell.write_text('#!/bin/sh\nexport HOME=' + shlex.quote(str(home)) + '\nexport PATH=' + shlex.quote(str(tools) + ':/usr/bin:/bin:/mnt/c/Windows') + '\nprintf "startup noise\\n"\neval "$2"\n')
+    shell.chmod(0o755)
+    interpreter = tools / 'fixture-node'
+    interpreter.write_text('#!/bin/sh\nprintf "linux-interpreter\\n"\n')
+    interpreter.chmod(0o755)
+    cli = tools / 'codex'
+    cli.write_text('#!/usr/bin/env fixture-node\n')
+    cli.chmod(0o755)
+    windows = home / 'windows.exe'
+    windows.write_text('#!/bin/sh\nexit 0\n')
+    windows.chmod(0o755)
+    (tools / 'claude').symlink_to(windows)
+    with patch.object(pwd, 'getpwuid', return_value=types.SimpleNamespace(pw_shell=str(shell))), patch.object(Path, 'home', return_value=home):
+        prepare_environment()
+        assert '/mnt/' not in os.environ['PATH']
+        assert ENVIRONMENT_READY
+        assert handle({'op':'resolve_agent','provider':'codex','path':directory})['path'] == str(cli)
+        assert handle({'op':'agent_exec','command':str(cli),'args':[],'path':directory}).strip() == 'linux-interpreter'
+        try:
+            handle({'op':'resolve_agent','provider':'claude','path':directory})
+            raise AssertionError('Windows executable accepted')
+        except ValueError:
+            pass
+        # The environment is reused without evaluating the shell on every probe.
+        shell.unlink()
+        assert handle({'op':'agent_environment','path':directory})['PATH'] == os.environ['PATH']
+"#;
+        let script = format!(
+            "__name__ = 'fixture'\nexec({})\n{}",
+            serde_json::to_string(SCRIPT).unwrap(),
+            fixture
+        );
+        let output = Command::new("python3")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn metadata_remains_available_during_git_while_mutations_stay_ordered() {
@@ -1399,7 +1494,7 @@ if __name__ =="#,
             agent_handshake(child.stdout.take().unwrap(), location, "fixture-nonce").unwrap();
         let mut stdin = child.stdin.take().unwrap();
         stdin
-            .write_all(b"fixture-nonce\nprovider-message\n")
+            .write_all(b"{\"nonce\":\"fixture-nonce\",\"environment\":{}}\nprovider-message\n")
             .unwrap();
         let mut line = String::new();
         stdout.read_line(&mut line).unwrap();

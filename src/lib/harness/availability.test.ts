@@ -10,6 +10,8 @@ it("keeps native and distribution probes separate, coalesces requests and refres
     probeHarnessAvailability,
     isHarnessAvailable,
     hasProbedHarnessAvailability,
+    invalidateHarnessAvailability,
+    harnessUnavailableHint,
   } = await import("./availability");
   const cwd = "//wsl.localhost/Ubuntu/home/me/Zażółć repo";
   const other = "//wsl.localhost/Debian/home/me/repo";
@@ -40,4 +42,11 @@ it("keeps native and distribution probes separate, coalesces requests and refres
   await probeHarnessAvailability({ cwd, force: true });
   expect(isHarnessAvailable("codex", cwd)).toBe(false);
   expect(isHarnessAvailable("codex")).toBe(true);
+  expect(harnessUnavailableHint("codex", cwd)).toContain("Disconnected");
+  expect(harnessUnavailableHint("codex", cwd)).not.toContain("Install");
+  invalidateHarnessAvailability(cwd);
+  expect(hasProbedHarnessAvailability(cwd)).toBe(false);
+  invoke.mockResolvedValue({ path: "/home/me/.local/bin/codex" });
+  await probeHarnessAvailability({ cwd });
+  expect(isHarnessAvailable("codex", cwd)).toBe(true);
 });

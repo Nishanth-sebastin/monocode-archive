@@ -256,7 +256,7 @@ export function WorktreePanel({
         branch,
         path: location ? wslPath(location.distribution, path) : path,
       });
-      notifyGitChanged();
+      notifyGitChanged(cwd);
     }).then(() => {
       if (created) {
         onOpen(created);
@@ -283,7 +283,7 @@ export function WorktreePanel({
                 : "Remove worktree?"
               : "Share this worktree?"}
           </p>
-          <p className="truncate text-content/70">Repository: {cwd}</p>
+          <p className="truncate text-content/70">Repository: {prettyCwd(cwd)}</p>
           <p className="truncate font-mono">
             {confirmation.entry.branch?.replace("refs/heads/", "")} ·{" "}
             {confirmation.entry.head.slice(0, 10)}
@@ -373,7 +373,7 @@ export function WorktreePanel({
                     entries.find((tree) => tree.main)?.path ?? cwd,
                   );
                   setWorkingCopyHidden(entry.path, false);
-                  notifyGitChanged();
+                  notifyGitChanged(cwd);
                   setConfirmation(null);
                   setDetail(null);
                 });
@@ -483,7 +483,7 @@ export function WorktreePanel({
             onClick={() =>
               void run(async () => {
                 setDetail({ ...detail });
-                notifyGitChanged();
+                notifyGitChanged(cwd);
               })
             }
           >
@@ -753,7 +753,7 @@ export function WorktreePanel({
                 <button
                   type="button"
                   disabled={busy || entry.missing || !!entry.prunable}
-                  title={`${prettyCwd(entry.path)} · ${location ? `WSL · ${location.distribution}` : "Local"}${entry.users.length ? ` · ${entry.users.length} conversations` : ""}`}
+                  title={`${prettyCwd(entry.path)}${entry.users.length ? ` · ${entry.users.length} conversations` : ""}`}
                   className={`${rowClass} ${index === activeIndex ? "bg-content/10" : ""}`}
                   onMouseEnter={() => setActiveIndex(index)}
                   onClick={() => openEntry(entry)}

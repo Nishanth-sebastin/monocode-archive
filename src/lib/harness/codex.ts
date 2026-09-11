@@ -376,7 +376,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     });
     await rpc.notify("initialized", undefined);
 
-    const model = nativeModelId(input.model);
+    const model = nativeModelId(input.model, input.cwd);
     const serviceTier = input.modelSettings?.serviceTier;
     const effort = input.modelSettings?.reasoningEffort;
 
@@ -464,7 +464,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
 }
 
 async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
-  const model = nativeModelId(input.model);
+  const model = nativeModelId(input.model, input.cwd);
   const effort = input.modelSettings?.reasoningEffort;
   const serviceTier = input.modelSettings?.serviceTier;
   const attachments = await codexAttachments(input.attachments ?? []);

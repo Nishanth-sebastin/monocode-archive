@@ -16,6 +16,7 @@ import {
 import type { HarnessId } from "../lib/session";
 
 type Props = {
+  cwd?: string;
   harness: HarnessId;
   model: string;
   values: Record<string, string>;
@@ -26,6 +27,7 @@ type Props = {
 const MENU_WIDTH = 220;
 
 export function ModelSettings({
+  cwd,
   harness,
   model,
   values,
@@ -35,7 +37,7 @@ export function ModelSettings({
   const catalog = useSyncCatalog();
   const settings = useMemo(() => {
     void catalog;
-    const list = (resolveModel(harness, model).settings ?? []).filter(
+    const list = (resolveModel(harness, model, cwd).settings ?? []).filter(
       (setting) => !(harness === "opencode" && setting.id === "agent"),
     );
     const order = [
@@ -52,7 +54,7 @@ export function ModelSettings({
       const bi = order.indexOf(b.id);
       return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
     });
-  }, [catalog, harness, model]);
+  }, [catalog, harness, model, cwd]);
 
   if (settings.length === 0) return null;
 

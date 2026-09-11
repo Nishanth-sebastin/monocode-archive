@@ -50,12 +50,14 @@ describe("historyWithLiveSessions", () => {
 
   it("includes live sessions for the active project", () => {
     const session = newSession("cursor", "/tmp/project-a");
+    session.worktreeCwd = "/tmp/project-a-feature";
     session.blocks = [{ id: "u1", role: "user", text: "hello" }];
     session.busy = true;
 
     const rows = historyWithLiveSessions([], [session], "/tmp/project-a");
     expect(rows.map((row) => row.id)).toEqual([session.id]);
     expect(rows[0]?.repo).toBe("project-a");
+    expect(rows[0]?.worktreeCwd).toBe("/tmp/project-a-feature");
   });
 
   it("stamps composer git onto a live session that is not persisted yet", () => {

@@ -1,3 +1,4 @@
+import { prettyCwd } from "../lib/paths";
 import { contextFromFiles, requestAgentContext } from "../lib/agentContext";
 import {
   ChevronDown,
@@ -670,7 +671,7 @@ export const FileTree = memo(function FileTree({
           <button
             type="button"
             aria-expanded={rootOpen}
-            title={cwd}
+            title={prettyCwd(cwd)}
             onClick={() => {
               onSelect(cwd);
               toggle(cwd);
@@ -956,7 +957,7 @@ function TreeNode({ entry, depth }: { entry: FsEntry; depth: number }) {
         <button
           type="button"
           role="treeitem"
-          title={entry.path}
+          title={prettyCwd(entry.path)}
           aria-expanded={entry.isDir ? open : undefined}
           onClick={onClick}
           onContextMenu={(e) => onItemContextMenu(entry, e)}

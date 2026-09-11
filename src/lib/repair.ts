@@ -264,7 +264,7 @@ export async function commentsRepair(
       try { path = await invoke<string>("azure_pr_prepare_checkout", { cwd: association.cwd, target: association.target, expectedRevision: association.revision, requestId }); }
       finally { signal?.removeEventListener("abort", cancel); }
       signal?.throwIfAborted();
-      notifyGitChanged();
+      notifyGitChanged(association.cwd);
       if (!current()) throw new Error("Checkout preparation cancelled.");
       checkout = await ciContext(path);
       if (!matches(checkout)) throw new Error("Prepared checkout no longer matches the PR. Refresh and retry.");

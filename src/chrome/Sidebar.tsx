@@ -1,3 +1,4 @@
+import { prettyCwd } from "../lib/paths";
 import type { DeliveryTabSource } from "../lib/layout";
 import { sessionWorkItems } from "../lib/sessionWorkItem";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -44,7 +45,7 @@ import { getVerifiedFamilies, subscribeRepositoryFamilies } from "../lib/reposit
 import { IS_MAC, MOD } from "../lib/platform";
 import { resolveModel } from "../lib/models";
 import { prettyParent, projectKey, projectName } from "../lib/paths";
-import { sessionDisplayTitle } from "../lib/session";
+import { sessionDisplayTitle, sessionWorkCwd } from "../lib/session";
 import { nextUnseenFinishedSessions } from "../lib/sessionDone";
 import {
   orderedSessionActionIds,
@@ -1673,7 +1674,7 @@ function SidebarProjectPicker({
           groupLabels,
           basename(item.path) || projectName(item.path),
         );
-        return `${itemLabel}\n${item.path}`
+        return `${itemLabel}\n${prettyCwd(item.path)}`
           .toLocaleLowerCase()
           .includes(normalizedQuery);
       })
@@ -1728,7 +1729,7 @@ function SidebarProjectPicker({
       >
         <button
           type="button"
-          title={cwd}
+          title={prettyCwd(cwd)}
           aria-label={`Switch project, current project ${label}`}
           aria-expanded={open}
           aria-haspopup="dialog"
@@ -1821,7 +1822,7 @@ function SidebarProjectPicker({
                     <button
                       key={item.path}
                       type="button"
-                      title={item.path}
+                      title={prettyCwd(item.path)}
                       onMouseEnter={() => setActive(index)}
                       onClick={() => pickProject(item.path)}
                       className={`flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left ${
@@ -2269,7 +2270,7 @@ function SessionCard({
   const time = formatRelative(session.updatedAt, now);
   const model = compact
     ? null
-    : resolveModel(session.harness, session.model).name;
+    : resolveModel(session.harness, session.model, sessionWorkCwd(session)).name;
   const statusClass = needsApproval
     ? "text-amber-400"
     : busy

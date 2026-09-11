@@ -135,26 +135,53 @@ export function useRepositoryFamilies(recents: RecentProject[], cwd: string) {
   }, [familyPaths, cwd]);
   useEffect(() => {
     let cancelled = false;
-    let pending = false;
-    return (() => {
-      const unsubscribe = subscribeGitChanged(() => {
-        if (pending) return;
-        pending = true;
-        void discoverRepositoryFamilies(
-          JSON.parse(familyPaths),
-          (path) =>
-            invoke<RepositoryFamily>("git_repository_family", { cwd: path }),
-          () => cancelled,
-          cwd,
-        ).finally(() => {
-          pending = false;
-        });
-      });
-      return () => {
-        cancelled = true;
-        unsubscribe();
-      };
-    })();
+    let running = false;
+    const pending = new Set<string>();
+    const unsubscribe = subscribeGitChanged((changed) => {
+      const paths: string[] = JSON.parse(familyPaths);
+      const changedKey = changed ? pathKey(changed) : undefined;
+      const changedFamily = changedKey
+        ? getVerifiedFamilies().get(changedKey)
+        : undefined;
+      for (const path of paths) {
+        const key = pathKey(path);
+        if (
+          !changedKey ||
+          key === changedKey ||
+          changedKey.startsWith(`${key}/`) ||
+          (changedFamily &&
+            getVerifiedFamilies().get(key)?.commonDir ===
+              changedFamily.commonDir)
+        )
+          pending.add(path);
+      }
+      if (running) return;
+      running = true;
+      void (async () => {
+        try {
+          while (!cancelled && pending.size > 0) {
+            const path = pending.values().next().value!;
+            pending.delete(path);
+            await discoverRepositoryFamilies(
+              JSON.parse(familyPaths),
+              (path) =>
+                invoke<RepositoryFamily>("git_repository_family", {
+                  cwd: path,
+                }),
+              () => cancelled,
+              path,
+            );
+          }
+        } finally {
+          running = false;
+        }
+      })();
+    });
+    return () => {
+      cancelled = true;
+      pending.clear();
+      unsubscribe();
+    };
   }, [cwd, familyPaths]);
   return families;
 }

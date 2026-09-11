@@ -164,7 +164,7 @@ export function BranchPicker({
       }
       onOpenWorktree(result.worktree);
     } else {
-      notifyGitChanged();
+      notifyGitChanged(cwd);
       onChangeRef.current?.();
     }
     dismiss(true);

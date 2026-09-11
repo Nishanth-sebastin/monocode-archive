@@ -375,9 +375,9 @@ pub fn harness_spawn(
         }
     }
 
-    let (mut cmd, nonce) = if let Some(location) = &location {
-        let (cmd, nonce) = crate::wsl::agent_command(location, &command, &args)?;
-        (cmd, Some(nonce))
+    let (mut cmd, nonce, acknowledgement) = if let Some(location) = &location {
+        let (cmd, nonce, acknowledgement) = crate::wsl::agent_command(location, &command, &args)?;
+        (cmd, Some(nonce), Some(acknowledgement))
     } else {
         let workdir = expand_home(&cwd);
         if !workdir.is_dir() {
@@ -389,7 +389,7 @@ pub fn harness_spawn(
         let mut cmd = Command::new(&command);
         cmd.args(&args).current_dir(&workdir);
         prepare_child(&mut cmd, &command);
-        (cmd, None)
+        (cmd, None, None)
     };
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -445,12 +445,12 @@ pub fn harness_spawn(
         return Err(SPAWN_CANCELLED.to_string());
     }
 
-    if let Some(nonce) = nonce {
+    if let Some(acknowledgement) = acknowledgement {
         let result = live
             .stdin
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .write_all(format!("{nonce}\n").as_bytes());
+            .write_all(format!("{acknowledgement}\n").as_bytes());
         if let Err(error) = result {
             let _ = live.terminate();
             host.remove_if_pid(&session_id, pid);

@@ -52,7 +52,7 @@ export type HarnessAdapter = {
   /** Seed resume state from a restored MonoCode session. */
   bindSession(threadId: string, providerSessionId: string, cwd: string): void;
   /** Refresh the model catalog overlay when supported. */
-  refreshCatalog?(): Promise<void>;
+  refreshCatalog?(cwd?: string): Promise<void>;
   /** Optional LLM tab title for the first turn. */
   generateTitle?(input: TitleInput): Promise<GeneratedSessionTitle | null>;
   /** Optional LLM commit message from staged changes. */
@@ -251,6 +251,8 @@ export function bindHarnessSession(
  */
 export async function refreshHarnessCatalogs(
   ids: Iterable<HarnessId>,
+  cwd?: string,
+  force = false,
 ): Promise<void> {
   const wanted = new Set(ids);
   if (wanted.size === 0) return;
@@ -258,8 +260,8 @@ export async function refreshHarnessCatalogs(
     [...adapters.values()]
       .filter((adapter) => wanted.has(adapter.id))
       .map(async (adapter) => {
-        if (!adapter.refreshCatalog || hasLiveCatalog(adapter.id)) return;
-        await adapter.refreshCatalog().catch((error: unknown) => {
+        if (!adapter.refreshCatalog || (!force && hasLiveCatalog(adapter.id, cwd))) return;
+        await adapter.refreshCatalog(cwd).catch((error: unknown) => {
           console.debug(`[monocode] ${adapter.id} catalog`, error);
         });
       }),

@@ -315,7 +315,7 @@ export function newSession(
   runtimeMode: RuntimeMode = DEFAULT_RUNTIME_MODE,
   modelSettings?: Record<string, string>,
 ): Session {
-  const resolved = resolveModel(harness, model ?? preferredModelId(harness));
+  const resolved = resolveModel(harness, model ?? preferredModelId(harness, cwd), cwd);
   return {
     id: crypto.randomUUID(),
     harness,
@@ -333,7 +333,7 @@ export function newDefaultSession(
   cwd = "~",
   runtimeMode: RuntimeMode = DEFAULT_RUNTIME_MODE,
 ): Session {
-  const choice = defaultSessionChoice();
+  const choice = defaultSessionChoice(cwd);
   return newSession(choice.harness, cwd, choice.model, runtimeMode);
 }
 

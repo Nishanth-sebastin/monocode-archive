@@ -151,7 +151,7 @@ export async function compactOpenCodeContext(
   }
   if (cancelledThreads.delete(input.sessionId)) return;
 
-  const model = parseOpenCodeModelSlug(nativeModelId(input.model));
+  const model = parseOpenCodeModelSlug(nativeModelId(input.model, input.cwd));
   if (!model) {
     throw new Error(
       "OpenCode models use provider/model ids. Wait for the catalog to load, then pick a model.",
@@ -177,7 +177,7 @@ export async function steerOpenCodeTurn(input: SteerTurnInput): Promise<void> {
   const live = liveByThread.get(input.sessionId);
   if (!live?.activeTurn) throw new Error("No active turn to steer");
 
-  const parsed = parseOpenCodeModelSlug(nativeModelId(input.model));
+  const parsed = parseOpenCodeModelSlug(nativeModelId(input.model, input.cwd));
   if (!parsed) {
     throw new Error(
       "OpenCode models use provider/model ids. Wait for the catalog to load, then pick a model.",
@@ -459,7 +459,7 @@ async function resolveSession(
 }
 
 async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
-  const parsed = parseOpenCodeModelSlug(nativeModelId(input.model));
+  const parsed = parseOpenCodeModelSlug(nativeModelId(input.model, input.cwd));
   if (!parsed) {
     throw new Error(
       "OpenCode models use provider/model ids. Wait for the catalog to load, then pick a model.",
@@ -712,7 +712,7 @@ function emitContext(live: Live, info: Record<string, unknown> | null): void {
   const modelID = stringField(info, "modelID");
   const window =
     providerID && modelID
-      ? modelContextWindow(`opencode:${providerID}/${modelID}`)
+      ? modelContextWindow(`opencode:${providerID}/${modelID}`, live.cwd)
       : undefined;
   live.onEvent({ type: "context", used, ...(window ? { window } : {}) });
 }

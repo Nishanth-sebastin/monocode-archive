@@ -51,7 +51,7 @@ import {
 } from "../lib/appearance";
 import { basename, revealPath, type GitDiffStats } from "../lib/fs";
 import { IS_MAC, IS_WIN, MOD } from "../lib/platform";
-import { pathKey, projectKey, projectName, wslLocation } from "../lib/paths";
+import { pathKey, prettyCwd, projectKey, projectName } from "../lib/paths";
 import {
   collectRailProjects,
   loadPinnedProjects,
@@ -922,7 +922,7 @@ function ProjectFamilyCard(
   },
 ) {
   const { family, cwd, busyPaths, onSelect } = props;
-  const anchor = useRef<HTMLDivElement>(null);
+  const anchor = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ create: boolean; path?: string } | null>(
     null,
   );
@@ -975,7 +975,7 @@ function ProjectFamilyCard(
     );
   };
   return (
-    <div ref={anchor}>
+    <div>
       <ProjectCard
         {...props}
         selected={!visible && (props.selected || selected)}
@@ -992,7 +992,7 @@ function ProjectFamilyCard(
                     /* quota */
                   }
                 },
-                create: () => setMenu({ create: true }),
+                create: (event) => { anchor.current = event.currentTarget; setMenu({ create: true }); },
               }
             : undefined
         }
@@ -1013,7 +1013,7 @@ function ProjectFamilyCard(
                 <button
                   type="button"
                   disabled={child.missing || !!child.prunable}
-                  title={`${child.path}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode\n${wslLocation(child.path) ? `WSL · ${wslLocation(child.path)!.distribution}` : "Local"}${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
+                  title={`${prettyCwd(child.path)}\n${child.head}\n${workingCopyAge(lastWorkingCopyUse(child, recents))} in MonoCode${child.locked ? ` · ${child.locked}` : ""}${working ? " · Working" : ""}`}
                   aria-current={active ? "true" : undefined}
                   className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 pr-6 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 disabled:opacity-40 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
                   onClick={() => onSelect(child.path)}
@@ -1041,7 +1041,7 @@ function ProjectFamilyCard(
                   title="Worktree details and cleanup"
                   aria-label={`Manage worktree ${name}`}
                   className="absolute right-0 rounded p-1 text-content/40 opacity-0 hover:bg-content/10 hover:text-content group-hover/working-copy:opacity-100 group-focus-within/working-copy:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-content/30"
-                  onClick={() => setMenu({ create: false, path: child.path })}
+                  onClick={(event) => { anchor.current = event.currentTarget; setMenu({ create: false, path: child.path }); }}
                 >
                   <MoreHorizontal className="size-3" />
                 </button>
@@ -1054,7 +1054,7 @@ function ProjectFamilyCard(
         <button
           type="button"
           className="w-full rounded px-2 py-1 text-left text-[10px] text-content/50 hover:bg-content/5"
-          onClick={() => setMenu({ create: false })}
+          onClick={(event) => { anchor.current = event.currentTarget; setMenu({ create: false }); }}
         >
           {allChildren.length - children.length} hidden · Manage worktrees
         </button>
@@ -1066,7 +1066,7 @@ function ProjectFamilyCard(
           width={320}
           maxHeight={380}
           onDismiss={() => {
-            if (!working) setMenu(null);
+            if (!working) { setMenu(null); anchor.current?.focus(); }
           }}
           role="dialog"
           aria-label="Worktrees"
@@ -1082,7 +1082,7 @@ function ProjectFamilyCard(
                 (entry) => !entry.missing && !entry.prunable,
               )?.path ?? props.item.path
             }
-            onClose={() => setMenu(null)}
+            onClose={() => { setMenu(null); anchor.current?.focus(); }}
             onOpen={onSelect}
             onBusyChange={setWorking}
           />
@@ -1114,7 +1114,7 @@ function ProjectCard({
   worktreeControls?: {
     expanded: boolean;
     toggle: () => void;
-    create: () => void;
+    create: (event: MouseEvent<HTMLButtonElement>) => void;
   };
   selected: boolean;
   busy: boolean;
@@ -1160,7 +1160,7 @@ function ProjectCard({
   return (
     <div
       ref={(el) => sortable.setItemRef(item.path, el)}
-      className={`group relative flex touch-none items-stretch rounded-md px-2 h-8 ${
+      className={`group relative flex touch-none items-stretch rounded-md pl-2 pr-7 h-8 ${
         selected
           ? "bg-content/12 text-content"
           : "opacity-65 hover:bg-content/5 hover:text-content"
@@ -1187,7 +1187,6 @@ function ProjectCard({
       {showEnd ? (
         <div className="pointer-events-none absolute inset-x-2 bottom-0 z-20 h-0.5 rounded-full bg-accent" />
       ) : null}
-      <WslBadge cwd={item.path} />
       {worktreeControls && (
         <button
           type="button"
@@ -1239,7 +1238,7 @@ function ProjectCard({
           </span>
         ) : null}
       </button>
-      <WslBadge cwd={item.path} />
+      <WslBadge cwd={item.path} compact />
       {worktreeControls && (
         <button
           type="button"
@@ -1247,7 +1246,7 @@ function ProjectCard({
           title="New worktree"
           aria-label={`New worktree in ${name}`}
           onClick={worktreeControls.create}
-          className="mr-5 shrink-0 rounded px-1 text-content/45 hover:bg-content/8 hover:text-content"
+          className="shrink-0 rounded px-1 text-content/45 hover:bg-content/8 hover:text-content"
         >
           <Plus className="size-3.5" />
         </button>

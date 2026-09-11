@@ -342,7 +342,7 @@ export const SessionPane = memo(function SessionPane({
       onNewTerminal={() => onNewTerminal(session.id)}
       onModelChange={(harness, model) => {
         onModelChange(session.id, harness, model);
-        const selected = resolveModel(harness, model);
+        const selected = resolveModel(harness, model, workCwd);
         // A new key restarts the animation and its cleanup timer on every pick.
         setAstraWelcomeRun(
           isAstraModel(selected) ? ++astraWelcomeSequence.current : null,

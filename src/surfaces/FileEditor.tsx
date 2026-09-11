@@ -252,7 +252,7 @@ export function FileEditor({
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onFocus);
-    const unsubGit = subscribeGitChanged(onGit);
+    const unsubGit = subscribeGitChanged(onGit, cwd);
     const unsubWatch = watchFile(path, onDisk);
     return () => {
       cancelled = true;
@@ -296,7 +296,7 @@ export function FileEditor({
       try {
         await operation;
         await syncWatchedMtime(path);
-        notifyGitChanged();
+        notifyGitChanged(cwd);
         if (generation === saveGeneration.current) {
           setSaveState({ status: "saved" });
         }
@@ -319,7 +319,7 @@ export function FileEditor({
       }
       try {
         await gitStageContents(cwd, relative, contents);
-        notifyGitChanged();
+        notifyGitChanged(cwd);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setSaveState({ status: "error", message });

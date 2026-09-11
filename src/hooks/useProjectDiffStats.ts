@@ -1,5 +1,10 @@
+import { pathKey } from "../lib/paths";
 import { useCallback, useSyncExternalStore } from "react";
-import { gitDiffStats, subscribeGitChanged, type GitDiffStats } from "../lib/fs";
+import {
+  gitDiffStats,
+  subscribeGitChanged,
+  type GitDiffStats,
+} from "../lib/fs";
 
 type Entry = {
   cwd: string;
@@ -15,7 +20,7 @@ type Entry = {
 const entries = new Map<string, Entry>();
 
 function entryFor(cwd: string): Entry {
-  const existing = entries.get(cwd);
+  const existing = entries.get(pathKey(cwd));
   if (existing) return existing;
   const entry: Entry = {
     cwd,
@@ -27,7 +32,7 @@ function entryFor(cwd: string): Entry {
     unsubscribeGit: null,
     onResume: null,
   };
-  entries.set(cwd, entry);
+  entries.set(pathKey(cwd), entry);
   return entry;
 }
 
@@ -58,7 +63,7 @@ async function load(entry: Entry, force = false) {
     if (epoch === entry.epoch) publish(entry, null);
   } finally {
     entry.inFlight = false;
-    if (entry.pending) {
+    if (entry.pending && entry.listeners.size) {
       entry.pending = false;
       void load(entry, true);
     }
@@ -81,7 +86,7 @@ function start(entry: Entry) {
   };
   window.addEventListener("focus", entry.onResume);
   document.addEventListener("visibilitychange", entry.onResume);
-  entry.unsubscribeGit = subscribeGitChanged(entry.onResume);
+  entry.unsubscribeGit = subscribeGitChanged(entry.onResume, entry.cwd);
 }
 
 function stop(entry: Entry) {
@@ -92,6 +97,9 @@ function stop(entry: Entry) {
   entry.unsubscribeGit?.();
   entry.onResume = null;
   entry.unsubscribeGit = null;
+  entry.pending = false;
+  entry.epoch += 1;
+  entries.delete(pathKey(entry.cwd));
 }
 
 export function useProjectDiffStats(

@@ -1,6 +1,6 @@
 import { homeDir } from "../fs";
 import {
-  setHarnessModels,
+  refreshModelCatalog,
   type AgentModel,
   type ModelSetting,
   type ModelSettingChoice,
@@ -38,26 +38,13 @@ export type OpenCodeAgent = {
   hidden: boolean;
 };
 
-let inflight: Promise<void> | null = null;
-
-export function refreshOpenCodeCatalog(): Promise<void> {
-  if (inflight) return inflight;
-  inflight = discoverOpenCodeModels()
-    .then((models) => {
-      if (models.length > 0) setHarnessModels("opencode", models);
-    })
-    .catch((error: unknown) => {
-      console.debug("[monocode] opencode catalog", error);
-    })
-    .finally(() => {
-      inflight = null;
-    });
-  return inflight;
+export function refreshOpenCodeCatalog(cwd?: string): Promise<void> {
+  return refreshModelCatalog("opencode", cwd, () => discoverOpenCodeModels(cwd));
 }
 
-async function discoverOpenCodeModels(): Promise<AgentModel[]> {
-  const { path } = await resolveOpenCodeBinary();
-  const cwd = await homeDir();
+async function discoverOpenCodeModels(projectCwd?: string): Promise<AgentModel[]> {
+  const { path } = await resolveOpenCodeBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
   const versionOut = await execChild(path, ["--version"], cwd);
   const version = parseOpenCodeVersion(versionOut);
   if (!version) {

@@ -100,6 +100,8 @@ pub struct SessionUpsert {
 pub struct SessionSummary {
     pub id: String,
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_cwd: Option<String>,
     pub harness: String,
     pub model: String,
     pub runtime_mode: String,
@@ -571,6 +573,21 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             params![now_millis()],
         )?;
     }
+    if current < 13 {
+        // Effective checkout is part of model identity; keep history reads covered.
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS sessions_cwd_cover_idx;
+             CREATE INDEX sessions_cwd_cover_idx
+               ON sessions (cwd, has_user_message, updated_at DESC, id, harness,
+                            model, runtime_mode, title, provider_session_id,
+                            created_at, branch, archived, pinned,
+                            linked_work_item_json, worktree_cwd);",
+        )?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?1)",
+            params![now_millis()],
+        )?;
+    }
     // Create even when a version row already exists (another build may have
     // used the same numbers, or a previous run recorded the version without
     // the table). Restore writes into these; missing tables look like a
@@ -703,6 +720,7 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
     Ok(SessionSummary {
         id: session.id.clone(),
         cwd: session.cwd.clone(),
+        worktree_cwd: worktree_cwd.map(str::to_owned),
         harness: session.harness.clone(),
         model: session.model.clone(),
         runtime_mode: session.runtime_mode.clone(),
@@ -971,7 +989,7 @@ fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<Session
     let mut statement = conn.prepare(
         "SELECT id, cwd, harness, model, runtime_mode, title, provider_session_id,
                 created_at, updated_at, branch, archived, pinned,
-                linked_work_item_json
+                linked_work_item_json, worktree_cwd
          FROM sessions
          WHERE cwd = ?1
            AND (has_user_message = 1 OR linked_work_item_json IS NOT NULL)
@@ -986,6 +1004,7 @@ fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<Session
         Ok(SessionSummary {
             id: row.get(0)?,
             cwd: row.get(1)?,
+            worktree_cwd: row.get(13)?,
             harness: row.get(2)?,
             model: row.get(3)?,
             runtime_mode: row.get(4)?,
@@ -1009,7 +1028,7 @@ fn list_linked(conn: &Connection) -> rusqlite::Result<Vec<SessionSummary>> {
     let mut statement = conn.prepare(
         "SELECT id, cwd, harness, model, runtime_mode, title, provider_session_id,
                 created_at, updated_at, branch, archived, pinned,
-                linked_work_item_json
+                linked_work_item_json, worktree_cwd
          FROM sessions
          WHERE linked_work_item_json IS NOT NULL
            AND id NOT IN (SELECT id FROM sessions WHERE inbox_ask IS NOT NULL)
@@ -1021,6 +1040,7 @@ fn list_linked(conn: &Connection) -> rusqlite::Result<Vec<SessionSummary>> {
         Ok(SessionSummary {
             id: row.get(0)?,
             cwd: row.get(1)?,
+            worktree_cwd: row.get(13)?,
             harness: row.get(2)?,
             model: row.get(3)?,
             runtime_mode: row.get(4)?,
@@ -1290,7 +1310,7 @@ mod tests {
                 "EXPLAIN QUERY PLAN
                  SELECT id, cwd, harness, model, runtime_mode, title, provider_session_id,
                         created_at, updated_at, branch, archived, pinned,
-                        linked_work_item_json
+                        linked_work_item_json, worktree_cwd
                  FROM sessions
                  WHERE cwd = ?1
                    AND has_user_message = 1
@@ -1722,11 +1742,13 @@ mod tests {
         session.worktree_cwd = Some("/tmp/a-feat".into());
         let summary = upsert_session(&conn, &session).unwrap();
         assert_eq!(summary.branch.as_deref(), Some("feat/picker"));
+        assert_eq!(summary.worktree_cwd.as_deref(), Some("/tmp/a-feat"));
         let record = get_session(&conn, "s1").unwrap().unwrap();
         assert_eq!(record.branch.as_deref(), Some("feat/picker"));
         assert_eq!(record.worktree_cwd.as_deref(), Some("/tmp/a-feat"));
         let listed = list_by_project(&conn, "/tmp/a").unwrap();
         assert_eq!(listed[0].branch.as_deref(), Some("feat/picker"));
+        assert_eq!(listed[0].worktree_cwd.as_deref(), Some("/tmp/a-feat"));
     }
 
     #[test]

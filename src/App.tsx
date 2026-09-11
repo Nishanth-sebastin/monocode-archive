@@ -35,7 +35,7 @@ import {
 } from "./lib/appearance";
 import { HAS_NATIVE_GLASS, IS_MAC, IS_WIN } from "./lib/platform";
 import { WslProjectDialog } from "./chrome/WslProjectDialog";
-import { connectWslProject } from "./lib/wsl";
+import { connectWslProject, invalidateWslDiscovery } from "./lib/wsl";
 import {
   applyUiScale,
   loadUiScale,
@@ -501,7 +501,7 @@ function withPlanBuildTarget(
   session: Session,
   target: PlanBuildTarget,
 ): Session {
-  const resolved = resolveModel(target.harness, target.model);
+  const resolved = resolveModel(target.harness, target.model, sessionWorkCwd(session));
   const modelSettings = preferredModelSettings(resolved, session.modelSettings);
   const plan = planComposerSwitch(session, target.harness);
   const next = withHarnessChoice(
@@ -751,6 +751,7 @@ export default function App({
   useEffect(() => {
     const unlisten = listen<string>("wsl:disconnected", (event) => {
       const path = projectCwdRef.current;
+      invalidateWslDiscovery(`//wsl.localhost/${event.payload}/`);
       if (wslLocation(path)?.distribution.toLowerCase() === event.payload.toLowerCase())
         setWslOpening((current) => current?.busy ? current : { path, busy: false, error: "WSL connection interrupted. Reconnect, then inspect any in-flight action before retrying it." });
     });
@@ -933,8 +934,8 @@ export default function App({
     void refreshHarnessCatalogs(harnesses).then(() => {
       setSessions((prev) =>
         prev.map((session) => {
-          if (!isLiveHarness(session.harness)) return session;
-          const resolved = resolveModel(session.harness, session.model);
+          if (!isLiveHarness(session.harness) || wslLocation(sessionWorkCwd(session))) return session;
+          const resolved = resolveModel(session.harness, session.model, sessionWorkCwd(session));
           const modelSettings = mergeModelSettings(
             resolved,
             session.modelSettings,
@@ -3397,8 +3398,8 @@ export default function App({
 
   const onBranchChange = useCallback(
     (sessionId: string) => {
-      notifyGitChanged();
       const current = sessionsRef.current.find((s) => s.id === sessionId);
+      if (current) notifyGitChanged(sessionWorkCwd(current));
       if (!current || (!current.branch && !current.worktreeCwd)) return;
       const next = {
         ...current,
@@ -3775,7 +3776,7 @@ export default function App({
       const current = sessionsRef.current.find((s) => s.id === sessionId);
       if (!current) return;
       if (isPreparingHandoff(current)) return;
-      const resolved = resolveModel(harness, model);
+      const resolved = resolveModel(harness, model, sessionWorkCwd(current));
       if (current.modelSettings) {
         saveLastModelSettings(current.modelSettings, "fill");
       }
@@ -4393,7 +4394,7 @@ export default function App({
             });
           }, 0);
           notifyReviewChanged(sessionId);
-          notifyGitChanged();
+          notifyGitChanged(workCwd);
           nudgeWorkspace(workCwd);
           nudgeWatchedFiles();
           window.setTimeout(() => nudgeWatchedFiles(), 150);
@@ -4863,7 +4864,7 @@ export default function App({
       if (session) {
         notifyReviewChanged(sessionId);
         nudgeWorkspace(sessionWorkCwd(session));
-        notifyGitChanged();
+        notifyGitChanged(sessionWorkCwd(session));
         nudgeWatchedFiles();
         window.setTimeout(() => nudgeWatchedFiles(), 150);
       } else {
@@ -6325,7 +6326,7 @@ function nudgeOpenEditors(event: HarnessEvent, cwd: string) {
     if (!completed) return;
     nudgeWatchedFiles();
     window.setTimeout(() => nudgeWatchedFiles(), 150);
-    notifyGitChanged();
+    notifyGitChanged(cwd);
     nudgeWorkspace(cwd);
     window.setTimeout(() => nudgeWorkspace(cwd), 150);
     return;
@@ -6341,7 +6342,7 @@ function nudgeOpenEditors(event: HarnessEvent, cwd: string) {
   }
   if (completed) {
     window.setTimeout(() => nudgeWatchedFiles(), 150);
-    notifyGitChanged();
+    notifyGitChanged(cwd);
     nudgeWorkspace(cwd);
   }
 }

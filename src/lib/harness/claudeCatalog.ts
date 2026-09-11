@@ -1,6 +1,7 @@
+import { wslLocation } from "../paths";
 import { homeDir } from "../fs";
 import {
-  setHarnessModels,
+  refreshModelCatalog,
   type AgentModel,
   type ModelSetting,
 } from "../models";
@@ -194,7 +195,6 @@ export const CLAUDE_MODEL_CATALOG: AgentModel[] = [
   },
 ];
 
-const PROBE_ID = "monocode-claude-probe";
 const LIST_MODELS_REQUEST_ID = "monocode_list_models";
 const INIT_REQUEST_ID = "monocode_init";
 const DISCOVERY_TIMEOUT_MS = 15_000;
@@ -207,35 +207,24 @@ const EFFORT_LABELS: Record<string, string> = {
   max: "Max",
 };
 
-let inflight: Promise<void> | null = null;
-
-export function refreshClaudeCatalog(): Promise<void> {
-  if (inflight) return inflight;
-  inflight = discoverClaudeModels()
-    .then((models) => {
-      if (models.length > 0) setHarnessModels("claude", models);
-    })
-    .catch((error: unknown) => {
-      console.debug("[monocode] claude catalog", error);
-    })
-    .finally(() => {
-      inflight = null;
-    });
-  return inflight;
+export function refreshClaudeCatalog(cwd?: string): Promise<void> {
+  return refreshModelCatalog("claude", cwd, () => discoverClaudeModels(cwd));
 }
 
-async function discoverClaudeModels(): Promise<AgentModel[]> {
-  const listed = await discoverViaListModels().catch((error: unknown) => {
+async function discoverClaudeModels(projectCwd?: string): Promise<AgentModel[]> {
+  const listed = await discoverViaListModels(projectCwd).catch((error: unknown) => {
+    if (projectCwd && wslLocation(projectCwd)) throw error;
     console.debug("[monocode] claude list_models catalog failed", error);
     return [];
   });
   if (listed.length > 0) return listed;
-  return discoverViaVersion();
+  return discoverViaVersion(projectCwd);
 }
 
-async function discoverViaListModels(): Promise<AgentModel[]> {
-  const { path } = await resolveClaudeBinary();
-  const cwd = await homeDir();
+async function discoverViaListModels(projectCwd?: string): Promise<AgentModel[]> {
+  const { path } = await resolveClaudeBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
+  const PROBE_ID = `monocode-claude-probe-${crypto.randomUUID()}`;
   const sessionId = crypto.randomUUID();
 
   let listed: ((models: AgentModel[]) => void) | null = null;
@@ -299,9 +288,9 @@ async function discoverViaListModels(): Promise<AgentModel[]> {
   }
 }
 
-async function discoverViaVersion(): Promise<AgentModel[]> {
-  const { path } = await resolveClaudeBinary();
-  const cwd = await homeDir();
+async function discoverViaVersion(projectCwd?: string): Promise<AgentModel[]> {
+  const { path } = await resolveClaudeBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
   const versionOut = await execChild(path, ["--version"], cwd);
   const version = parseClaudeVersion(versionOut);
   return modelsForClaudeVersion(version);

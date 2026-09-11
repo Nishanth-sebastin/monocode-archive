@@ -1,4 +1,3 @@
-import { wslLocation } from "../lib/paths";
 import { ChevronDown, Search, Star } from "./icons";
 import {
   useEffect,
@@ -17,6 +16,7 @@ import {
   loadFavoriteModels,
   loadModelPickerTab,
   modelsFor,
+  modelCatalogStatus,
   resolveModel,
   saveFavoriteModels,
   saveModelPickerTab,
@@ -32,6 +32,7 @@ import {
   hasProbedHarnessAvailability,
   isHarnessAvailable,
   probeHarnessAvailability,
+  harnessProbeError,
   subscribeHarnessAvailability,
   getHarnessAvailabilitySnapshot,
 } from "../lib/harness/availability";
@@ -92,7 +93,7 @@ export function ModelPicker({
   const search = useRef<HTMLInputElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  const current = resolveModel(harness, model);
+  const current = resolveModel(harness, model, cwd);
   const tabRef = useRef(tab);
   const openRef = useRef(open);
   const lastHotkey = useRef(0);
@@ -145,8 +146,12 @@ export function ModelPicker({
   }, [open, cwd]);
 
   useEffect(() => {
-    if (!open || visibleTab === "favorites" || (cwd && wslLocation(cwd))) return;
-    void refreshHarnessCatalogs([visibleTab]);
+    if (open && !hasProbedHarnessAvailability(cwd)) void probeHarnessAvailability({ cwd });
+  }, [open, cwd, availabilityVersion]);
+
+  useEffect(() => {
+    if (!open || visibleTab === "favorites") return;
+    void refreshHarnessCatalogs([visibleTab], cwd);
   }, [open, visibleTab, cwd]);
 
   useEffect(() => {
@@ -220,7 +225,7 @@ export function ModelPicker({
     const pool =
       visibleTab === "favorites"
         ? favorites
-            .map((id) => findModel(id))
+            .map((id) => findModel(id, cwd))
             .filter(
               (item): item is AgentModel =>
                 item != null && shownInPicker(item.harness) && modelsFor(item.harness, cwd).some((model) => model.id === item.id),
@@ -407,6 +412,15 @@ export function ModelPicker({
               onPick={pick}
               onToggleFavorite={toggleFavorite}
             />
+          </div>
+          <div className="flex items-center gap-2 border-t border-content/10 px-3 py-2 text-[10px] text-content/60">
+            <span role="status" className="min-w-0 flex-1 break-words">
+              {visibleTab === "favorites" ? (harnessProbeError(cwd) ?? "Models for this execution location") : modelCatalogStatus(visibleTab, cwd)}
+            </span>
+            <button type="button" className="shrink-0 rounded px-2 py-1 hover:bg-content/10" onClick={() => {
+              void probeHarnessAvailability({ cwd, force: true });
+              void refreshHarnessCatalogs(visibleTab === "favorites" ? pickerHarnesses : [visibleTab], cwd, true);
+            }}>Refresh</button>
           </div>
         </Popover>
       ) : null}

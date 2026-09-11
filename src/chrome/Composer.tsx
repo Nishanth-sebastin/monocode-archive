@@ -1540,7 +1540,7 @@ export function Composer({
             >
               <div className="flex shrink-0 items-center gap-1">
                 <ModelPicker
-                  cwd={cwd}
+                  cwd={executionCwd}
                   harness={harness}
                   model={model}
                   hotkeys={hotkeys && enabled}
@@ -1548,6 +1548,7 @@ export function Composer({
                   onClose={() => ref.current?.focus()}
                 />
                 <ModelSettings
+                  cwd={executionCwd}
                   harness={harness}
                   model={model}
                   values={modelSettings}

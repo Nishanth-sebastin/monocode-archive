@@ -1,4 +1,4 @@
-import { wslLocation } from "./paths";
+import { pathKey, wslLocation } from "./paths";
 import type { HarnessId } from "./session";
 import { HARNESSES } from "./session";
 
@@ -211,8 +211,87 @@ const HARNESS_ORDER: HarnessId[] = [
 
 const EMPTY_MODELS: AgentModel[] = [];
 
-let overlays: Partial<Record<HarnessId, AgentModel[]>> = {};
-let overlayDefaults: Partial<Record<HarnessId, string>> = {};
+type Catalog = {
+  models?: AgentModel[];
+  error?: string;
+  inflight?: Promise<void>;
+};
+const catalogs = new Map<string, Partial<Record<HarnessId, Catalog>>>();
+
+/** Linux project config can change the catalog even within one distribution. */
+export function modelCatalogKey(cwd?: string): string {
+  return cwd && wslLocation(cwd) ? pathKey(cwd) : "native";
+}
+function catalogScope(cwd?: string) {
+  const key = modelCatalogKey(cwd);
+  let scope = catalogs.get(key);
+  if (!scope) {
+    if (catalogs.size >= 32) {
+      const idle = [...catalogs].find(
+        ([, value]) => !Object.values(value).some((entry) => entry?.inflight),
+      );
+      if (!idle)
+        throw new Error(
+          "Model discovery is busy. Retry after current probes finish.",
+        );
+      catalogs.delete(idle[0]);
+    }
+    scope = {};
+    catalogs.set(key, scope);
+  }
+  return scope;
+}
+export function invalidateModelCatalogs(cwd: string) {
+  const host = wslLocation(cwd)?.distribution.toLowerCase();
+  for (const key of catalogs.keys()) {
+    if (
+      host
+        ? wslLocation(key)?.distribution.toLowerCase() === host
+        : key === "native"
+    )
+      catalogs.delete(key);
+  }
+  emit();
+}
+
+/** Shared bounded/coalesced lifecycle; discarded scopes cannot publish late results. */
+export function refreshModelCatalog(
+  harness: HarnessId,
+  cwd: string | undefined,
+  discover: () => Promise<AgentModel[]>,
+): Promise<void> {
+  const scope = catalogScope(cwd);
+  const entry = (scope[harness] ??= {});
+  if (entry.inflight) return entry.inflight;
+  entry.error = undefined;
+  const pending = Promise.resolve()
+    .then(discover)
+    .then((models) => {
+      if (catalogs.get(modelCatalogKey(cwd)) !== scope) return;
+      if (!models.length) throw new Error("The provider returned no models.");
+      entry.models = models;
+    })
+    .catch((error: unknown) => {
+      entry.error = String(error);
+    })
+    .finally(() => {
+      entry.inflight = undefined;
+      emit();
+    });
+  entry.inflight = pending;
+  emit();
+  return pending;
+}
+export function modelCatalogStatus(harness: HarnessId, cwd?: string): string {
+  const entry = catalogs.get(modelCatalogKey(cwd))?.[harness];
+  if (entry?.inflight) return "Refreshing models…";
+  if (entry?.error)
+    return `${entry.models ? "Previous catalog" : "Bundled models"} · ${entry.error}`;
+  return entry?.models
+    ? "Models from selected provider"
+    : "Bundled models · refresh to discover available models";
+}
+
 let catalogVersion = 0;
 const listeners = new Set<() => void>();
 
@@ -235,30 +314,29 @@ export function getModelSnapshot(): number {
   return catalogVersion;
 }
 
-export function setHarnessModels(harness: HarnessId, models: AgentModel[]) {
+export function setHarnessModels(
+  harness: HarnessId,
+  models: AgentModel[],
+  cwd?: string,
+) {
   if (models.length === 0) return;
-  overlays = { ...overlays, [harness]: models };
-  overlayDefaults = {
-    ...overlayDefaults,
-    [harness]: pickDefaultId(harness, models),
-  };
+  catalogScope(cwd)[harness] = { models };
   emit();
 }
 
-/** True after a live CLI catalog has replaced the built-in fallback list. */
-export function hasLiveCatalog(harness: HarnessId): boolean {
-  return overlays[harness] != null;
+export function hasLiveCatalog(harness: HarnessId, cwd?: string): boolean {
+  return catalogs.get(modelCatalogKey(cwd))?.[harness]?.models != null;
 }
 
 /** Test seam. */
 export function resetHarnessModelOverlays() {
-  overlays = {};
-  overlayDefaults = {};
+  catalogs.clear();
   emit();
 }
 
-export function defaultModelId(harness: HarnessId): string {
-  return overlayDefaults[harness] ?? DEFAULT_MODEL_ID[harness];
+export function defaultModelId(harness: HarnessId, cwd?: string): string {
+  const models = catalogs.get(modelCatalogKey(cwd))?.[harness]?.models;
+  return models ? pickDefaultId(harness, models) : DEFAULT_MODEL_ID[harness];
 }
 
 // `modelsFor`/`findModel` sit in render bodies (every session card, every
@@ -280,14 +358,21 @@ function baseModelsFor(harness: HarnessId): AgentModel[] {
 }
 
 export function modelsFor(harness: HarnessId, cwd?: string): AgentModel[] {
-  return cwd && wslLocation(cwd) ? baseModelsFor(harness) : overlays[harness] ?? baseModelsFor(harness);
+  return (
+    catalogs.get(modelCatalogKey(cwd))?.[harness]?.models ??
+    baseModelsFor(harness)
+  );
 }
 
 export function allModels(): AgentModel[] {
   return (allCache ??= HARNESS_ORDER.flatMap((harness) => modelsFor(harness)));
 }
 
-export function findModel(id: string): AgentModel | undefined {
+export function findModel(id: string, cwd?: string): AgentModel | undefined {
+  if (modelCatalogKey(cwd) !== "native")
+    return HARNESS_ORDER.flatMap((harness) => modelsFor(harness, cwd)).find(
+      (model) => model.id === id,
+    );
   if (!indexById) {
     const index = new Map<string, AgentModel>();
     // First writer wins, matching the previous `allModels().find(...)` order.
@@ -299,10 +384,14 @@ export function findModel(id: string): AgentModel | undefined {
   return indexById.get(id);
 }
 
-export function resolveModel(harness: HarnessId, id?: string): AgentModel {
-  const available = modelsFor(harness);
+export function resolveModel(
+  harness: HarnessId,
+  id?: string,
+  cwd?: string,
+): AgentModel {
+  const available = modelsFor(harness, cwd);
   if (id) {
-    const exact = findModel(id);
+    const exact = findModel(id, cwd);
     if (exact && exact.harness === harness) return exact;
     const slug = nativeIdFrom(id);
     const byNative = available.find(
@@ -315,9 +404,9 @@ export function resolveModel(harness: HarnessId, id?: string): AgentModel {
     });
     if (prefix) return prefix;
   }
-  const fallbackId = defaultModelId(harness);
+  const fallbackId = defaultModelId(harness, cwd);
   return (
-    (fallbackId ? findModel(fallbackId) : undefined) ??
+    (fallbackId ? findModel(fallbackId, cwd) : undefined) ??
     available[0] ??
     MODELS.find((model) => model.harness === harness) ??
     MODELS[0]
@@ -325,16 +414,22 @@ export function resolveModel(harness: HarnessId, id?: string): AgentModel {
 }
 
 /** Catalog-reported context window for a model id, when known. */
-export function modelContextWindow(id: string): number | undefined {
-  const window = findModel(id)?.contextWindow;
+export function modelContextWindow(
+  id: string,
+  cwd?: string,
+): number | undefined {
+  const window = findModel(id, cwd)?.contextWindow;
   return window && window > 0 ? window : undefined;
 }
 
-export function nativeModelId(model: AgentModel | string): string {
+export function nativeModelId(
+  model: AgentModel | string,
+  cwd?: string,
+): string {
   if (typeof model !== "string") {
     return model.nativeId ?? nativeIdFrom(model.id);
   }
-  return findModel(model)?.nativeId ?? nativeIdFrom(model);
+  return findModel(model, cwd)?.nativeId ?? nativeIdFrom(model);
 }
 
 export function defaultModelSettings(
@@ -400,8 +495,9 @@ export function saveLastModelSettings(
 export function encodeModelLaunchId(
   modelId: string,
   settings?: Record<string, string>,
+  cwd?: string,
 ): string {
-  const model = findModel(modelId);
+  const model = findModel(modelId, cwd);
   const native = nativeModelId(model ?? modelId);
   const defs = model?.settings ?? [];
   if (!native || defs.length === 0) return native;
@@ -549,9 +645,18 @@ export function stepModelPickerTab(
   return tabs[(from + delta + tabs.length) % tabs.length] ?? tab;
 }
 
-export function loadDefaultModels(): Partial<Record<HarnessId, string>> {
+function modelPreferenceKey(key: string, cwd?: string): string {
+  const location = cwd && wslLocation(cwd);
+  return location ? `${key}:wsl:${location.distribution.toLowerCase()}` : key;
+}
+
+export function loadDefaultModels(
+  cwd?: string,
+): Partial<Record<HarnessId, string>> {
   try {
-    const raw = localStorage.getItem(DEFAULT_MODELS_KEY);
+    const raw = localStorage.getItem(
+      modelPreferenceKey(DEFAULT_MODELS_KEY, cwd),
+    );
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -569,10 +674,17 @@ export function loadDefaultModels(): Partial<Record<HarnessId, string>> {
   }
 }
 
-export function saveDefaultModel(harness: HarnessId, model: string) {
-  const next = { ...loadDefaultModels(), [harness]: model };
+export function saveDefaultModel(
+  harness: HarnessId,
+  model: string,
+  cwd?: string,
+) {
+  const next = { ...loadDefaultModels(cwd), [harness]: model };
   try {
-    localStorage.setItem(DEFAULT_MODELS_KEY, JSON.stringify(next));
+    localStorage.setItem(
+      modelPreferenceKey(DEFAULT_MODELS_KEY, cwd),
+      JSON.stringify(next),
+    );
   } catch {
     // private mode / quota
   }
@@ -580,24 +692,23 @@ export function saveDefaultModel(harness: HarnessId, model: string) {
 
 /** User-picked model for a provider, else the catalog default. */
 export function preferredModelId(harness: HarnessId, cwd?: string): string {
-  if (cwd && wslLocation(cwd)) return DEFAULT_MODEL_ID[harness];
-  const saved = loadDefaultModels()[harness];
+  const saved = loadDefaultModels(cwd)[harness];
   if (saved) return saved;
-  const last = loadLastModelChoice();
+  const last = loadLastModelChoice(cwd);
   if (last?.harness === harness) return last.model;
-  return defaultModelId(harness);
+  return defaultModelId(harness, cwd);
 }
 
 /** Provider + model new conversations should start with. */
-export function defaultSessionChoice(): LastModelChoice {
-  const last = loadLastModelChoice();
+export function defaultSessionChoice(cwd?: string): LastModelChoice {
+  const last = loadLastModelChoice(cwd);
   const harness = last?.harness ?? "cursor";
-  return { harness, model: preferredModelId(harness) };
+  return { harness, model: preferredModelId(harness, cwd) };
 }
 
-export function loadLastModelChoice(): LastModelChoice | null {
+export function loadLastModelChoice(cwd?: string): LastModelChoice | null {
   try {
-    const raw = localStorage.getItem(LAST_MODEL_KEY);
+    const raw = localStorage.getItem(modelPreferenceKey(LAST_MODEL_KEY, cwd));
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
     if (
@@ -617,10 +728,17 @@ export function loadLastModelChoice(): LastModelChoice | null {
   }
 }
 
-export function saveLastModelChoice(harness: HarnessId, model: string) {
-  saveDefaultModel(harness, model);
+export function saveLastModelChoice(
+  harness: HarnessId,
+  model: string,
+  cwd?: string,
+) {
+  saveDefaultModel(harness, model, cwd);
   try {
-    localStorage.setItem(LAST_MODEL_KEY, JSON.stringify({ harness, model }));
+    localStorage.setItem(
+      modelPreferenceKey(LAST_MODEL_KEY, cwd),
+      JSON.stringify({ harness, model }),
+    );
   } catch {
     // private mode / quota
   }

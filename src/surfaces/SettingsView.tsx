@@ -1,3 +1,4 @@
+import { wslLocation } from "../lib/paths";
 import { Select } from "../chrome/Select";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -97,6 +98,7 @@ import {
   harnessUnavailableHint,
   isHarnessAvailable,
   probeHarnessAvailability,
+  hasProbedHarnessAvailability,
   subscribeHarnessAvailability,
 } from "../lib/harness/availability";
 import { refreshHarnessCatalogs } from "../lib/harness/registry";
@@ -107,6 +109,8 @@ import {
   loadDefaultModels,
   loadLastModelChoice,
   modelsFor,
+  modelCatalogStatus,
+  hasLiveCatalog,
   resolveModel,
   saveDefaultModel,
   saveLastModelChoice,
@@ -311,7 +315,7 @@ export function SettingsView({
             <AppearancePage appearance={appearance} />
           ) : null}
           {section === "keybindings" ? <KeybindingsPage /> : null}
-          {section === "providers" ? <ProvidersPage /> : null}
+          {section === "providers" ? <ProvidersPage key={cwd} cwd={cwd} /> : null}
           {section === "inbox" ? <InboxPage /> : null}
           {section === "skills" ? <SkillsPage key={cwd} cwd={cwd} /> : null}
           {section === "archive" ? (
@@ -1684,31 +1688,36 @@ function KeybindingsPage() {
   );
 }
 
-function ProvidersPage() {
+function ProvidersPage({ cwd }: { cwd: string }) {
+  const [location, setLocation] = useState(cwd);
+  return <><div className="mb-3 flex items-center justify-between gap-2"><span className="text-xs text-content/60">Execution location</span><Select label="Provider execution location" value={location} options={[{ value: "", label: "This computer" }, ...(wslLocation(cwd) ? [{ value: cwd, label: prettyCwd(cwd) }] : [{ value: cwd, label: "Current project" }])]} onChange={setLocation} /></div><ProvidersForLocation key={location} cwd={location || undefined} /></>;
+}
+
+function ProvidersForLocation({ cwd }: { cwd?: string }) {
   useSyncExternalStore(subscribeModels, getModelSnapshot, getModelSnapshot);
-  useSyncExternalStore(
+  const availabilityVersion = useSyncExternalStore(
     subscribeHarnessAvailability,
     getHarnessAvailabilitySnapshot,
     getHarnessAvailabilitySnapshot,
   );
-  const [choice, setChoice] = useState(loadLastModelChoice);
-  const [defaultModels, setDefaultModels] = useState(loadDefaultModels);
+  const [choice, setChoice] = useState(() => loadLastModelChoice(cwd));
+  const [defaultModels, setDefaultModels] = useState(() => loadDefaultModels(cwd));
 
   useEffect(() => {
-    void probeHarnessAvailability();
-  }, []);
+    if (!hasProbedHarnessAvailability(cwd)) void probeHarnessAvailability({ cwd });
+  }, [cwd, availabilityVersion]);
 
   const onModelChange = (harness: HarnessId, model: string) => {
-    saveDefaultModel(harness, model);
+    saveDefaultModel(harness, model, cwd);
     setDefaultModels((prev) => ({ ...prev, [harness]: model }));
     if (choice?.harness === harness) {
-      saveLastModelChoice(harness, model);
+      saveLastModelChoice(harness, model, cwd);
       setChoice({ harness, model });
     }
   };
 
   const onDefault = (harness: HarnessId, model: string) => {
-    saveLastModelChoice(harness, model);
+    saveLastModelChoice(harness, model, cwd);
     setDefaultModels((prev) => ({ ...prev, [harness]: model }));
     setChoice({ harness, model });
   };
@@ -1716,21 +1725,23 @@ function ProvidersPage() {
   return (
     <>
       <p className="pb-2 text-[12px] leading-relaxed text-content/45">
-        A provider is listed as installed once its CLI is found on your PATH.
+        Installation and model defaults apply to the execution location above. A provider is installed once its CLI is found there.
         Uninstalled CLIs stay listed here but are omitted from the model picker.
-        Turn off Show in picker to hide an installed provider from those tabs.
+        Show in picker controls provider visibility across all locations.
         The model beside each provider is what new conversations use when that
         provider is selected; Use by default picks the provider itself.
       </p>
+      <button type="button" className="mb-2 rounded px-2 py-1 text-xs text-content/70 hover:bg-content/10" onClick={() => { void probeHarnessAvailability({ cwd, force: true }).then(() => refreshHarnessCatalogs(HARNESSES.filter((id) => isHarnessAvailable(id, cwd)), cwd, true)); }}>Refresh providers and models</button>
       {HARNESSES.map((harness) => (
         <ProviderRow
+          cwd={cwd}
           key={harness}
           harness={harness}
           selectedModel={
             defaultModels[harness] ??
             (choice?.harness === harness
               ? choice.model
-              : defaultModelId(harness))
+              : defaultModelId(harness, cwd))
           }
           isDefault={choice?.harness === harness}
           onDefault={onDefault}
@@ -1742,30 +1753,32 @@ function ProvidersPage() {
 }
 
 function ProviderRow({
+  cwd,
   harness,
   selectedModel,
   isDefault,
   onDefault,
   onModelChange,
 }: {
+  cwd?: string;
   harness: HarnessId;
   selectedModel: string;
   isDefault: boolean;
   onDefault: (harness: HarnessId, model: string) => void;
   onModelChange: (harness: HarnessId, model: string) => void;
 }) {
-  const models = modelsFor(harness);
-  const available = isHarnessAvailable(harness);
+  const models = modelsFor(harness, cwd);
+  const available = isHarnessAvailable(harness, cwd);
   const current =
-    models.length > 0 ? resolveModel(harness, selectedModel) : null;
+    models.length > 0 ? resolveModel(harness, selectedModel, cwd) : null;
   const [inPicker, setInPicker] = useState(() =>
     isPickerProviderVisible(harness),
   );
 
   useEffect(() => {
-    if (!available || models.length > 0) return;
-    void refreshHarnessCatalogs([harness]);
-  }, [available, harness, models.length]);
+    if (!available || hasLiveCatalog(harness, cwd)) return;
+    void refreshHarnessCatalogs([harness], cwd);
+  }, [available, harness, cwd]);
 
   const onPickerVisible = (visible: boolean) => {
     savePickerProviderVisible(harness, visible);
@@ -1777,7 +1790,7 @@ function ProviderRow({
       label={
         <span className="flex items-center gap-2">
           <HarnessIcon harness={harness} className="size-4 shrink-0" />
-          {HARNESS_TITLE[harness]}
+          <span title={modelCatalogStatus(harness, cwd)}>{HARNESS_TITLE[harness]}</span>
           {isDefault ? (
             <span className="rounded-full bg-content/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-content/60">
               Default
@@ -1788,7 +1801,7 @@ function ProviderRow({
       description={
         available
           ? `${models.length} ${models.length === 1 ? "model" : "models"} available.`
-          : harnessUnavailableHint(harness)
+          : harnessUnavailableHint(harness, cwd)
       }
     >
       {current ? (

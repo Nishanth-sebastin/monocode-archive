@@ -1,5 +1,5 @@
 import { homeDir } from "../fs";
-import { setHarnessModels } from "../models";
+import { refreshModelCatalog } from "../models";
 import { execChild, resolveFxBinary } from "./child";
 import {
   mergeFxCatalogModels,
@@ -7,26 +7,13 @@ import {
   modelsFromFxOutput,
 } from "./fxProtocol";
 
-let inflight: Promise<void> | null = null;
-
-export function refreshFxCatalog(): Promise<void> {
-  if (inflight) return inflight;
-  inflight = discoverFxModels()
-    .then((models) => {
-      if (models.length > 0) setHarnessModels("fx", models);
-    })
-    .catch((error: unknown) => {
-      console.debug("[monocode] fx catalog", error);
-    })
-    .finally(() => {
-      inflight = null;
-    });
-  return inflight;
+export function refreshFxCatalog(cwd?: string): Promise<void> {
+  return refreshModelCatalog("fx", cwd, () => discoverFxModels(cwd));
 }
 
-async function discoverFxModels() {
-  const { path } = await resolveFxBinary();
-  const cwd = await homeDir();
+async function discoverFxModels(projectCwd?: string) {
+  const { path } = await resolveFxBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
   const [modelsOutput, statusOutput] = await Promise.all([
     execChild(path, ["models", "--json"], cwd),
     execChild(path, ["status", "--json"], cwd).catch(() => ""),

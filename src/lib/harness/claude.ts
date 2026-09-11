@@ -1179,7 +1179,7 @@ function writeJson(
 
 function settingsKeyFor(input: HarnessSessionInput): string {
   return claudeSettingsKey({
-    model: nativeModelId(input.model),
+    model: nativeModelId(input.model, input.cwd),
     effort: input.modelSettings?.effort,
     fast: input.modelSettings?.fast,
     thinking: input.modelSettings?.thinking,
@@ -1201,7 +1201,7 @@ function launchOptions(
   sessionId?: string;
   settings?: ClaudeCliSettings;
 } {
-  const native = nativeModelId(input.model);
+  const native = nativeModelId(input.model, input.cwd);
   const effortRaw = input.modelSettings?.effort;
   const context = input.modelSettings?.context;
   const settings: ClaudeCliSettings = {};

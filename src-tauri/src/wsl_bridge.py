@@ -7,6 +7,9 @@ import base64
 import json
 import hashlib
 import os
+import pwd
+import shlex
+import uuid
 import selectors
 import shutil
 import signal
@@ -78,6 +81,37 @@ def run(argv, cwd, input_bytes=None, timeout=25):
         finally:
             child.stdout.close()
             child.stderr.close()
+
+
+ENVIRONMENT_READY = False
+
+
+def prepare_environment():
+    global ENVIRONMENT_READY
+    if ENVIRONMENT_READY:
+        return
+    # Use the selected Linux user's shell, never repository startup files or
+    # an arbitrary installed Node version. Capture noisy shell output privately.
+    marker = "MONOCODE_ENV_" + uuid.uuid4().hex
+    script = "import json,os; print(" + repr(marker) + "+json.dumps(dict(os.environ)))"
+    command = "/usr/bin/python3 -c " + shlex.quote(script)
+    shell = pwd.getpwuid(os.getuid()).pw_shell or "/bin/sh"
+    try:
+        code, out, _ = run([shell, "-ilc", command], str(Path.home()), timeout=10)
+        lines = [line[len(marker):] for line in out.decode("utf-8").splitlines() if line.startswith(marker)]
+        if code or len(lines) != 1 or len(lines[0]) > 256 * 1024:
+            raise ValueError("Invalid shell environment")
+        environment = json.loads(lines[0])
+        if not isinstance(environment, dict) or any(not isinstance(k, str) or not isinstance(v, str) or "\0" in k + v or "=" in k for k, v in environment.items()):
+            raise ValueError("Invalid shell environment")
+    except Exception:
+        raise ValueError("Cannot read the Linux login-shell environment. Check shell startup and reconnect.") from None
+    # Exclude Windows interop PATH entries; keep user-managed Linux tool paths.
+    environment["PATH"] = ":".join(dict.fromkeys(folder for folder in environment.get("PATH", "").split(":") if folder.startswith("/") and not folder.startswith("/mnt/")))
+    environment["WSLENV"] = ""
+    os.environ.clear()
+    os.environ.update(environment)
+    ENVIRONMENT_READY = True
 
 
 def file_bytes(path, limit):
@@ -174,7 +208,17 @@ def handle(request):
             if request.get("includeFiles") and not stat.S_ISDIR(meta.st_mode) and len(files) < 100:
                 files.append(str(current.relative_to(path)))
         return {"token": digest.hexdigest(), "fileCount": count - 1, "files": files}
+    if op == "refresh_environment":
+        global ENVIRONMENT_READY
+        ENVIRONMENT_READY = False
+        prepare_environment()
+        AGENT_BINARIES.clear()
+        return None
+    if op == "agent_environment":
+        prepare_environment()
+        return dict(os.environ)
     if op == "resolve_agent":
+        prepare_environment()
         provider = request["provider"]
         if provider == "opencode":
             raise ValueError("OpenCode's HTTP transport is not supported in WSL yet. Choose a stdio agent such as Claude or Codex.")
@@ -185,13 +229,15 @@ def handle(request):
             raise ValueError("Unknown agent provider")
         home = Path.home()
         folders = [home / suffix for suffix in [".local/bin", ".npm-global/bin", ".cargo/bin", ".bun/bin", "n/bin", ".grok/bin", ".fx/bin"]]
-        folders += [Path(folder) for folder in os.environ.get("PATH", "").split(":") if folder.startswith("/") and not folder.startswith("/mnt/")]
+        folders = [Path(folder) for folder in os.environ.get("PATH", "").split(":") if folder.startswith("/") and not folder.startswith("/mnt/")] + folders
         for name in names:
             for folder in dict.fromkeys(folders):
                 candidate = folder / name
                 if not candidate.is_file() or not os.access(candidate, os.X_OK):
                     continue
                 resolved = str(candidate.resolve())
+                if resolved.startswith("/mnt/") or resolved.lower().endswith((".exe", ".cmd", ".bat")):
+                    continue
                 if provider == "cursor" and name == "agent" and "cursor" not in resolved.lower():
                     continue
                 if provider in {"pi", "omp", "fx"}:
@@ -241,6 +287,7 @@ def handle(request):
                     break
         return result
     if op == "connect":
+        prepare_environment()
         path = path.resolve(strict=True)
         if not path.is_dir():
             raise ValueError("Choose a Linux directory")

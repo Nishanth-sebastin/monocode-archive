@@ -45,6 +45,7 @@ const emptyAvailability: HarnessAvailability = {
 };
 type Probe = {
   availability: HarnessAvailability;
+  errors: Partial<Record<HarnessId, string>>;
   probedAt: number;
   inflight: Promise<void> | null;
 };
@@ -91,9 +92,21 @@ export function isHarnessAvailable(id: HarnessId, cwd?: string): boolean {
   return probes.get(hostKey(cwd))?.availability[id] ?? false;
 }
 
+export function invalidateHarnessAvailability(cwd: string) {
+  probes.delete(hostKey(cwd));
+  emit();
+}
+
+export function harnessProbeError(cwd?: string): string | undefined {
+  return Object.values(probes.get(hostKey(cwd))?.errors ?? {}).find(Boolean);
+}
+
 export function harnessUnavailableHint(id: HarnessId, cwd?: string): string {
+  const error = probes.get(hostKey(cwd))?.errors[id];
+  if (error) return error;
   if (cwd && wslLocation(cwd)) {
-    if (id === "opencode") return "OpenCode HTTP is not supported in WSL yet. Choose a stdio agent such as Claude or Codex.";
+    if (id === "opencode")
+      return "OpenCode HTTP is not supported in WSL yet. Choose a stdio agent such as Claude or Codex.";
     return `${CLI[id].name} is unavailable in ${wslLocation(cwd)!.distribution}. Install its Linux CLI, reconnect WSL and retry.`;
   }
   const { name, install } = CLI[id];
@@ -118,6 +131,7 @@ export function probeHarnessAvailability(options?: {
     }
     probe = {
       availability: { ...emptyAvailability },
+      errors: {},
       probedAt: 0,
       inflight: null,
     };
@@ -141,6 +155,7 @@ export function probeHarnessAvailability(options?: {
     fx: resolveFxBinary,
     grok: resolveGrokBinary,
   };
+  current.errors = {};
   current.inflight = Promise.all(
     HARNESSES.map(async (id) => {
       if (!isLiveHarness(id)) return [id, false] as const;
@@ -148,12 +163,15 @@ export function probeHarnessAvailability(options?: {
         if (options?.cwd) await resolvers[id](options.cwd);
         else await resolvers[id]();
         return [id, true] as const;
-      } catch {
+      } catch (error) {
+        current.errors[id] = String(error);
         return [id, false] as const;
       }
     }),
   )
     .then((entries) => {
+      if (probes.get(key) !== current) return;
+      current.probedAt = Date.now();
       current.availability = {
         ...emptyAvailability,
         ...Object.fromEntries(entries),

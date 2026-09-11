@@ -1,5 +1,5 @@
 import { homeDir } from "../fs";
-import { setHarnessModels } from "../models";
+import { refreshModelCatalog } from "../models";
 import {
   killChild,
   spawnChild,
@@ -12,29 +12,14 @@ import { buildPiSpawnArgs, modelsFromRpcData } from "./piProtocol";
 
 const DISCOVERY_TIMEOUT_MS = 45_000;
 
-const inflight = new Map<string, Promise<void>>();
-
-function refreshCatalog(flavor: PiFlavor): Promise<void> {
-  const running = inflight.get(flavor.id);
-  if (running) return running;
-  const run = discoverModels(flavor)
-    .then((models) => {
-      if (models.length > 0) setHarnessModels(flavor.id, models);
-    })
-    .catch((error: unknown) => {
-      console.debug(`[monocode] ${flavor.id} catalog`, error);
-    })
-    .finally(() => {
-      inflight.delete(flavor.id);
-    });
-  inflight.set(flavor.id, run);
-  return run;
+function refreshCatalog(flavor: PiFlavor, cwd?: string): Promise<void> {
+  return refreshModelCatalog(flavor.id, cwd, () => discoverModels(flavor, cwd));
 }
 
-async function discoverModels(flavor: PiFlavor) {
-  const { path } = await flavor.resolveBinary();
-  const cwd = await homeDir();
-  const probeId = flavor.probeChildId;
+async function discoverModels(flavor: PiFlavor, projectCwd?: string) {
+  const { path } = await flavor.resolveBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
+  const probeId = `${flavor.probeChildId}-${crypto.randomUUID()}`;
   const rpc = new PiRpc(probeId, () => undefined, flavor.label);
 
   const stop = async () => {
@@ -71,10 +56,10 @@ async function discoverModels(flavor: PiFlavor) {
   }
 }
 
-export function refreshPiCatalog(): Promise<void> {
-  return refreshCatalog(PI_FLAVOR);
+export function refreshPiCatalog(cwd?: string): Promise<void> {
+  return refreshCatalog(PI_FLAVOR, cwd);
 }
 
-export function refreshOmpCatalog(): Promise<void> {
-  return refreshCatalog(OMP_FLAVOR);
+export function refreshOmpCatalog(cwd?: string): Promise<void> {
+  return refreshCatalog(OMP_FLAVOR, cwd);
 }

@@ -181,7 +181,7 @@ function AgentTranscriptComponent({
     seenUserId.current = lastUserId;
     if (lastUserId && !anchorTurn) setAnchorTurn(true);
   }
-  const modelName = harness ? resolveModel(harness, model).name : undefined;
+  const modelName = harness ? resolveModel(harness, model, cwd).name : undefined;
   const waitingForApproval = hasPendingApproval(blocks) || pendingQuestion;
   const preparingHandoff = blocks.some(
     (block) =>

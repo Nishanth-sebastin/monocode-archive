@@ -1,6 +1,6 @@
 import { homeDir } from "../fs";
 import {
-  setHarnessModels,
+  refreshModelCatalog,
   type AgentModel,
   type ModelSetting,
   type ModelSettingChoice,
@@ -15,7 +15,6 @@ import {
   watchChild,
 } from "./child";
 
-const PROBE_ID = "monocode-cursor-probe";
 const DISCOVERY_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -25,38 +24,26 @@ const CURSOR_CLIENT_CAPABILITIES = {
   _meta: { parameterizedModelPicker: true },
 };
 
-let inflight: Promise<void> | null = null;
-
-export function refreshCursorCatalog(): Promise<void> {
-  if (inflight) return inflight;
-  inflight = discoverCursorModels()
-    .then((models) => {
-      if (models.length > 0) setHarnessModels("cursor", models);
-    })
-    .catch((error: unknown) => {
-      console.debug("[monocode] cursor catalog", error);
-    })
-    .finally(() => {
-      inflight = null;
-    });
-  return inflight;
+export function refreshCursorCatalog(cwd?: string): Promise<void> {
+  return refreshModelCatalog("cursor", cwd, () => discoverCursorModels(cwd));
 }
 
-async function discoverCursorModels(): Promise<AgentModel[]> {
-  const fromAcp = await discoverViaAcp().catch((error: unknown) => {
+async function discoverCursorModels(projectCwd?: string): Promise<AgentModel[]> {
+  const fromAcp = await discoverViaAcp(projectCwd).catch((error: unknown) => {
     console.debug("[monocode] cursor ACP catalog failed", error);
     return [];
   });
   if (fromAcp.length > 0) return fromAcp;
-  return discoverViaCli().catch((error: unknown) => {
+  return discoverViaCli(projectCwd).catch((error: unknown) => {
     console.debug("[monocode] cursor CLI catalog failed", error);
     return [];
   });
 }
 
-async function discoverViaAcp(): Promise<AgentModel[]> {
-  const { path } = await resolveCursorBinary();
-  const cwd = await homeDir();
+async function discoverViaAcp(projectCwd?: string): Promise<AgentModel[]> {
+  const { path } = await resolveCursorBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
+  const PROBE_ID = `monocode-cursor-probe-${crypto.randomUUID()}`;
   const acp = new AcpClient(PROBE_ID, {
     onRequest: (id) => {
       void acp.respond(id, {}).catch(() => undefined);
@@ -112,9 +99,9 @@ async function discoverViaAcp(): Promise<AgentModel[]> {
   }
 }
 
-async function discoverViaCli(): Promise<AgentModel[]> {
-  const { path } = await resolveCursorBinary();
-  const cwd = await homeDir();
+async function discoverViaCli(projectCwd?: string): Promise<AgentModel[]> {
+  const { path } = await resolveCursorBinary(projectCwd);
+  const cwd = projectCwd ?? await homeDir();
   const stdout = await execChild(path, ["--list-models"], cwd);
   return modelsFromListModelsOutput(stdout);
 }

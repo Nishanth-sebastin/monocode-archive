@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { wslLocation, wslPath } from "../lib/paths";
 import { connectWslProject } from "../lib/wsl";
 import { pickFolder } from "../lib/fs";
+import { Select } from "./Select";
 import { Modal } from "./Modal";
 
 export function WslProjectDialog({
@@ -131,27 +132,30 @@ export function WslProjectDialog({
             });
         }}
       >
-        <label className="block space-y-1 text-[12px] text-content/75">
+        <div className="space-y-1 text-[12px] text-content/75">
           <span>Execution location</span>
-          <select
-            className={field}
+          <Select
+            label="Execution location"
             value={distribution}
             disabled={busy}
-            onChange={(event) => setDistribution(event.target.value)}
-          >
-            <option value="">This Windows PC</option>
-            {distribution && !distributions.includes(distribution) && (
-              <option value={distribution}>
-                WSL · {distribution} (unavailable)
-              </option>
-            )}
-            {distributions.map((name) => (
-              <option key={name} value={name}>
-                WSL · {name}
-              </option>
-            ))}
-          </select>
-        </label>
+            onChange={setDistribution}
+            options={[
+              { value: "", label: "This Windows PC" },
+              ...(distribution && !distributions.includes(distribution)
+                ? [
+                    {
+                      value: distribution,
+                      label: `WSL · ${distribution} (unavailable)`,
+                    },
+                  ]
+                : []),
+              ...distributions.map((name) => ({
+                value: name,
+                label: `WSL · ${name}`,
+              })),
+            ]}
+          />
+        </div>
         {distribution && (
           <label className="block space-y-1 text-[12px] text-content/75">
             <span>Linux folder</span>

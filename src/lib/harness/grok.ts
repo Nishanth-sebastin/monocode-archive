@@ -383,7 +383,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       acp,
       acpSessionId,
       cwd: input.cwd,
-      modelId: currentModelId(setup) ?? nativeModelId(input.model),
+      modelId: currentModelId(setup) ?? nativeModelId(input.model, input.cwd),
       contextWindow:
         contextWindowFromSetup(setup) ?? contextWindowFromSetup(init),
       muteUpdates: didLoad,
@@ -419,7 +419,7 @@ async function applyModelSelection(
   live: Live,
   input: HarnessSessionInput,
 ): Promise<void> {
-  const base = nativeModelId(input.model);
+  const base = nativeModelId(input.model, input.cwd);
   if (base && base !== live.modelId) {
     await live.acp
       .request(

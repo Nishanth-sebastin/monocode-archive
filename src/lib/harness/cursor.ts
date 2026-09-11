@@ -367,7 +367,7 @@ async function applyModelSelection(
   live: Live,
   input: SendTurnInput,
 ): Promise<void> {
-  const base = nativeModelId(input.model);
+  const base = nativeModelId(input.model, input.cwd);
   const settings = input.modelSettings ?? {};
 
   try {
