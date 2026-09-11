@@ -1551,6 +1551,10 @@ export default function App({
   useEffect(() => {
     const receive = (event: Event) => {
       const request = (event as CustomEvent<AgentContextRequest>).detail;
+      if (request.taskId || request.newTask) {
+        void routeContextToTaskRef.current(request);
+        return;
+      }
       const source = sessionsRef.current.find(
         (session) =>
           session.id === (request.sourceSessionId ?? activeSessionIdRef.current),
@@ -4410,6 +4414,7 @@ export default function App({
     editingTaskId?: string;
     initialTickets?: LinkedWorkItem[];
     initialName?: string;
+    initialBrief?: string;
   } | null>(null);
   const onNewTask = useCallback(
     (path: string, projectId?: string) => {
@@ -4444,9 +4449,12 @@ export default function App({
    * works across them from one conversation.
    */
   const launchTaskChildren = useCallback(
-    async (taskId: string, childIds?: readonly string[]) => {
+    async (
+      taskId: string,
+      childIds?: readonly string[],
+    ): Promise<string | undefined> => {
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
-      if (!task) return;
+      if (!task) return undefined;
       const project = projectForTask(task);
       for (const child of task.children) {
         if (childIds && !childIds.includes(child.id)) continue;
@@ -4547,14 +4555,14 @@ export default function App({
       }
       // One session per task — rooted at the host child's working copy.
       const fresh = loadTaskWorkspaces().find((entry) => entry.id === taskId);
-      if (!fresh) return;
+      if (!fresh) return undefined;
       const taskSessionId =
         fresh.sessionIds?.[0] ??
         fresh.children.find((entry) => entry.sessionIds.length)
           ?.sessionIds[0];
       if (taskSessionId) {
         if (!childIds) void onSelectHistorySession(taskSessionId);
-        return;
+        return taskSessionId;
       }
       const host =
         fresh.children.find(
@@ -4565,7 +4573,7 @@ export default function App({
           (entry) => entry.launch.state === "ready" && entry.workingCopy,
         ) ??
         fresh.children.find((entry) => entry.workingCopy);
-      if (!host?.workingCopy) return;
+      if (!host?.workingCopy) return undefined;
       const session = {
         ...newDefaultSession(host.workingCopy, sessionDefaults?.runtimeMode),
         title: fresh.name,
@@ -4586,6 +4594,7 @@ export default function App({
       // The brief lands as the session's first message; if it can't be sent
       // yet the session stays so opening the task retries by hand.
       await onSubmit(session.id, composeTaskSessionPrompt(fresh, project));
+      return session.id;
     },
     [
       appendTab,
@@ -4662,6 +4671,74 @@ export default function App({
     },
     [launchTaskChildren, onOpenTaskChild, onSelectHistorySession],
   );
+
+  /** Prepared change/file context routed to a task: stage it on the task's
+   * session — starting the task first when it has none — or open the create
+   * sheet with a file-list brief for a new task. */
+  const routeContextToTask = useCallback(
+    async (request: AgentContextRequest) => {
+      const done = () => request.onPrepared?.();
+      if (request.newTask || !request.taskId) {
+        const path =
+          request.cwd || active?.cwd || sessionDefaults?.cwd || projectCwd;
+        const project = path
+          ? ensureProjectForPath(
+              path,
+              getVerifiedFamilies().get(pathKey(path)),
+            )
+          : undefined;
+        if (!project) {
+          // Nothing to hang the task on — fall back to the context picker.
+          setContextRequest((current) => current ?? request);
+          return;
+        }
+        const files = request.context.entries
+          .map((entry) => `- ${entry.title}`)
+          .join("\n");
+        setTaskSheet({
+          projectId: project.id,
+          ...(files
+            ? { initialBrief: `Selected changes:\n${files}` }
+            : {}),
+        });
+        done();
+        return;
+      }
+      const task = loadTaskWorkspaces().find(
+        (entry) => entry.id === request.taskId && !entry.archived,
+      );
+      if (!task) return;
+      let sessionId =
+        task.sessionIds?.[0] ??
+        task.children.find((entry) => entry.sessionIds.length)
+          ?.sessionIds[0];
+      // No session yet — the send starts the task, then stages the context.
+      if (!sessionId) sessionId = await launchTaskChildren(task.id);
+      if (!sessionId) return;
+      const target = sessionsRef.current.find(
+        (session) => session.id === sessionId,
+      );
+      if (target) {
+        const next = prepareSessionContext(target, request.context, true);
+        const updated = sessionsRef.current.map((session) =>
+          session.id === next.id ? next : session,
+        );
+        sessionsRef.current = updated;
+        setSessions(updated);
+      }
+      await onSelectHistorySession(sessionId);
+      done();
+    },
+    [
+      active?.cwd,
+      launchTaskChildren,
+      onSelectHistorySession,
+      projectCwd,
+      sessionDefaults?.cwd,
+    ],
+  );
+  const routeContextToTaskRef = useRef(routeContextToTask);
+  routeContextToTaskRef.current = routeContextToTask;
 
   /** Send-to-agent routing through the task model: link the item onto an
    * existing task and open it, or open the create sheet with the item
@@ -6135,6 +6212,7 @@ export default function App({
           editingTaskId={taskSheet.editingTaskId}
           initialTickets={taskSheet.initialTickets}
           initialName={taskSheet.initialName}
+          initialBrief={taskSheet.initialBrief}
           onCreated={(taskId) => {
             setFocusTaskId(taskId);
             setProjectRailOpen((open) => {

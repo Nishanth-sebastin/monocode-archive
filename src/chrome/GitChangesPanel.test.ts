@@ -86,20 +86,44 @@ it("keeps changes selected until the chosen recipient accepts context", async ()
         ) as HTMLButtonElement
       ).click(),
     );
+    localStorage.setItem(
+      "monocode.taskWorkspaces.v1",
+      JSON.stringify([
+        {
+          id: "t1",
+          projectId: "p1",
+          name: "Fix billing",
+          children: [
+            {
+              id: "c1",
+              repositoryId: "r1",
+              sessionIds: [],
+              launch: { state: "pending" },
+            },
+          ],
+          sessionIds: [],
+          createdAt: 1,
+        },
+      ]),
+    );
     const checkbox = () =>
       host.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    const menuItem = (text: string) =>
+      [...document.body.querySelectorAll('[role="menuitem"]')].find(
+        (item) => item.textContent?.trim() === text,
+      ) as HTMLButtonElement;
     await act(async () => checkbox().click());
-    await act(async () => button("Send to agent…").click());
+    // The Task menu opens; the selection stays until a target accepts it.
+    await act(async () => button("Task").click());
+    expect(checkbox().checked).toBe(true);
+    await act(async () => menuItem("Fix billing").click());
     expect(checkbox().checked).toBe(true);
     expect(requestAgentContext).toHaveBeenCalledWith(
       expect.objectContaining({
         sourceSessionId: "original",
-        prepareInSource: false,
+        taskId: "t1",
       }),
     );
-    // Closing the picker has no success callback: the selected files remain available.
-    await act(async () => button("Send to agent…").click());
-    expect(checkbox().checked).toBe(true);
     await act(async () =>
       vi.mocked(requestAgentContext).mock.calls.at(-1)![0].onPrepared!(),
     );
@@ -107,6 +131,7 @@ it("keeps changes selected until the chosen recipient accepts context", async ()
   } finally {
     await act(async () => root.unmount());
     host.remove();
+    localStorage.removeItem("monocode.taskWorkspaces.v1");
     vi.unstubAllGlobals();
   }
 });

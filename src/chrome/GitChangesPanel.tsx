@@ -4,6 +4,14 @@ import { loadAzurePrAssociations, AZURE_PR_ASSOCIATIONS_CHANGED } from "../lib/a
 import { loadCiSources, ciState, ciContext, AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
 import type { DeliveryTabSource } from "../lib/layout";
 import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
+import {
+  loadTaskWorkspaces,
+  projectForTask,
+  subscribeTaskWorkspaces,
+  taskWorkspacesSnapshot,
+} from "../lib/taskWorkspaces";
+import { projectName } from "../lib/paths";
+import { Popover } from "./Popover";
 import { ContextCheckbox } from "./InboxContextPicker";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -12,6 +20,8 @@ import {
   CircleDashed,
   SquarePlus,
   ChevronDown,
+  Task,
+  X,
   ChevronRight,
   CloudUpload,
   ExternalLink,
@@ -35,6 +45,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { FileTypeIcon } from "./FileTypeIcon";
@@ -679,7 +690,20 @@ function ChangedFiles({
   };
 
   const contextLoading = useRef(false);
-  const prepareSelected = async (prepareInSource: boolean) => {
+  const taskMenuButton = useRef<HTMLButtonElement | null>(null);
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
+  const tasksRaw = useSyncExternalStore(
+    subscribeTaskWorkspaces,
+    taskWorkspacesSnapshot,
+  );
+  const contextTasks = useMemo(
+    () => loadTaskWorkspaces().filter((task) => !task.archived),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tasksRaw],
+  );
+  const prepareSelected = async (
+    route: { prepareInSource: true } | { taskId: string } | { newTask: true },
+  ) => {
     if (contextLoading.current) return;
     contextLoading.current = true;
     const generation = contextGeneration.current;
@@ -705,11 +729,12 @@ function ChangedFiles({
         );
       const context = await contextFromChanges(cwd, selections);
       if (generation === contextGeneration.current) {
+        setTaskMenuOpen(false);
         requestAgentContext({
           context,
           cwd,
           sourceSessionId,
-          prepareInSource,
+          ...route,
           onPrepared: () => {
             if (generation !== contextGeneration.current) return;
             setContextSelected(new Set());
@@ -841,29 +866,44 @@ function ChangedFiles({
                   type="button"
                   disabled={contextBusy}
                   className="h-7 shrink-0 rounded-md px-2 text-content/80 hover:bg-content/5 disabled:opacity-40"
-                  onClick={() => void prepareSelected(true)}
+                  onClick={() => void prepareSelected({ prepareInSource: true })}
                 >
                   {contextBusy ? "Loading…" : "Add to chat"}
                 </button>
                 <button
+                  ref={taskMenuButton}
                   type="button"
                   disabled={contextBusy}
-                  className="h-7 shrink-0 rounded-md px-2 text-accent hover:bg-accent/10 disabled:opacity-40"
-                  onClick={() => void prepareSelected(false)}
+                  aria-haspopup="menu"
+                  aria-expanded={taskMenuOpen}
+                  title="Send the selected changes to a task"
+                  className="flex h-7 shrink-0 items-center gap-0.5 rounded-md px-2 text-accent hover:bg-accent/10 disabled:opacity-40"
+                  onClick={() => setTaskMenuOpen((open) => !open)}
                 >
-                  Send to agent…
+                  Task
+                  <ChevronDown className="size-3" strokeWidth={1.75} />
                 </button>
               </>
             ) : null}
             <button
               type="button"
-              aria-pressed={selectingContext}
-              className="h-7 shrink-0 rounded-md px-2 text-content/65 hover:bg-content/5"
+              aria-label="Cancel selection"
+              title="Cancel selection"
+              className="grid size-7 shrink-0 place-items-center rounded-md text-content/65 hover:bg-content/5"
               onClick={toggleContextSelection}
             >
-              Cancel
+              <X className="size-3.5" strokeWidth={1.75} />
             </button>
           </div>
+          {taskMenuOpen ? (
+            <ContextTaskMenu
+              anchor={taskMenuButton}
+              tasks={contextTasks}
+              onPick={(taskId) => void prepareSelected({ taskId })}
+              onNewTask={() => void prepareSelected({ newTask: true })}
+              onClose={() => setTaskMenuOpen(false)}
+            />
+          ) : null}
           {contextError ? (
             <p role="alert" className="px-3 pb-1.5 text-[11px] text-red-400">
               {contextError}
@@ -1934,4 +1974,76 @@ function sameIndex(prev: GitDiffIndex | null, next: GitDiffIndex): boolean {
       file.unstaged === other.unstaged
     );
   });
+}
+
+/** Task target menu for prepared change context — existing tasks, or a new
+ * task whose sheet opens with the selection summarized into its brief. */
+function ContextTaskMenu({
+  anchor,
+  tasks,
+  onPick,
+  onNewTask,
+  onClose,
+}: {
+  anchor: React.RefObject<HTMLButtonElement | null>;
+  tasks: readonly import("../lib/taskWorkspaces").TaskWorkspace[];
+  onPick: (taskId: string) => void;
+  onNewTask: () => void;
+  onClose: () => void;
+}) {
+  const itemClass =
+    "flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5";
+  return (
+    <Popover
+      anchor={anchor}
+      align="end"
+      onDismiss={onClose}
+      role="menu"
+      aria-label="Send changes to a task"
+      className="w-64 overflow-hidden"
+    >
+      <div className="px-1.5 py-1.5">
+        <button
+          type="button"
+          role="menuitem"
+          className={itemClass}
+          onClick={onNewTask}
+        >
+          <Plus className="size-3.5 shrink-0 text-content/50" strokeWidth={1.75} />
+          <span className="min-w-0 flex-1 truncate">New task…</span>
+        </button>
+        {tasks.length ? (
+          <div
+            role="separator"
+            className="mx-1 my-1 border-t border-content/10"
+          />
+        ) : null}
+        {tasks.map((task) => {
+          const project = projectForTask(task);
+          const projectLabel = project
+            ? project.name?.trim() ||
+              (project.anchor ? projectName(project.anchor) : "Project")
+            : "";
+          return (
+            <button
+              type="button"
+              role="menuitem"
+              key={task.id}
+              className={itemClass}
+              onClick={() => onPick(task.id)}
+            >
+              <Task
+                className="size-3.5 shrink-0 text-content/50"
+                strokeWidth={1.75}
+              />
+              <span className="min-w-0 flex-1 truncate">{task.name}</span>
+              <span className="shrink-0 truncate text-[10px] text-content/40">
+                {projectLabel}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </Popover>
+  );
 }

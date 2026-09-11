@@ -83,6 +83,8 @@ type Props = {
   /** An inbox item the new task starts linked to. */
   initialTickets?: LinkedWorkItem[];
   initialName?: string;
+  /** Prepared change context summarized for the shared brief. */
+  initialBrief?: string;
   onClose: () => void;
   onCreated?: (taskId: string) => void;
 };
@@ -109,6 +111,7 @@ export function TaskCreateSheet({
   editingTaskId,
   initialTickets,
   initialName,
+  initialBrief,
   onClose,
   onCreated,
 }: Props) {
@@ -134,7 +137,7 @@ export function TaskCreateSheet({
   );
 
   const [name, setName] = useState(editingTask?.name ?? initialName ?? "");
-  const [brief, setBrief] = useState(editingTask?.brief ?? "");
+  const [brief, setBrief] = useState(editingTask?.brief ?? initialBrief ?? "");
   const [selected, setSelected] = useState<string[]>(
     () => editingTask?.children.map((child) => child.repositoryId) ?? [],
   );
