@@ -1396,6 +1396,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     pub(crate) fn verify_wsl_round_trip(cwd: &str) {
         let (_dir, store) = store();
         let root = project_root(cwd).unwrap();
