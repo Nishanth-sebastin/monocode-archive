@@ -6135,7 +6135,14 @@ export default function App({
           editingTaskId={taskSheet.editingTaskId}
           initialTickets={taskSheet.initialTickets}
           initialName={taskSheet.initialName}
-          onCreated={setFocusTaskId}
+          onCreated={(taskId) => {
+            setFocusTaskId(taskId);
+            setProjectRailOpen((open) => {
+              if (open) return open;
+              saveProjectRailOpen(true);
+              return true;
+            });
+          }}
           onClose={() => setTaskSheet(null)}
         />
       )}
