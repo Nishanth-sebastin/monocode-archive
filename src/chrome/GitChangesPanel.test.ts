@@ -21,6 +21,7 @@ vi.mock("./GitHistoryGraph", () => ({
   loadGraphPanelHeight: () => 180,
   saveGraphPanelHeight: () => {},
 }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (command: string) =>
     command === "git_diff_index"
@@ -141,4 +142,35 @@ it("updates PR and CI rows when their exact conversation associations change", a
     await act(async () => saveAzurePrAssociation(null, "/repo", "feature", "owner", association.target));
     expect(prRow().textContent).not.toContain("Fix login");
   } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+});
+
+it("routes GitHub rows externally and keeps an Azure CI override independent", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", { getItem: (key: string) => rows.get(key) ?? null, setItem: (key: string, value: string) => rows.set(key, value) });
+  const { invoke } = await import("@tauri-apps/api/core");
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  const { saveDeliveryProvider } = await import("../lib/deliveryProviders");
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "azure_ci_context") return {cwd:"/github",branch:"feature",commit:"head",remotes:[{name:"origin",url:"https://github.com/team/repo"}]};
+    if (command === "git_pr_status") return {number:5,title:"Fix",state:"OPEN",url:"https://github.com/team/repo/pull/5"};
+    return original(command, args);
+  });
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host), open = vi.fn();
+  const row = (label: string) => host.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement;
+  try {
+    await act(async () => root.render(createElement(GitChangesPanel, {cwd:"/github",sourceSessionId:"gh-owner",enabled:true,onOpenDelivery:open,onOpenFile:vi.fn(),onOpenAllChanges:vi.fn(),onOpenCommit:vi.fn()})));
+    expect(row("Pull requests").textContent).toContain("GitHub");
+    expect(row("CI").textContent).toContain("GitHub");
+    await act(async () => row("CI").click());
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/team/repo/pull/5/checks");
+    expect(open).not.toHaveBeenCalled();
+    await act(async () => saveDeliveryProvider("/github", "feature", "gh-owner", "ci", "azure"));
+    expect(row("CI").textContent).toContain("Azure Pipelines");
+    expect(row("Pull requests").textContent).toContain("GitHub");
+    await act(async () => row("CI").click());
+    expect(open).toHaveBeenCalledWith("/github", {kind:"ci",branch:"feature",sourceSessionId:"gh-owner"});
+  } finally { await act(async () => root.unmount()); host.remove(); vi.mocked(invoke).mockImplementation(original); vi.unstubAllGlobals(); }
 });

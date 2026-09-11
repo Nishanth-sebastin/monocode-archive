@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { InboxView } from "./InboxView";
-import { clearInboxCache } from "../lib/githubTasks";
+import { clearInboxCache, listInboxItems } from "../lib/githubTasks";
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
   convertFileSrc: (path: string) => path,
@@ -14,6 +14,21 @@ vi.mock("./AgentMarkdown", () => ({
   AgentMarkdown: ({ text }: { text: string }) => createElement("p", null, text),
 }));
 vi.mock("../chrome/WindowControls", () => ({ WindowControls: () => null }));
+it("keeps distinct Azure PR and CI rows when Boards access fails", async () => {
+  vi.mocked(invoke).mockImplementation(async cmd => {
+    if (cmd === "azure_status") return { connected: true, site: "https://dev.azure.com/team", project: "Product", accountId: "ada" };
+    if (cmd.endsWith("_status")) return { connected: false };
+    if (cmd === "azure_list_items") throw new Error("Boards denied");
+    if (cmd === "azure_delivery_inbox") return { errors: [], items: ["pr", "ci"].map(kind => ({ kind, number: 7, title: kind, url: `https://dev.azure.com/team/Product/${kind}/7`, updatedAt: "2026-09-11", delivery: { kind, accountId: "ada", project: "Product", repository: "repo" } })) };
+    return [];
+  });
+  clearInboxCache();
+  const result = await listInboxItems([], { state: "open", search: "", assignedToMe: true }, { force: true });
+  expect(result.items.map(item => item.kind).sort()).toEqual(["ci", "pr"]);
+  expect(result.items.every(item => item.account === "ada" && item.provider === "azure")).toBe(true);
+  expect(result.errors.azure).toContain("Boards denied");
+  clearInboxCache();
+});
 it("keeps Azure identity, selected context and local project through Ask, Send and retry", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const stored = new Map<string, string>([["monocode.inboxSource", "azure"]]);
@@ -33,6 +48,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
       };
     if (cmd === "git_github_status") return { installed: true, connected: true };
     if (cmd.endsWith("_status")) return { connected: false };
+    if (cmd === "azure_delivery_inbox") return {items:[],errors:[]};
     if (cmd === "azure_list_items") {
       if (fail) throw new Error("Azure denied access");
       return {
@@ -100,7 +116,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
       ),
     );
     expect(
-      container.querySelector('[role="tab"][aria-label="Azure Boards"]'),
+      container.querySelector('[role="tab"][aria-label="Azure DevOps"]'),
     ).not.toBeNull();
     expect(container.querySelector('[aria-label="Azure DevOps images"]')?.textContent).toContain("comment-only.png");
     expect(invoke).toHaveBeenCalledWith("azure_image", expect.objectContaining({ attachmentId: "comment-image" }));
@@ -150,7 +166,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
     expect(container.querySelector("h1")?.textContent).toBe("Ticket 141");
     expect(container.textContent).toContain("Azure denied access");
     expect(container.querySelector("textarea")).toBeNull();
-    await click(button("Ask"));
+    await click(button("Ask agent"));
     await click(button("Open discussion"));
     expect(onAsk).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "azure", id: "141" }),
@@ -273,7 +289,7 @@ it("keeps Azure identity, selected context and local project through Ask, Send a
     }));
     await act(async () => renderTarget(false));
     await act(async () => renderTarget(true));
-    expect(container.querySelector('[aria-label="Azure Boards"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector('[aria-label="Azure DevOps"]')?.getAttribute("aria-selected")).toBe("true");
     expect(container.querySelector("h1")?.textContent).toBe("Ticket 142");
   } finally {
     await act(async () => root.unmount());

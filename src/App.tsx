@@ -1,5 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { gitPrStatus } from "./lib/fs";
+import { openGitHubDelivery, saveDeliveryProvider } from "./lib/deliveryProviders";
 import { ciContext } from "./lib/azurePipelines";
 import type { DeliveryTabSource } from "./lib/layout";
 import { RepairStatus } from "./chrome/RepairStatus";
@@ -5122,25 +5121,15 @@ export default function App({
     if (!current()) return;
     if (!session || session.inboxAsk) throw new Error("Open a workspace conversation for this item before reviewing PRs or CI.");
     const cwd = sessionWorkCwd(session);
-    if (provider === "github") {
-      const url = prUrl ?? (await gitPrStatus(cwd))?.url;
-      if (!current()) return;
-      if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
-        throw new Error("The conversation checkout changed. Open its review again.");
-      if (!url) throw new Error("No GitHub PR found for this conversation’s branch. Open the PR branch or choose another delivery provider.");
-      const target = new URL(url);
-      if (target.protocol !== "https:" || target.username || target.password || !/^\/[^/]+\/[^/]+\/pull\/\d+\/?$/.test(target.pathname))
-        throw new Error("GitHub returned an invalid PR link.");
-      target.search = "";
-      target.hash = "";
-      target.pathname = target.pathname.replace(/\/$/, "") + (kind === "ci" ? "/checks" : "");
-      await openUrl(target.href);
-      return;
-    }
     const checkout = await ciContext(cwd);
     if (!current()) return;
     if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
       throw new Error("The conversation checkout changed. Open its review again.");
+    saveDeliveryProvider(cwd, checkout.branch, sessionId, kind, provider);
+    if (provider === "github") {
+      await openGitHubDelivery(cwd, kind, () => current() && sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) === cwd, prUrl);
+      return;
+    }
     const existing = tabsRef.current.find(tab => leafIds(tab.layout).includes(sessionId));
     const base = existing ?? newTab(sessionId);
     const file = { id: crypto.randomUUID(), path: kind === "pr" ? "Pull requests" : "CI", cwd, delivery: { kind, branch: checkout.branch, sourceSessionId: sessionId } };

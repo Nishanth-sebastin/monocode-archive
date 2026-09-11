@@ -150,7 +150,10 @@ export async function contextFromTicketDescriptions(
       try {
         const kind = item.kind === "pr" ? "pr" : "issue";
         let details;
-        if (item.provider === "jira") {
+        if (item.delivery) {
+          const { azureDeliveryContext } = await import("./azureInbox");
+          details = {body:(await azureDeliveryContext(item,1)).description};
+        } else if (item.provider === "jira") {
           const provider = await import("./jira");
           details =
             provider.peekJiraDetails(item) ??

@@ -1,3 +1,5 @@
+import { ACTION_FILLED, ACTION_OUTLINE, ACTION_GHOST } from "../chrome/inboxActions";
+import { AzureInboxDetail } from "../chrome/AzureInboxDetail";
 import { Select } from "../chrome/Select";
 import { inboxComposerCard } from "../lib/githubTasks";
 import { contextTicketKey } from "../lib/agentContext";
@@ -183,12 +185,6 @@ import {
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 420;
 
-// One height for the whole detail action row; `border` is inside it, so the
-// outline variant lines up with the filled and ghost ones.
-const ACTION = "inline-flex items-center gap-1.5 rounded-md px-3 text-[12px]";
-const ACTION_FILLED = `${ACTION} h-6.5 bg-content text-background-base hover:bg-content/80`;
-const ACTION_OUTLINE = `${ACTION} h-7 border border-content/15 text-content/80 hover:bg-content/5`;
-const ACTION_GHOST = `${ACTION} h-7 text-content/70 hover:bg-content/10 hover:text-content`;
 const DEFAULT_WIDTH = 280;
 
 let rememberedWidth = DEFAULT_WIDTH;
@@ -281,7 +277,7 @@ function InboxSourceTab({
       role="tab"
       aria-selected={selected}
       onClick={() => onSelect(source)}
-      aria-label={source === "azure" ? "Azure Boards" : label}
+      aria-label={source === "azure" ? "Azure DevOps" : label}
       className={`flex h-6 min-w-0 flex-1 items-center justify-center rounded-md px-0.5 text-[11px] leading-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-content/50 ${
         selected
           ? "bg-content/10 text-content"
@@ -388,6 +384,7 @@ export function InboxView({
   const selectionCount = editingLinks ? conversationLinks.length : selectedTickets.size;
   const ticketSelected = (item: InboxItem) => pendingTickets.get(contextTicketKey(item)) ?? (editingLinks ? conversationLinks.some(link => inboxItemMatchesLinkedWorkItem(item, link)) : selectedTickets.has(contextTicketKey(item)));
   const toggleTicket = (item: InboxItem) => {
+    if (item.delivery) return;
     setSelectionError("");
     if (editingLinks) {
       const key = contextTicketKey(item);
@@ -1042,7 +1039,7 @@ export function InboxView({
           </div>
         ) : visibleItems.length === 0 ? (
           <p className="px-3 py-2 text-[12px] text-content/50">
-            {source === "azure" ? "No Azure work items match these filters" : source === "jira" ? "No Jira issues match these filters" : narrowedByUser
+            {source === "azure" ? "No Azure items match these filters" : source === "jira" ? "No Jira issues match these filters" : narrowedByUser
               ? searchNarrowed
                 ? source === "linear"
                   ? "No matching Linear issues"
@@ -1071,7 +1068,7 @@ export function InboxView({
               const projectId = projectKey(item.projectPath);
               return (
                 <li key={key} className={selectingTickets ? "flex items-center gap-1" : undefined}>
-                  {selectingTickets ? <ContextCheckbox label={`Select ${item.provider} ${item.identifier || item.number} ${item.title}`} checked={ticketSelected(item)} disabled={pendingTickets.has(contextTicketKey(item))} onChange={() => toggleTicket(item)} /> : null}
+                  {selectingTickets ? <ContextCheckbox label={`Select ${item.provider} ${item.identifier || item.number} ${item.title}`} checked={ticketSelected(item)} disabled={!!item.delivery || pendingTickets.has(contextTicketKey(item))} onChange={() => toggleTicket(item)} /> : null}
                   <div className="min-w-0 flex-1"><InboxCard
                     item={item}
                     active={selected != null && key === inboxItemKey(selected)}
@@ -1245,6 +1242,7 @@ function InboxDetailBody({
       </div>
     );
   }
+  if (item.delivery) return <AzureInboxDetail key={inboxItemKey(item)} item={item} cwd={cwd} projects={projects} relatedSessions={relatedSessions} onOpenSession={onOpenSession} onDiscuss={onDiscuss} />;
   return (
     <InboxDetail
       key={inboxItemKey(item)}
@@ -1270,6 +1268,7 @@ type InboxStatusMark = {
 /** Status reads from the glyph first and the color second, so it survives color blindness. */
 function inboxStatusMark(item: InboxItem): InboxStatusMark {
   const label = inboxItemStatus(item);
+  if (item.kind === "ci") return {Icon:CircleX,className:"text-rose-400/90",label:"Needs attention"};
   const pr = item.kind === "pr";
   if (label === "Draft") {
     return {
@@ -1315,7 +1314,7 @@ const InboxCard = memo(function InboxCard({
   useInboxSeenTick();
   const status = inboxStatusMark(item);
   const kindLabel =
-    item.kind === "pr"
+    item.kind === "ci" ? "CI" : item.kind === "pr"
       ? item.provider === "gitlab"
         ? "Merge request"
         : "Pull request"
@@ -1357,7 +1356,7 @@ const InboxCard = memo(function InboxCard({
             strokeWidth={1.75}
           />
           <span className="min-w-0 truncate text-[11px] text-content/50">
-            {jira || azure ? "" : `${kindLabel} · `}{inboxItemRef(item)}
+            {jira || (azure && !item.delivery) ? "" : `${kindLabel} · `}{inboxItemRef(item)}
           </span>
         </span>
         {relatedSessionCount > 0 || time || unseen ? (
@@ -1978,8 +1977,9 @@ export function InboxDetail({
             }}
             className={item.kind === "pr" ? ACTION_FILLED : ACTION_OUTLINE}
           >
-            <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask
+            <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask agent
           </button>
+          {isPr ? <button type="button" className={ACTION_OUTLINE} onClick={() => setTab("code")}>Review PR</button> : null}
           <button
             type="button"
             onClick={() => void openUrl(item.url)}
@@ -1988,8 +1988,8 @@ export function InboxDetail({
             <ExternalLink className="size-3.5" strokeWidth={1.75} />
             {item.kind === "pr"
               ? gitlab
-                ? "Review on GitLab"
-                : "Review on GitHub"
+                ? "Open on GitLab"
+                : "Open on GitHub"
               : azure ? "Open in Azure DevOps" : jira ? "Open in Jira" : linear
                 ? "Open in Linear"
                 : gitlab

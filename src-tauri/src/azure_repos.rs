@@ -479,6 +479,7 @@ fn summary(pr: &Value) -> Result<Value, String> {
     })).collect::<Vec<_>>()).unwrap_or_default();
     Ok(json!({
         "pullRequestId":number,"title":text(pr,"title")?.chars().take(500).collect::<String>(),
+        "description":pr["description"].as_str().unwrap_or("").chars().take(64000).collect::<String>(),
         "status":pr["status"].as_str().unwrap_or("unknown"),"isDraft":pr["isDraft"].as_bool().unwrap_or(false),
         "sourceRefName":text(pr,"sourceRefName")?,"targetRefName":text(pr,"targetRefName")?,
         "lastMergeSourceCommit":pr["lastMergeSourceCommit"],"lastMergeTargetCommit":pr["lastMergeTargetCommit"],
@@ -540,6 +541,7 @@ pub async fn azure_pr_list(
 pub enum PrSection {
     Summary,
     Threads,
+    Workitems,
     Iterations,
     Changes,
     Policies,
@@ -601,9 +603,11 @@ pub async fn azure_pr_read(
                 json!({"path":selected,"originalPath":old_path,"original":original,"modified":modified,"sourceCommit":source,"baseCommit":base,"iteration":iteration})
             }
             PrSection::Summary => json!({"pr":summary(&pr)?}),
-            PrSection::Threads | PrSection::Iterations => {
+            PrSection::Threads | PrSection::Iterations | PrSection::Workitems => {
                 let suffix = if matches!(section, PrSection::Threads) {
                     "threads"
+                } else if matches!(section, PrSection::Workitems) {
+                    "workitems"
                 } else {
                     "iterations"
                 };

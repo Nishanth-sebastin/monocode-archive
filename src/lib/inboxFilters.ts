@@ -381,7 +381,7 @@ export function applyInboxFilters(
 ): InboxItem[] {
   const scoped = source ? filterInboxByProvider(items, source) : [...items];
   const hiddenProjects = source === "linear" || source === "jira" || source === "azure" ? [] : filters.hiddenProjects;
-  const hiddenKinds = source === "linear" || source === "jira" || source === "azure" ? [] : filters.hiddenKinds;
+  const hiddenKinds = source === "linear" || source === "jira" ? [] : filters.hiddenKinds;
   return filterInboxItems(
     filterInboxByStatus(
       filterInboxByTime(
@@ -405,7 +405,7 @@ export function statusFilterForSource(
   status: InboxStatusFilter,
   source?: InboxSource,
 ): InboxStatusFilter {
-  if (source !== "linear" && source !== "jira" && source !== "azure") return status;
+  if (source !== "linear" && source !== "jira") return status;
   return {
     open: status.open,
     closed: status.closed,
@@ -415,7 +415,7 @@ export function statusFilterForSource(
 }
 
 function isGithubInboxKind(value: unknown): value is InboxKind {
-  return value === "issue" || value === "pr";
+  return value === "issue" || value === "pr" || value === "ci" || value === "azure";
 }
 
 function isTimeFilter(value: unknown): value is InboxTimeFilter {

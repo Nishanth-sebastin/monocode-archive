@@ -1,0 +1,49 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { gitPrStatus } from "./fs";
+import { parseAzurePrLocation } from "./azureRepos";
+
+export type DeliveryProvider = "github" | "azure";
+export const DELIVERY_PROVIDERS_CHANGED = "monocode:delivery-providers";
+const key = "monocode.deliveryProviders.v1";
+const scope = (cwd: string, branch: string, session: string | undefined, kind: string) => JSON.stringify([cwd, branch, session ?? "", kind]);
+function saved(): Record<string, DeliveryProvider> {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "{}");
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).filter(([, provider]) => provider === "github" || provider === "azure").slice(-100)) as Record<string, DeliveryProvider> : {};
+  } catch { return {}; }
+}
+export function deliveryProvider(cwd: string, branch: string, session: string | undefined, kind: "pr" | "ci") {
+  return saved()[scope(cwd, branch, session, kind)];
+}
+export function saveDeliveryProvider(cwd: string, branch: string, session: string | undefined, kind: "pr" | "ci", provider: DeliveryProvider | "") {
+  const values = saved(), id = scope(cwd, branch, session, kind);
+  delete values[id];
+  if (provider) values[id] = provider;
+  localStorage.setItem(key, JSON.stringify(Object.fromEntries(Object.entries(values).slice(-100))));
+  window.dispatchEvent(new Event(DELIVERY_PROVIDERS_CHANGED));
+}
+export function repositoryProvider(remotes: { name: string; url: string }[], upstream?: string | null): DeliveryProvider | undefined {
+  const selected = remotes.find(remote => remote.name === upstream);
+  const providers = (selected ? [selected] : remotes).map(({ url }) => {
+    try { parseAzurePrLocation(url); return "azure" as const; } catch { /* Not Azure. */ }
+    if (/^git@github\.com:[^/]+\/[^/]+$/.test(url)) return "github" as const;
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname === "github.com" && ["https:", "ssh:"].includes(parsed.protocol) && !parsed.password && /^\/[^/]+\/[^/]+\/?$/.test(parsed.pathname)) return "github" as const;
+    } catch { /* Unknown remotes require a choice. */ }
+    return undefined;
+  });
+  return providers.length && providers.every(value => value === providers[0]) ? providers[0] : undefined;
+}
+export async function openGitHubDelivery(cwd: string, kind: "pr" | "ci", current: () => boolean, prUrl?: string) {
+  const url = prUrl ?? (await gitPrStatus(cwd))?.url;
+  if (!current()) return;
+  if (!url) throw new Error("No GitHub PR found for this branch. Open the PR branch or choose another provider.");
+  const target = new URL(url);
+  if (target.protocol !== "https:" || target.username || target.password || !/^\/[^/]+\/[^/]+\/pull\/\d+\/?$/.test(target.pathname)) throw new Error("GitHub returned an invalid PR link.");
+  target.search = "";
+  target.hash = "";
+  target.pathname = target.pathname.replace(/\/$/, "") + (kind === "ci" ? "/checks" : "");
+  await openUrl(target.href);
+}

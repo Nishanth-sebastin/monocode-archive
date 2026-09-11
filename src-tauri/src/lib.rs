@@ -3,6 +3,7 @@ mod wsl;
 use tauri::Manager;
 
 mod azure;
+mod azure_inbox;
 mod azure_pipelines;
 mod azure_repos;
 mod chat_background;
@@ -267,6 +268,8 @@ pub fn run() {
             jira::jira_issue_content,
             jira::jira_image,
             azure::azure_status,
+            azure_inbox::azure_delivery_inbox,
+            azure_inbox::azure_ci_inbox_summary,
             azure::azure_set_config,
             azure::azure_list_items,
             azure::azure_options,

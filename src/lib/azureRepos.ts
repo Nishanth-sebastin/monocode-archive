@@ -35,7 +35,7 @@ export type AzurePrPage<T> = {
   revision: string;
 };
 export type AzurePrSection =
-  "threads" | "iterations" | "changes" | "policies" | "statuses";
+  "threads" | "workitems" | "iterations" | "changes" | "policies" | "statuses";
 export type AzurePrThread = {
   id: number;
   status: string;

@@ -45,6 +45,7 @@ const message = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
 export function AzurePrReview({
+  embedded = false,
   cwd,
   branch,
   sourceSessionId,
@@ -53,6 +54,7 @@ export function AzurePrReview({
   onClose,
   onReveal,
 }: {
+  embedded?: boolean;
   cwd: string;
   branch: string;
   sourceSessionId?: string;
@@ -81,6 +83,7 @@ export function AzurePrReview({
   }, [cwd, branch, sourceSessionId]);
   return enabled ? (
     <AzurePrPanel
+      embedded={embedded}
       key={azurePrScope(cwd, branch, sourceSessionId)}
       cwd={cwd}
       branch={branch}
@@ -95,6 +98,7 @@ export function AzurePrReview({
 }
 
 function AzurePrPanel({
+  embedded,
   cwd,
   branch,
   sourceSessionId,
@@ -104,6 +108,7 @@ function AzurePrPanel({
   onClose,
   onReveal,
 }: {
+  embedded?: boolean;
   cwd: string;
   branch: string;
   sourceSessionId?: string;
@@ -170,7 +175,7 @@ function AzurePrPanel({
     };
   }, []);
   useEffect(() => {
-    if (!status?.connected || !status.accountId) {
+    if (embedded || !status?.connected || !status.accountId) {
       setDiscovery(null);
       return;
     }
@@ -301,12 +306,12 @@ function AzurePrPanel({
         ref={body}
         className="mx-auto w-full max-w-3xl space-y-3 px-5 py-4 text-[12px]"
       >
-        <header className="flex items-center justify-between gap-3 border-b border-content/10 pb-3">
+        {!embedded ? <header className="flex items-center justify-between gap-3 border-b border-content/10 pb-3">
           <h2 className="text-[13px] font-medium">Pull requests</h2>
           <span className="truncate text-content/50" title={cwd}>
             {branch || "Detached checkout"}
           </span>
-        </header>
+        </header> : null}
         <details className="text-content/60" open={!connected}>
           <summary className="cursor-pointer focus-visible:outline-accent">
             Azure Repos
@@ -339,7 +344,7 @@ function AzurePrPanel({
             {connected ? "Connection settings" : "Connect Azure DevOps"}
           </button>
         </details>
-        {!choosing && association ? (
+        {!embedded && !choosing && association ? (
           <button className={button} onClick={() => setChoosing(true)}>
             Choose another PR
           </button>
@@ -561,9 +566,9 @@ function AzurePrPanel({
         ) : null}
         {association ? (
           <section className="space-y-2 border-t border-content/10 pt-3">
-            <h3 className="font-medium">
+            {!embedded ? <h3 className="font-medium">
               #{association.pr.pullRequestId} {association.pr.title}
-            </h3>
+            </h3> : null}
             <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-content/55">
               <span className="rounded bg-content/5 px-1.5 py-0.5 text-[11px] text-content/75">{association.pr.isDraft ? "Draft" : association.pr.status === "active" ? "Open" : association.pr.status}</span>
               <span>{association.projectName}/{association.repositoryName}</span>
@@ -582,7 +587,7 @@ function AzurePrPanel({
                 <br />
                 Source / target revision: {association.revision}
               </p>
-              <button
+              {!embedded ? <button
                 className={button}
                 disabled={busy}
                 onClick={() => {
@@ -596,7 +601,7 @@ function AzurePrPanel({
                 }}
               >
                 Unlink PR
-              </button>
+              </button> : null}
             </details>
             <div className="flex flex-wrap gap-1">
               <button
@@ -606,7 +611,7 @@ function AzurePrPanel({
               >
                 Refresh PR
               </button>
-              <button
+              {!embedded ? <button
                 className={button}
                 onClick={() => {
                   void openUrl(azurePrUrl(association.target)).catch((error) =>
@@ -615,7 +620,7 @@ function AzurePrPanel({
                 }}
               >
                 Open in Azure
-              </button>
+              </button> : null}
             </div>
             {!sameAccount ? (
               <p role="alert">
