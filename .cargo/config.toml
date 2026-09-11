@@ -1,3 +1,0 @@
-[env]
-# Tauri's Windows tests need the application manifest linked into test binaries.
-__TAURI_WORKSPACE__ = "true"
