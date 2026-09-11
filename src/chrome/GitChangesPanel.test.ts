@@ -15,6 +15,8 @@ it("keeps changes selected until the chosen recipient accepts context", async ()
   const button = (text: string) => [...host.querySelectorAll("button")].find(button => button.textContent?.trim() === text)!;
   try {
     await act(async () => root.render(createElement(GitChangesPanel, { cwd: "/repo", sourceSessionId: "original", enabled: true, onOpenFile: vi.fn(), onOpenAllChanges: vi.fn(), onOpenCommit: vi.fn() })));
+    expect([...host.querySelectorAll("button")].filter(button => button.textContent?.trim() === "Review Azure PRs")).toHaveLength(1);
+    expect([...host.querySelectorAll("button")].filter(button => button.textContent?.includes("Azure Pipelines"))).toHaveLength(1);
     await act(async () => button("Select changes").click());
     const checkbox = () => host.querySelector('input[type="checkbox"]') as HTMLInputElement;
     await act(async () => checkbox().click());

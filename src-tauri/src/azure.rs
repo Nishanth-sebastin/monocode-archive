@@ -126,6 +126,26 @@ pub(crate) fn request(
     query: &[(&str, String)],
     body: Option<Value>,
 ) -> Result<Value, String> {
+    let (raw, _) = request_bytes(
+        config,
+        path,
+        query,
+        body,
+        "application/json",
+        2 * 1024 * 1024,
+    )?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| "Azure returned an invalid response. Reconnect or retry.".into())
+}
+
+pub(crate) fn request_bytes(
+    config: &AzureConfig,
+    path: &str,
+    query: &[(&str, String)],
+    body: Option<Value>,
+    accept: &str,
+    limit: usize,
+) -> Result<(Vec<u8>, Option<String>), String> {
     // All paths are built here from encoded components, never from a provider response URL.
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(20))
@@ -135,7 +155,7 @@ pub(crate) fn request(
     let mut req = agent
         .request(if body.is_some() { "POST" } else { "GET" }, &url)
         .set("Authorization", &config.authorization())
-        .set("Accept", "application/json");
+        .set("Accept", accept);
     for (key, value) in query {
         req = req.query(key, value);
     }
@@ -152,17 +172,23 @@ pub(crate) fn request(
         }
         Err(_) => return Err("Cannot reach Azure DevOps. Check your connection and retry.".into()),
     };
+    let continuation = response.header("x-ms-continuationtoken").map(String::from);
+    if continuation
+        .as_ref()
+        .is_some_and(|value| value.len() > 2048 || value.chars().any(char::is_control))
+    {
+        return Err("Azure returned an invalid continuation token. Refresh the list.".into());
+    }
     let mut raw = Vec::new();
     response
         .into_reader()
-        .take(2 * 1024 * 1024 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut raw)
         .map_err(|_| "Cannot read Azure response")?;
-    if raw.len() > 2 * 1024 * 1024 {
+    if raw.len() > limit {
         return Err("Azure response is too large. Choose a narrower query.".into());
     }
-    serde_json::from_slice(&raw)
-        .map_err(|_| "Azure returned an invalid response. Reconnect or retry.".into())
+    Ok((raw, continuation))
 }
 
 fn version() -> [(&'static str, String); 1] {
@@ -243,8 +269,11 @@ pub async fn azure_set_config(
         if repos.is_ok() {
             config.capabilities.push("Repos".into());
         }
+        if request(&config, &format!("{project}/_apis/build/definitions"), &[("api-version", "7.1".into()), ("$top", "1".into())], None).is_ok() {
+            config.capabilities.push("Pipelines".into());
+        }
         if config.capabilities.is_empty() {
-            return Err("Azure account authenticated, but no read capability was verified. Check the project and grant Work Items (Read) for Boards or Code (Read) for Repos. Existing connection was preserved.".into());
+            return Err("Azure account authenticated, but no read capability was verified. Check the project and grant Work Items (Read) for Boards Code (Read) for Repos, or Build (Read) for Pipelines. Existing connection was preserved.".into());
         }
         fs::create_dir_all(path.parent().ok_or("Cannot locate Azure settings")?)
             .map_err(|_| "Cannot create Azure settings")?;
