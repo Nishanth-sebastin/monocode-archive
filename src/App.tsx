@@ -4590,6 +4590,50 @@ export default function App({
     [appendTab, onSubmit, sessionDefaults?.runtimeMode],
   );
 
+  /** Sessions whose pending approval or question needs the user now. */
+  const needsInputSessionIds = useMemo(
+    () =>
+      new Set(
+        sessions.filter(sessionNeedsInput).map((session) => session.id),
+      ),
+    [sessions],
+  );
+
+  /** Opens one task child: its ordinary session, focused like any session
+   * pick. Children without a session fall back to their working copy. */
+  const onOpenTaskChild = useCallback(
+    async (taskId: string, childId: string) => {
+      const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+      const child = task?.children.find((entry) => entry.id === childId);
+      if (!task || !child) return;
+      recordTaskActiveChild(taskId, childId);
+      if (child.sessionIds.length) {
+        await onSelectHistorySession(child.sessionIds[0]);
+        return;
+      }
+      if (child.workingCopy) onSelectProject(child.workingCopy);
+    },
+    [onSelectHistorySession, onSelectProject],
+  );
+
+  /** Opens a task's last active child, or its first session-owning child. */
+  const onOpenTask = useCallback(
+    (taskId: string) => {
+      const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+      if (!task) return;
+      const child =
+        task.children.find(
+          (entry) =>
+            entry.id === task.lastActiveChildId && entry.sessionIds.length,
+        ) ??
+        task.children.find((entry) => entry.sessionIds.length) ??
+        task.children.find((entry) => entry.workingCopy) ??
+        task.children[0];
+      if (child) void onOpenTaskChild(taskId, child.id);
+    },
+    [onOpenTaskChild],
+  );
+
   const onUpdatePlan = useCallback(
     (sessionId: string, blockId: string, text: string) => {
       setSessions((prev) =>
@@ -5854,6 +5898,8 @@ export default function App({
     onSteerQueuedMessage,
     onResumeQueue,
     onAddIssues: async (sessionId: string) => { await onOpenInboxSession(sessionId); setInboxSelectionRevision(value => value + 1); },
+    onOpenTaskChild,
+    needsInputSessionIds,
     onInboxCardDismiss,
     onNoteCardDismiss,
     onHandoffCardDismiss,
@@ -5935,6 +5981,8 @@ export default function App({
         onSelectProject={onSelectProject}
         onOpenProject={pickProject}
         onNewTask={onNewTask}
+        onOpenTask={onOpenTask}
+        needsInputSessionIds={needsInputSessionIds}
         onRemoveProject={onRemoveProject}
         onNew={onNew}
         openSessions={openProjectSessions}

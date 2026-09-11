@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
+  CircleDot,
   Folder,
   FolderOpen,
   FolderTree,
@@ -115,6 +116,14 @@ import { TabGroupMenu, type TabGroupMenuExtraItem } from "./TabGroupMenu";
 import { TerminalSpinner } from "./TerminalSpinner";
 import { Popover } from "./Popover";
 import { WorktreePanel } from "./WorktreePicker";
+import {
+  archiveTask,
+  removeTask,
+  subscribeTaskWorkspaces,
+  taskWorkspacesSnapshot,
+  loadTaskWorkspaces,
+  type TaskWorkspace,
+} from "../lib/taskWorkspaces";
 import type { SettingsSectionId } from "../lib/settings";
 
 const REVEAL_LABEL = IS_MAC
@@ -177,6 +186,9 @@ type Props = {
   onSelectProject: (path: string) => void;
   onOpenProject: () => void;
   onNewTask?: (path: string, projectId?: string) => void;
+  onOpenTask?: (taskId: string) => void;
+  /** Sessions currently needing input (approval or question) — per-child dots. */
+  needsInputSessionIds?: ReadonlySet<string>;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
   liveAgents?: LiveAgent[];
   activeSessionId?: string;
@@ -211,6 +223,8 @@ export function ProjectRail({
   onSelectProject,
   onOpenProject,
   onNewTask,
+  onOpenTask,
+  needsInputSessionIds,
   onRemoveProject,
   liveAgents = [],
   activeSessionId,
@@ -258,6 +272,30 @@ export function ProjectRail({
     path: string;
     projectId?: string;
   } | null>(null);
+  const [taskMenu, setTaskMenu] = useState<{
+    x: number;
+    y: number;
+    task: TaskWorkspace;
+  } | null>(null);
+  const tasksRaw = useSyncExternalStore(
+    subscribeTaskWorkspaces,
+    taskWorkspacesSnapshot,
+  );
+  const tasksByProject = useMemo(() => {
+    const tasks = loadTaskWorkspaces();
+    const map = new Map<string, TaskWorkspace[]>();
+    for (const task of tasks) {
+      if (task.archived) continue;
+      const list = map.get(task.projectId) ?? [];
+      list.push(task);
+      map.set(task.projectId, list);
+    }
+    for (const list of map.values())
+      list.sort((a, b) => b.createdAt - a.createdAt);
+    return map;
+    // tasksRaw changes on every store write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasksRaw]);
   const [removing, setRemoving] = useState<{
     path: string;
     name: string;
@@ -359,6 +397,10 @@ export function ProjectRail({
     event.preventDefault();
     event.stopPropagation();
     openProjectMenu(item, event.clientX, event.clientY);
+  };
+
+  const openTaskMenu = (task: TaskWorkspace, x: number, y: number) => {
+    setTaskMenu({ task, x, y });
   };
 
   const onProjectRename = (groupId: string, label: string) => {
@@ -587,6 +629,10 @@ export function ProjectRail({
                 onTogglePin={onTogglePin}
                 onContextMenu={onProjectContextMenu}
                 onOpenMenu={openProjectMenu}
+                tasksByProject={tasksByProject}
+                needsInputSessionIds={needsInputSessionIds}
+                onOpenTask={onOpenTask}
+                onTaskMenu={openTaskMenu}
                 groupLabels={groupLabels}
                 groupColors={groupColors}
                 groupCustomColors={groupCustomColors}
@@ -610,6 +656,10 @@ export function ProjectRail({
               onTogglePin={onTogglePin}
               onContextMenu={onProjectContextMenu}
               onOpenMenu={openProjectMenu}
+              tasksByProject={tasksByProject}
+              needsInputSessionIds={needsInputSessionIds}
+              onOpenTask={onOpenTask}
+              onTaskMenu={openTaskMenu}
               groupLabels={groupLabels}
               groupColors={groupColors}
               groupCustomColors={groupCustomColors}
@@ -720,6 +770,52 @@ export function ProjectRail({
           }}
           onClose={() => setRepositoriesProject(null)}
         />
+      ) : null}
+      {taskMenu ? (
+        <Popover
+          anchor={{ x: taskMenu.x, y: taskMenu.y }}
+          side="right"
+          onDismiss={() => setTaskMenu(null)}
+          role="menu"
+          aria-label={`Task ${taskMenu.task.name}`}
+          className="overflow-hidden"
+        >
+          <div className="px-1.5 py-1.5">
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+              onClick={() => {
+                onOpenTask?.(taskMenu.task.id);
+                setTaskMenu(null);
+              }}
+            >
+              Open task
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+              onClick={() => {
+                archiveTask(taskMenu.task.id);
+                setTaskMenu(null);
+              }}
+            >
+              Archive task
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-red-400 hover:bg-content/5"
+              onClick={() => {
+                removeTask(taskMenu.task.id);
+                setTaskMenu(null);
+              }}
+            >
+              Delete task
+            </button>
+          </div>
+        </Popover>
       ) : null}
       <div
         role="separator"
@@ -953,6 +1049,10 @@ function ProjectSection({
   onTogglePin,
   onContextMenu,
   onOpenMenu,
+  tasksByProject,
+  needsInputSessionIds,
+  onOpenTask,
+  onTaskMenu,
   groupLabels,
   groupColors,
   groupCustomColors,
@@ -977,6 +1077,10 @@ function ProjectSection({
     x: number,
     y: number,
   ) => void;
+  tasksByProject: ReadonlyMap<string, TaskWorkspace[]>;
+  needsInputSessionIds?: ReadonlySet<string>;
+  onOpenTask?: (taskId: string) => void;
+  onTaskMenu: (task: TaskWorkspace, x: number, y: number) => void;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
   groupCustomColors: Record<string, string>;
@@ -1024,6 +1128,10 @@ function ProjectSection({
             onTogglePin={onTogglePin}
             onContextMenu={onContextMenu}
             onOpenMenu={onOpenMenu}
+            tasks={item.project ? (tasksByProject.get(item.project.id) ?? []) : []}
+            needsInputSessionIds={needsInputSessionIds}
+            onOpenTask={onOpenTask}
+            onTaskMenu={onTaskMenu}
             groupLabels={groupLabels}
             groupColors={groupColors}
             groupCustomColors={groupCustomColors}
@@ -1301,15 +1409,93 @@ function ProjectRepositoryRow({
   );
 }
 
+/** One task row inside an expanded project — name, ticket ref, repository
+ * count, needs-input dot. Opens the task's last active repository child. */
+function TaskRailRow({
+  task,
+  needsInput,
+  onOpen,
+  onMenu,
+}: {
+  task: TaskWorkspace;
+  needsInput: boolean;
+  onOpen: () => void;
+  onMenu: (event: MouseEvent<HTMLElement>) => void;
+}) {
+  const repos = `${task.children.length} ${task.children.length === 1 ? "repo" : "repos"}`;
+  const ticket = task.ticket?.identifier;
+  const title = [
+    ticket,
+    task.name,
+    repos,
+    needsInput ? "Needs input" : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="group/task relative flex min-w-0 items-center">
+      <button
+        type="button"
+        title={title}
+        aria-label={title}
+        onClick={onOpen}
+        onContextMenu={onMenu}
+        className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pl-2 pr-7 text-left text-xs text-content/55 outline-none hover:bg-content/5 hover:text-content/85 focus-visible:ring-1 focus-visible:ring-content/30"
+      >
+        <CircleDot
+          className="size-3 shrink-0 text-content/40"
+          strokeWidth={1.5}
+        />
+        <span className="min-w-0 flex-1 truncate">
+          {ticket ? `${ticket} ` : ""}
+          {task.name}
+        </span>
+        {needsInput ? (
+          <span
+            title="A repository in this task needs input"
+            className="size-1.5 shrink-0 rounded-full bg-amber-400"
+          />
+        ) : null}
+        <span className="shrink-0 text-[10px] text-content/35 group-hover/task:invisible">
+          {repos}
+        </span>
+      </button>
+      <button
+        type="button"
+        title="Task menu"
+        aria-label={`Menu for task ${task.name}`}
+        className="invisible absolute right-1 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content focus-visible:ring-1 focus-visible:ring-content/30 group-hover/task:visible group-focus-within/task:visible"
+        onClick={onMenu}
+      >
+        <MoreHorizontal className="size-3" />
+      </button>
+    </div>
+  );
+}
+
 function ProjectFamilyCard(
   props: Parameters<typeof ProjectCard>[0] & {
     family?: RepositoryFamily;
     families: ReadonlyMap<string, RepositoryFamily>;
     cwd: string;
     busyPaths: Set<string>;
+    tasks: TaskWorkspace[];
+    needsInputSessionIds?: ReadonlySet<string>;
+    onOpenTask?: (taskId: string) => void;
+    onTaskMenu: (task: TaskWorkspace, x: number, y: number) => void;
   },
 ) {
-  const { family, families, cwd, busyPaths, onSelect } = props;
+  const {
+    family,
+    families,
+    cwd,
+    busyPaths,
+    onSelect,
+    tasks,
+    needsInputSessionIds,
+    onOpenTask,
+    onTaskMenu,
+  } = props;
   const project = props.item.project;
   const multiRepo = (project?.repositories.length ?? 0) > 1;
   const anchor = useRef<HTMLButtonElement>(null);
@@ -1397,6 +1583,27 @@ function ProjectFamilyCard(
             : undefined
         }
       />
+      {visible && tasks.length ? (
+        <div className="my-0.5 ml-5">
+          {tasks.map((task) => (
+            <TaskRailRow
+              key={task.id}
+              task={task}
+              needsInput={task.children.some((entry) =>
+                entry.sessionIds.some(
+                  (id) => needsInputSessionIds?.has(id),
+                ),
+              )}
+              onOpen={() => onOpenTask?.(task.id)}
+              onMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onTaskMenu(task, event.clientX, event.clientY);
+              }}
+            />
+          ))}
+        </div>
+      ) : null}
       {visible && multiRepo && project && (
         <div className="my-0.5 ml-5">
           {project.repositories.map((repo) => (

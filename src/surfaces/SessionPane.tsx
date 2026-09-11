@@ -1,4 +1,5 @@
 import { SessionIssues } from "../chrome/SessionIssues";
+import { TaskScopeChip } from "../chrome/TaskScopeChip";
 import { requestAgentContext, contextFromText } from "../lib/agentContext";
 import { ChevronDown, GripVertical, X } from "../chrome/icons";
 import {
@@ -101,6 +102,8 @@ type Props = {
   onSteerQueuedMessage: (sessionId: string, messageId: string) => void;
   onResumeQueue: (sessionId: string) => void;
   onAddIssues?: (sessionId: string) => void;
+  onOpenTaskChild?: (taskId: string, childId: string) => void;
+  needsInputSessionIds?: ReadonlySet<string>;
   onInboxCardDismiss?: (sessionId: string, fileId?: string) => void;
   onNoteCardDismiss?: (sessionId: string) => void;
   onHandoffCardDismiss?: (sessionId: string) => void;
@@ -169,6 +172,8 @@ export const SessionPane = memo(function SessionPane({
   onSteerQueuedMessage,
   onResumeQueue,
   onAddIssues,
+  onOpenTaskChild,
+  needsInputSessionIds,
   onInboxCardDismiss,
   onNoteCardDismiss,
   onHandoffCardDismiss,
@@ -438,6 +443,11 @@ export const SessionPane = memo(function SessionPane({
           </button>
         </div>
       ) : null}
+      <TaskScopeChip
+        sessionId={session.id}
+        needsInputIds={needsInputSessionIds}
+        onOpenChild={onOpenTaskChild}
+      />
       <SessionIssues session={session} onAdd={onAddIssues ? () => onAddIssues(session.id) : undefined} />
       <div ref={transcriptScope} className="@container relative min-h-0 flex-1">
         {isEmpty ? (
