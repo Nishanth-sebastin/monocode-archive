@@ -162,7 +162,7 @@ export function ModelPicker({
       if (target.closest(".monocode-terminal")) return true;
       return Boolean(
         target.closest(
-          "[data-file-picker], [data-branch-picker], [data-skill-picker], [data-mention-picker], [data-access-picker], [data-model-settings]",
+          "[data-file-picker], [data-branch-picker], [data-skill-picker], [data-mention-picker], [data-attach-picker], [data-access-picker], [data-model-settings]",
         ),
       );
     };

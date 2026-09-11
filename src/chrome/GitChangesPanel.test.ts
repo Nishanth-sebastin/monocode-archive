@@ -123,7 +123,7 @@ it("moves a staged file immediately and refreshes the index once", async () => {
     behind: 0,
     files: [
       {
-        path: "/repo/a.ts",
+        path: "/repo-stage/a.ts",
         relative: "a.ts",
         status: "modified",
         staged,
@@ -141,7 +141,7 @@ it("moves a staged file immediately and refreshes the index once", async () => {
     }
     if (command === "git_diff_index") {
       indexCalls += 1;
-      if (indexCalls > 1) {
+      if (indexCalls === 2) {
         // Hold the post-mutation refresh open so the optimistic move is
         // observable before the refreshed index lands.
         await new Promise<void>((resolve) => {
@@ -163,7 +163,7 @@ it("moves a staged file immediately and refreshes the index once", async () => {
     await act(async () =>
       root.render(
         createElement(GitChangesPanel, {
-          cwd: "/repo",
+          cwd: "/repo-stage",
           sourceSessionId: "owner",
           enabled: true,
           onOpenFile: vi.fn(),

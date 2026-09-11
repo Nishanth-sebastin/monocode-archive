@@ -293,11 +293,15 @@ export function GitChangesPanel({
         fill
         onOpenFile={onOpenFile}
         onOpenAllChanges={onOpenAllChanges}
-        onMutated={(paths, apply) => {
+        onMutated={(paths, apply, touchWorktree) => {
           if (apply) patch(apply);
           notifyGitChanged(cwd);
-          invalidateWatchedFiles(paths);
-          window.setTimeout(() => invalidateWatchedFiles(paths), 150);
+          // Only discard and sync rewrite worktree bytes; staging and
+          // committing must not reload open editors.
+          if (touchWorktree) {
+            invalidateWatchedFiles(paths);
+            window.setTimeout(() => invalidateWatchedFiles(paths), 150);
+          }
         }}
       />
       {graphExpanded ? (
@@ -365,6 +369,7 @@ function ChangedFiles({
   onMutated: (
     paths?: string[],
     apply?: (index: GitDiffIndex) => GitDiffIndex,
+    touchWorktree?: boolean,
   ) => void;
 }) {
   const [selectingContext, setSelectingContext] = useState(false);
@@ -430,8 +435,11 @@ function ChangedFiles({
   const onMutatedRef = useRef(onMutated);
   onMutatedRef.current = onMutated;
   const mutated = useCallback(
-    (paths?: string[], apply?: (index: GitDiffIndex) => GitDiffIndex) =>
-      onMutatedRef.current(paths, apply),
+    (
+      paths?: string[],
+      apply?: (index: GitDiffIndex) => GitDiffIndex,
+      touchWorktree?: boolean,
+    ) => onMutatedRef.current(paths, apply, touchWorktree),
     [],
   );
   const onOpenFileRef = useRef(onOpenFile);
@@ -522,24 +530,26 @@ function ChangedFiles({
       action: "stage" | "unstage" | "discard",
     ) => {
       if (busyRef.current) return;
-      if (action === "discard") {
-        const name = basename(file.relative);
-        const untracked = file.status === "untracked";
-        const ok = await confirmNative(
-          untracked
-            ? `Delete untracked file ${name}?`
-            : `Discard changes in ${name}? This cannot be undone.`,
-          untracked ? "Delete" : "Discard",
-        );
-        if (!ok) return;
-      }
       setBusy(file.relative);
       try {
+        if (action === "discard") {
+          const name = basename(file.relative);
+          const untracked = file.status === "untracked";
+          const ok = await confirmNative(
+            untracked
+              ? `Delete untracked file ${name}?`
+              : `Discard changes in ${name}? This cannot be undone.`,
+            untracked ? "Delete" : "Discard",
+          );
+          if (!ok) return;
+        }
         if (action === "stage") await gitStageFile(cwd, file.relative);
         else if (action === "unstage") await gitUnstageFile(cwd, file.relative);
         else await gitDiscardFile(cwd, file.relative);
-        mutated([file.path], (index) =>
-          indexAfterFileAction(index, file.relative, action),
+        mutated(
+          [file.path],
+          (index) => indexAfterFileAction(index, file.relative, action),
+          action === "discard",
         );
       } catch (error) {
         fail(error);
@@ -552,29 +562,30 @@ function ChangedFiles({
 
   const runAll = async (action: "stage" | "unstage" | "discard") => {
     if (busyRef.current) return;
-    if (action === "discard") {
-      const n = unstaged.length;
-      if (n === 0) return;
-      const only = unstaged[0];
-      const untrackedOnly = n === 1 && only?.status === "untracked";
-      const ok = await confirmNative(
-        untrackedOnly
-          ? `Delete untracked file ${basename(only.relative)}?`
-          : n === 1 && only
-            ? `Discard changes in ${basename(only.relative)}? This cannot be undone.`
-            : `Discard all unstaged changes in ${n} files? This cannot be undone.`,
-        untrackedOnly ? "Delete" : "Discard",
-      );
-      if (!ok) return;
-    }
     setBusy(action);
     try {
+      if (action === "discard") {
+        const n = unstaged.length;
+        if (n === 0) return;
+        const only = unstaged[0];
+        const untrackedOnly = n === 1 && only?.status === "untracked";
+        const ok = await confirmNative(
+          untrackedOnly
+            ? `Delete untracked file ${basename(only.relative)}?`
+            : n === 1 && only
+              ? `Discard changes in ${basename(only.relative)}? This cannot be undone.`
+              : `Discard all unstaged changes in ${n} files? This cannot be undone.`,
+          untrackedOnly ? "Delete" : "Discard",
+        );
+        if (!ok) return;
+      }
       if (action === "stage") await gitStageAll(cwd);
       else if (action === "unstage") await gitUnstageAll(cwd);
       else await gitDiscardAll(cwd);
       mutated(
         action === "discard" ? unstaged.map((file) => file.path) : undefined,
         (index) => indexAfterAllAction(index, action),
+        action === "discard",
       );
     } catch (error) {
       fail(error);
@@ -597,15 +608,15 @@ function ChangedFiles({
 
   const commit = async (push: boolean, createPr = false) => {
     if (!canCommit) return;
-    if (
-      (push || createPr) &&
-      !(await confirmDefault(createPr ? "pr" : "push"))
-    ) {
-      return;
-    }
     setBusy(createPr ? "pr" : "commit");
     setMenuOpen(false);
     try {
+      if (
+        (push || createPr) &&
+        !(await confirmDefault(createPr ? "pr" : "push"))
+      ) {
+        return;
+      }
       await gitCommit(cwd, message);
       if (push || createPr) await gitPush(cwd);
       setMessage("");
@@ -627,11 +638,11 @@ function ChangedFiles({
     setBusy("sync");
     try {
       await gitSync(cwd);
-      mutated();
+      mutated(undefined, undefined, true);
       reloadPr();
     } catch (error) {
       fail(error);
-      mutated();
+      mutated(undefined, undefined, true);
     } finally {
       setBusy(null);
     }
@@ -652,9 +663,9 @@ function ChangedFiles({
 
   const createPr = async () => {
     if (!canCreatePr) return;
-    if (!(await confirmDefault("pr"))) return;
     setBusy("pr");
     try {
+      if (!(await confirmDefault("pr"))) return;
       if ((index?.ahead ?? 0) > 0) await gitPush(cwd);
       await openCreatedPr();
       mutated();
@@ -1658,10 +1669,19 @@ function useDiffIndex(
   );
   const indexRef = useRef(index);
   indexRef.current = index;
+  // The cwd that produced indexRef.current. Between a cwd-change render and
+  // this hook's effect, indexRef still holds the previous repo's index —
+  // patch must not apply to or store under the new cwd.
+  const indexCwd = useRef(cwd);
+  // Bumped by every local patch so an in-flight load started before the
+  // mutation cannot clobber optimistic state with a pre-mutation snapshot.
+  const patchEpoch = useRef(0);
 
   // Apply a local mutation result instantly; the next load still reconciles.
   const patch = useCallback(
     (update: (index: GitDiffIndex) => GitDiffIndex) => {
+      patchEpoch.current += 1;
+      if (indexCwd.current !== cwd) return;
       const prev = indexRef.current;
       if (!prev) return;
       const next = update(prev);
@@ -1677,14 +1697,18 @@ function useDiffIndex(
     if (!enabled || !cwd || cwd === "~") {
       return;
     }
+    indexCwd.current = cwd;
     const cached = cachedIndex(cwd);
-    if (cached && !sameIndex(indexRef.current, cached)) {
+    if (
+      cached ? !sameIndex(indexRef.current, cached) : indexRef.current !== null
+    ) {
       indexRef.current = cached;
       setIndex(cached);
     }
     let cancelled = false;
     let inFlight = false;
     let pending = false;
+    let selfNotify = false;
 
     const load = async () => {
       if (inFlight) {
@@ -1693,27 +1717,39 @@ function useDiffIndex(
       }
       if (document.hidden) return;
       inFlight = true;
+      const epoch = patchEpoch.current;
       try {
         const next = await gitDiffIndex(cwd);
         if (cancelled) return;
-        const prev = indexRef.current;
-        if (sameIndex(prev, next)) return;
-        indexByCwd.set(cwd, next);
-        indexRef.current = next;
-        setIndex(next);
         applyProjectDiffStats(cwd, {
           files: next.files.length,
           additions: next.additions,
           deletions: next.deletions,
         });
+        // A patch landed while this fetch was in flight; the mutation's
+        // git-changed notification already queued a follow-up load.
+        if (patchEpoch.current !== epoch) return;
+        const prev = indexRef.current;
+        if (sameIndex(prev, next)) return;
+        indexByCwd.set(cwd, next);
+        indexRef.current = next;
+        setIndex(next);
         if (prev) {
           const paths = changedFilePaths(prev, next);
           invalidateWatchedFiles(paths);
-          notifyGitChanged(cwd);
+          // Fan the detected change out to other consumers without
+          // re-triggering this hook's own subscription into a second fetch.
+          selfNotify = true;
+          try {
+            notifyGitChanged(cwd);
+          } finally {
+            selfNotify = false;
+          }
         }
       } catch {
         if (!cancelled) {
           indexByCwd.delete(cwd);
+          indexRef.current = null;
           setIndex(null);
         }
       } finally {
@@ -1727,7 +1763,8 @@ function useDiffIndex(
 
     void load();
     const onResume = () => {
-      if (!document.hidden) void load();
+      if (selfNotify || document.hidden) return;
+      void load();
     };
     const timer = window.setInterval(onResume, GIT_POLL_MS);
     window.addEventListener("focus", onResume);
