@@ -210,6 +210,7 @@ pub fn run() {
             wsl::wsl_distributions,
             wsl::wsl_connect,
             wsl::wsl_resolve_harness,
+            wsl::wsl_resolve_agents,
             wsl::wsl_connected,
             default_cwd,
             home_dir,

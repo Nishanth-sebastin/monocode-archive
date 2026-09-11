@@ -198,6 +198,7 @@ import { nudgeWatchedFiles } from "./lib/fileWatch";
 import { type EditorNavigationTarget, type OpenFileFn } from "./lib/search";
 import {
   mergeModelSettings,
+  modelCatalogKey,
   preferredModelSettings,
   resolveModel,
   saveLastModelSettings,
@@ -928,9 +929,27 @@ export default function App({
     void probeHarnessAvailability();
     // Only the harnesses already in this window. Probing every installed CLI
     // at boot left unused agents (especially Pi) running in the background.
-    const harnesses = [
-      ...new Set(sessionsRef.current.map((session) => session.harness)),
-    ];
+    // Each WSL session probes inside its own distribution; a WSL session must
+    // not spawn the provider on the Windows host to learn its models.
+    const contexts = new Map<
+      string,
+      { cwd?: string; harnesses: Set<HarnessId> }
+    >();
+    for (const session of sessionsRef.current) {
+      const cwd = sessionWorkCwd(session);
+      const key = modelCatalogKey(cwd);
+      const context = contexts.get(key) ?? {
+        cwd: wslLocation(cwd) ? cwd : undefined,
+        harnesses: new Set<HarnessId>(),
+      };
+      context.harnesses.add(session.harness);
+      contexts.set(key, context);
+    }
+    for (const context of contexts.values()) {
+      if (!context.cwd) continue;
+      void refreshHarnessCatalogs([...context.harnesses], context.cwd);
+    }
+    const harnesses = [...(contexts.get("native")?.harnesses ?? [])];
     void refreshHarnessCatalogs(harnesses).then(() => {
       setSessions((prev) =>
         prev.map((session) => {
