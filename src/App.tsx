@@ -5,7 +5,7 @@ import { RepairStatus } from "./chrome/RepairStatus";
 import { assertRepairOwner, repairOwnerError, reserveRepair, updateRepair, validateRepair, OPEN_REPAIR, repairRecords, type RepairDelivery } from "./lib/repair";
 import { composeAgentContext } from "./lib/agentContext";
 import { AgentContextPicker } from "./chrome/AgentContextPicker";
-import { PREPARE_AGENT_CONTEXT, removeContextItem, contextFromTicketDescriptions, linkTicketContext, prepareSessionContext, contextFromTickets, type AgentContextRequest } from "./lib/agentContext";
+import { PREPARE_AGENT_CONTEXT, removeContextItem, contextFromTicketDescriptions, linkTicketContext, prepareSessionContext, type AgentContextRequest } from "./lib/agentContext";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -4379,7 +4379,7 @@ export default function App({
   const [taskSheet, setTaskSheet] = useState<{
     projectId: string;
     editingTaskId?: string;
-    initialTicket?: LinkedWorkItem;
+    initialTickets?: LinkedWorkItem[];
   } | null>(null);
   const onNewTask = useCallback(
     (path: string, projectId?: string) => {
@@ -4658,7 +4658,7 @@ export default function App({
       setInboxViewOpen(false);
       setTaskSheet({
         projectId: project.id,
-        ...(linked ? { initialTicket: linked } : {}),
+        ...(linked ? { initialTickets: [linked] } : {}),
       });
     },
     [
@@ -4667,6 +4667,35 @@ export default function App({
       projectCwd,
       sessionDefaults?.cwd,
     ],
+  );
+
+  /** Inbox multi-select — every picked item links onto the new task; the
+   * sheet opens with them all in its Issues row. */
+  const onSendItemsToTask = useCallback(
+    (items: InboxItem[]) => {
+      const linked = items
+        .map(linkedWorkItemFromInboxItem)
+        .filter((entry): entry is LinkedWorkItem => !!entry);
+      const path =
+        items[0]?.projectPath ||
+        active?.cwd ||
+        sessionDefaults?.cwd ||
+        projectCwd;
+      const project = path
+        ? ensureProjectForPath(
+            path,
+            getVerifiedFamilies().get(pathKey(path)),
+          )
+        : undefined;
+      if (!project)
+        throw new Error("Choose a local project before sending to an agent");
+      setInboxViewOpen(false);
+      setTaskSheet({
+        projectId: project.id,
+        ...(linked.length ? { initialTickets: linked } : {}),
+      });
+    },
+    [active?.cwd, projectCwd, sessionDefaults?.cwd],
   );
 
   const onUpdatePlan = useCallback(
@@ -6051,7 +6080,7 @@ export default function App({
         <TaskCreateSheet
           projectId={taskSheet.projectId}
           editingTaskId={taskSheet.editingTaskId}
-          initialTicket={taskSheet.initialTicket}
+          initialTickets={taskSheet.initialTickets}
           onClose={() => setTaskSheet(null)}
         />
       )}
@@ -6301,7 +6330,7 @@ export default function App({
             selectionRevision={inboxSelectionRevision}
             onCloseConversation={() => setInboxConversationId(undefined)}
             onToggleConversationTicket={onToggleConversationTicket}
-            onSelectTickets={items => setContextRequest({ context: contextFromTickets(items), tickets: items, cwd: sidebarCwd })}
+            onSendToTask={onSendItemsToTask}
             onOpenIntegrations={onOpenInboxIntegrations}
           />
         </div> : null}

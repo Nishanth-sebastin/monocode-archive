@@ -350,7 +350,7 @@ type Props = {
   selectionRevision?: number;
   onCloseConversation?: () => void;
   onToggleConversationTicket?: (sessionId: string, item: InboxItem, selected: boolean) => Promise<void>;
-  onSelectTickets?: (items: InboxItem[]) => void;
+  onSendToTask?: (items: InboxItem[]) => void;
   /** Opens Settings on the card where the given source is connected. */
   onOpenIntegrations?: (source: ConnectableInboxSource) => void;
 };
@@ -376,7 +376,7 @@ export function InboxView({
   selectionRevision = 0,
   onCloseConversation,
   onToggleConversationTicket,
-  onSelectTickets,
+  onSendToTask,
   onOpenIntegrations,
 }: Props) {
   const [selectingTickets, setSelectingTickets] = useState(false);
@@ -963,8 +963,12 @@ export function InboxView({
         {selectingTickets ? <>
           <span className="min-w-0 flex-1 text-[12px] text-content/60">{selectionCount} {editingLinks ? "linked" : "selected"}</span>
           {!editingLinks ? <button type="button" disabled={!selectionCount} onClick={() => {
-            try { onSelectTickets?.([...selectedTickets.values()]); } catch (error) { setSelectionError(String(error)); }
-          }} className="rounded-md bg-content/10 px-2 py-1 text-[11px] disabled:opacity-40">Open conversation</button> : null}
+            try {
+              onSendToTask?.([...selectedTickets.values()]);
+              setSelectedTickets(new Map());
+              setSelectingTickets(false);
+            } catch (error) { setSelectionError(String(error)); }
+          }} className="rounded-md bg-content/10 px-2 py-1 text-[11px] disabled:opacity-40">Send to task</button> : null}
           <button type="button" aria-label="Done selecting tickets" onClick={() => { setSelectedTickets(new Map()); setSelectingTickets(false); setSelectionError(""); }} className="rounded-md px-2 py-1 text-[11px] text-content/60 hover:bg-content/5">Done</button>
         </> : <>
 
@@ -993,7 +997,7 @@ export function InboxView({
         >
           <ListFilter className="size-3" strokeWidth={1.75} />
         </button>
-        {onSelectTickets ? <button type="button" aria-label="Select tickets" title="Select tickets" onClick={() => { setSelectingTickets(true); setFilterMenu(null); setSelectionError(""); }} className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content"><Check className="size-3.5" strokeWidth={1.75} /></button> : null}
+        {onSendToTask ? <button type="button" aria-label="Select tickets" title="Select tickets" onClick={() => { setSelectingTickets(true); setFilterMenu(null); setSelectionError(""); }} className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content"><Check className="size-3.5" strokeWidth={1.75} /></button> : null}
         <button
           type="button"
           title="Mark all as read"
