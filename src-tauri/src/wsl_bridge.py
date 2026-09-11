@@ -180,7 +180,7 @@ def bounded_tree(path):
                     pending.append(Path(entry.path))
 
 
-AGENT_PROVIDERS = ["claude", "codex", "cursor", "opencode", "pi", "omp", "fx", "grok"]
+AGENT_PROVIDERS = ["claude", "codex", "cursor", "opencode", "pi", "omp", "fx", "grok", "devin"]
 AGENT_NAMES = {
     "claude": ["claude"],
     "codex": ["codex"],
@@ -190,12 +190,14 @@ AGENT_NAMES = {
     "omp": ["omp"],
     "fx": ["fx"],
     "grok": ["grok"],
+    "devin": ["devin"],
 }
 # Linux tool folders that are not always exported to the login PATH.
 AGENT_FOLDERS = [
     ".local/bin", ".npm-global/bin", ".cargo/bin", ".bun/bin", "n/bin",
     ".volta/bin", ".asdf/shims", ".local/share/mise/shims",
     ".grok/bin", ".fx/bin", ".claude/local", ".local/share/claude",
+    ".local/share/devin/cli/_versions/current/bin",
 ]
 # Credential evidence checked without spawning the provider or reading secrets:
 # only env names and file existence are inspected. strict providers report a
@@ -224,6 +226,11 @@ AGENT_AUTH = {
     },
     "fx": {"env": ("AI_GATEWAY_API_KEY", "FX_AI_GATEWAY_API_KEY", "VERCEL_OIDC_TOKEN")},
     "grok": {"env": ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")},
+    "devin": {
+        "env": ("WINDSURF_API_KEY", "DEVIN_API_KEY"),
+        "files": (".local/share/devin/credentials.toml",),
+        "strict": True,
+    },
 }
 
 
@@ -271,6 +278,13 @@ def verify_agent(provider, name, candidate, resolved, home):
             return True
         code, text = agent_help(candidate, home)
         return code == 0 and ("grok build" in text or ("agent" in text and "stdio" in text))
+    if provider == "devin":
+        if "/devin/cli/" in resolved:
+            return True
+        if file_mentions(candidate, (b"cognition.ai", b"devin agent", b"devin acp", b"agent client protocol")):
+            return True
+        code, text = agent_help(candidate, home)
+        return code == 0 and "acp" in text and ("devin" in text or "agent client protocol" in text)
     return True
 
 
