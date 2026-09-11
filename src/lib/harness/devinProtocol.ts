@@ -13,6 +13,16 @@ import {
   extractToolPreview,
 } from "./preview";
 
+/**
+ * `elicitation.form` advertises form-mode questions; an empty `elicitation`
+ * object advertises no modes and Devin would never send `elicitation/create`.
+ */
+export const DEVIN_CLIENT_CAPABILITIES = {
+  fs: { readTextFile: false, writeTextFile: false },
+  terminal: false,
+  elicitation: { form: {} },
+};
+
 export const AUTH_HELP =
   "Devin CLI is not signed in. Run `devin auth login` in a terminal, then retry.";
 
@@ -502,28 +512,30 @@ export function devinAutoOption(
 export function devinPermissionOptionId(
   decision: ApprovalDecision,
   optionIds: string[],
-): string {
-  if (decision === "allow") {
-    return (
-      pickOption(optionIds, [
-        "allow-once",
-        "allow_once",
-        "allow-always",
-        "allow_always",
-        "allow",
-      ]) ?? "allow-once"
-    );
-  }
-  return (
-    pickOption(optionIds, [
-      "reject-once",
-      "reject_once",
-      "reject-always",
-      "reject_always",
-      "reject",
-      "deny",
-    ]) ?? "reject-once"
-  );
+): string | undefined {
+  const wanted =
+    decision === "allow"
+      ? [
+          "allow-once",
+          "allow_once",
+          "allow-always",
+          "allow_always",
+          "allow",
+        ]
+      : [
+          "reject-once",
+          "reject_once",
+          "reject-always",
+          "reject_always",
+          "reject",
+          "deny",
+        ];
+  const match = pickOption(optionIds, wanted);
+  if (match) return match;
+  // Never invent an id Devin did not offer; fall back to the first advertised
+  // option that looks like an allow/reject, else nothing.
+  const kind = decision === "allow" ? "allow" : "reject";
+  return optionIds.find((id) => id.toLowerCase().includes(kind));
 }
 
 /**
@@ -630,7 +642,7 @@ export function devinElicitationResult(
       continue;
     }
     const values = selected.flatMap((id) => {
-      if (field.values[id] != null) return [field.values[id]];
+      if (id in field.values) return [field.values[id]];
       if (custom) return [custom];
       return [];
     });

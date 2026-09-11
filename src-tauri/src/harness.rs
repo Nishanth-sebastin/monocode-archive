@@ -2131,10 +2131,11 @@ fn apply_grok_env(cmd: &mut Command) {
     }
 }
 
-/// Devin reads ~/.local/share/devin/credentials.toml; a DEVIN_API_KEY exported
-/// in the login shell is the supported alternative a bundled app never sees.
+/// Devin reads ~/.local/share/devin/credentials.toml; WINDSURF_API_KEY (or
+/// DEVIN_API_KEY) exported in the login shell is the supported alternative a
+/// bundled app never sees.
 fn apply_devin_env(cmd: &mut Command) {
-    for key in ["DEVIN_API_KEY"] {
+    for key in ["DEVIN_API_KEY", "WINDSURF_API_KEY"] {
         if std::env::var_os(key).is_some() {
             continue;
         }
@@ -2148,7 +2149,7 @@ static LOGIN_SHELL_ENV: Mutex<Option<HashMap<String, String>>> = Mutex::new(None
 
 /// Keys worth keeping out of `printenv`. PATH is the important one: a
 /// Finder-launched app inherits only launchd's bare PATH.
-const LOGIN_SHELL_KEYS: [&str; 7] = [
+const LOGIN_SHELL_KEYS: [&str; 8] = [
     "PATH",
     "AI_GATEWAY_API_KEY",
     "FX_AI_GATEWAY_API_KEY",
@@ -2156,6 +2157,7 @@ const LOGIN_SHELL_KEYS: [&str; 7] = [
     "XAI_API_KEY",
     "GROK_CODE_XAI_API_KEY",
     "DEVIN_API_KEY",
+    "WINDSURF_API_KEY",
 ];
 
 fn login_shell_path() -> Option<String> {

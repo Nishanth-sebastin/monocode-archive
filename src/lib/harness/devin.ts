@@ -13,6 +13,7 @@ import {
 } from "./child";
 import {
   AUTH_HELP,
+  DEVIN_CLIENT_CAPABILITIES,
   asRecord,
   devinAuthError,
   devinAutoOption,
@@ -86,12 +87,6 @@ const INIT_TIMEOUT_MS = 15_000;
 const SESSION_TIMEOUT_MS = 45_000;
 const CONTROL_TIMEOUT_MS = 15_000;
 const PROMPT_TIMEOUT_MS = 30 * 60_000;
-
-const CLIENT_CAPABILITIES = {
-  fs: { readTextFile: false, writeTextFile: false },
-  terminal: false,
-  elicitation: {},
-};
 
 const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
@@ -189,7 +184,14 @@ export async function compactDevinContext(
         throw error;
       }
     });
-  await live.turns;
+  try {
+    await live.turns;
+  } catch (error) {
+    if (liveByThread.get(input.sessionId) === live) {
+      await stopDevinSession(input.sessionId);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -401,12 +403,13 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   await spawnChild(input.sessionId, path, devinSpawnArgs(), input.cwd);
 
   try {
+    let initResult: unknown;
     try {
-      await acp.request(
+      initResult = await acp.request(
         "initialize",
         {
           protocolVersion: 1,
-          clientCapabilities: CLIENT_CAPABILITIES,
+          clientCapabilities: DEVIN_CLIENT_CAPABILITIES,
           clientInfo: { name: "monocode", version: "0.1.0" },
         },
         INIT_TIMEOUT_MS,
@@ -414,12 +417,14 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     } catch (error) {
       throw devinAuthError(error);
     }
+    const agentCaps = asRecord(asRecord(initResult)?.agentCapabilities);
+    const supportsLoad = agentCaps?.loadSession === true;
 
     let setup: unknown;
     let acpSessionId: string | undefined;
     let didLoad = false;
 
-    if (canLoad && resume) {
+    if (canLoad && resume && supportsLoad) {
       muteGate.current = true;
       try {
         setup = await acp.request(
@@ -433,7 +438,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
         );
         acpSessionId = sessionIdFromResult(setup) ?? resume.acpSessionId;
         didLoad = true;
-      } catch {
+      } catch (loadError) {
+        console.debug("[monocode] devin session/load failed", loadError);
         setup = undefined;
         acpSessionId = undefined;
         didLoad = false;
@@ -576,8 +582,12 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
         message: "Devin declined this turn.",
       });
     }
-    live.onEvent({ type: "message.completed" });
-    live.onEvent({ type: "reasoning.completed" });
+    // A folded steer may still be streaming; whichever prompt resolves last
+    // closes the blocks.
+    if (live.promptInFlight === 0) {
+      live.onEvent({ type: "message.completed" });
+      live.onEvent({ type: "reasoning.completed" });
+    }
   } catch (error) {
     if (live.cancelled) return;
     const detail = error instanceof Error ? error.message : String(error);
@@ -655,7 +665,7 @@ async function handleRequest(
     await handlePermission(live, id, params);
     return;
   }
-  if (method === "elicitation/create" || method.includes("elicit")) {
+  if (method === "elicitation/create") {
     await handleElicitation(live, id, params);
     return;
   }
@@ -685,9 +695,14 @@ async function handlePermission(live: Live, id: number, params: unknown) {
       readOnly ? "allow" : "deny",
       request.optionIds,
     );
-    await live.acp.respond(id, {
-      outcome: { outcome: "selected", optionId },
-    });
+    await live.acp
+      .respond(
+        id,
+        optionId
+          ? { outcome: { outcome: "selected", optionId } }
+          : { outcome: { outcome: "cancelled" } },
+      )
+      .catch(() => undefined);
     return;
   }
 
@@ -718,12 +733,15 @@ async function handlePermission(live: Live, id: number, params: unknown) {
   live.approvals.delete(id);
   live.onEvent({ type: "approval.resolved", requestId: id, decision });
 
-  await live.acp.respond(id, {
-    outcome: {
-      outcome: "selected",
-      optionId: devinPermissionOptionId(decision, request.optionIds),
-    },
-  });
+  const optionId = devinPermissionOptionId(decision, request.optionIds);
+  await live.acp
+    .respond(
+      id,
+      optionId
+        ? { outcome: { outcome: "selected", optionId } }
+        : { outcome: { outcome: "cancelled" } },
+    )
+    .catch(() => undefined);
 }
 
 async function handleElicitation(live: Live, id: number, params: unknown) {

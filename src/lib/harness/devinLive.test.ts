@@ -25,6 +25,7 @@ vi.mock("./child", () => ({
 const {
   sendDevinTurn,
   steerDevinTurn,
+  cancelDevinTurn,
   respondDevinApproval,
   stopDevinSession,
 } = await import("./devin");
@@ -95,7 +96,10 @@ describe("devin live turn sequence", () => {
     const turn = sendDevinTurn(baseInput(events, "hey") as never);
 
     await waitFor(() => byMethod("initialize").length > 0, "initialize");
-    reply(byMethod("initialize")[0].id, { protocolVersion: 1 });
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
     await waitFor(() => byMethod("session/new").length > 0, "session/new");
     const newMsg = byMethod("session/new")[0];
     expect(newMsg.params.cwd).toBe("/repo");
@@ -142,7 +146,10 @@ describe("devin live turn sequence", () => {
     const turn = sendDevinTurn(baseInput(events, "first", "t2") as never);
 
     await waitFor(() => byMethod("initialize").length > 0, "initialize");
-    reply(byMethod("initialize")[0].id, { protocolVersion: 1 });
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
     await waitFor(() => byMethod("session/new").length > 0, "session/new");
     reply(byMethod("session/new")[0].id, {
       ...SETUP,
@@ -180,7 +187,10 @@ describe("devin live turn sequence", () => {
     const turn = sendDevinTurn(baseInput(events, "run tests", "t3") as never);
 
     await waitFor(() => byMethod("initialize").length > 0, "initialize");
-    reply(byMethod("initialize")[0].id, { protocolVersion: 1 });
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
     await waitFor(() => byMethod("session/new").length > 0, "session/new");
     reply(byMethod("session/new")[0].id, {
       ...SETUP,
@@ -241,7 +251,10 @@ describe("devin live turn sequence", () => {
     const events: HarnessEvent[] = [];
     const turn = sendDevinTurn(baseInput(events, "hey", "t5") as never);
     await waitFor(() => byMethod("initialize").length > 0, "initialize");
-    reply(byMethod("initialize")[0].id, { protocolVersion: 1 });
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
     await waitFor(() => byMethod("session/new").length > 0, "session/new");
     reply(byMethod("session/new")[0].id, {
       ...SETUP,
@@ -255,7 +268,10 @@ describe("devin live turn sequence", () => {
     sent.length = 0;
     const turn2 = sendDevinTurn(baseInput(events, "back again", "t5") as never);
     await waitFor(() => byMethod("initialize").length > 0, "initialize 2");
-    reply(byMethod("initialize")[0].id, { protocolVersion: 1 });
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
     await waitFor(
       () => byMethod("session/load").length > 0,
       "session/load",
@@ -272,11 +288,75 @@ describe("devin live turn sequence", () => {
     await stopDevinSession("t5");
   });
 
+  it("cancel sends session/cancel and releases a pending approval", async () => {
+    const events: HarnessEvent[] = [];
+    const turn = sendDevinTurn(baseInput(events, "run tests", "t6") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
+    await waitFor(() => byMethod("session/new").length > 0, "session/new");
+    reply(byMethod("session/new")[0].id, {
+      ...SETUP,
+      modes: { ...SETUP.modes, currentModeId: "accept-edits" },
+    });
+    await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
+
+    // Park the turn on a supervised permission prompt, then cancel.
+    onLine!(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 88,
+        method: "session/request_permission",
+        params: {
+          sessionId: "S1",
+          toolCall: {
+            toolCallId: "call_2",
+            title: "Ran npm test",
+            kind: "execute",
+            status: "pending",
+          },
+          options: [
+            { optionId: "allow_once", name: "Allow once" },
+            { optionId: "reject_once", name: "Reject" },
+          ],
+        },
+      }),
+    );
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested",
+    );
+
+    await cancelDevinTurn("t6");
+    await turn.catch(() => undefined);
+
+    expect(
+      parse().some(
+        (m) =>
+          m.method === "session/cancel" && m.params?.sessionId === "S1",
+      ),
+    ).toBe(true);
+    // The pending permission was answered (denied) rather than left hanging.
+    const response = parse().find((m) => m.id === 88 && m.result);
+    expect(response).toBeDefined();
+    expect(
+      events.some(
+        (e) => e.type === "approval.resolved" && e.decision === "deny",
+      ),
+    ).toBe(true);
+    await stopDevinSession("t6");
+  });
+
   it("routes a child exit to the running turn's listener", async () => {
     const events: HarnessEvent[] = [];
     const turn = sendDevinTurn(baseInput(events, "hey", "t4") as never);
     await waitFor(() => byMethod("initialize").length > 0, "initialize");
-    reply(byMethod("initialize")[0].id, { protocolVersion: 1 });
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
     await waitFor(() => byMethod("session/new").length > 0, "session/new");
     reply(byMethod("session/new")[0].id, {
       ...SETUP,

@@ -10,6 +10,7 @@ import {
   watchChild,
 } from "./child";
 import {
+  DEVIN_CLIENT_CAPABILITIES,
   asRecord,
   devinConfigOptions,
   devinModelsFromConfig,
@@ -19,12 +20,6 @@ import {
 
 const DISCOVERY_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 12_000;
-
-const CLIENT_CAPABILITIES = {
-  fs: { readTextFile: false, writeTextFile: false },
-  terminal: false,
-  elicitation: {},
-};
 
 export function refreshDevinCatalog(cwd?: string): Promise<void> {
   return refreshModelCatalog("devin", cwd, () => discoverDevinModels(cwd));
@@ -82,7 +77,7 @@ async function discoverViaAcp(projectCwd?: string) {
           "initialize",
           {
             protocolVersion: 1,
-            clientCapabilities: CLIENT_CAPABILITIES,
+            clientCapabilities: DEVIN_CLIENT_CAPABILITIES,
             clientInfo: { name: "monocode", version: "0.1.0" },
           },
           REQUEST_TIMEOUT_MS,

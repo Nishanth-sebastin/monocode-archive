@@ -227,7 +227,7 @@ AGENT_AUTH = {
     "fx": {"env": ("AI_GATEWAY_API_KEY", "FX_AI_GATEWAY_API_KEY", "VERCEL_OIDC_TOKEN")},
     "grok": {"env": ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")},
     "devin": {
-        "env": ("DEVIN_API_KEY",),
+        "env": ("WINDSURF_API_KEY", "DEVIN_API_KEY"),
         "files": (".local/share/devin/credentials.toml",),
         "strict": True,
     },
