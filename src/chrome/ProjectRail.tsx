@@ -109,7 +109,6 @@ import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { ProjectBackgroundDialog } from "./ProjectBackgroundDialog";
 import { ProjectMascot } from "./ProjectMascot";
 import { RailAction, RailSearch } from "./RailAction";
-import { NewProjectGroupDialog } from "./NewProjectGroupDialog";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
 import { DevModeSlot, TabVisitNav } from "./TitleBar";
 import { SidebarUpdateFooter } from "./SidebarUpdate";
@@ -125,8 +124,10 @@ import {
   removeTask,
   repositoryForChild,
   subscribeTaskWorkspaces,
+  taskForSession,
   taskWorkspacesSnapshot,
   loadTaskWorkspaces,
+  type TaskChild,
   type TaskWorkspace,
 } from "../lib/taskWorkspaces";
 import type { SettingsSectionId } from "../lib/settings";
@@ -306,6 +307,45 @@ export function ProjectRail({
     // tasksRaw changes on every store write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasksRaw]);
+
+  /** Task owning the focused session — drives the scope highlight across all
+   * of its repository rows, not just the host cwd. */
+  const activeTask = useMemo(
+    () => (activeSessionId ? taskForSession(activeSessionId)?.task : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeSessionId, tasksRaw],
+  );
+  const scopeRepoIds = useMemo(
+    () =>
+      new Set(activeTask?.children.map((entry) => entry.repositoryId) ?? []),
+    [activeTask],
+  );
+  const taskBusyIds = useMemo(() => {
+    const busyIds = new Set(
+      liveAgents.filter((agent) => !agent.done).map((agent) => agent.id),
+    );
+    const set = new Set<string>();
+    for (const task of loadTaskWorkspaces()) {
+      if (task.archived) continue;
+      const ids = [
+        ...(task.sessionIds ?? []),
+        ...task.children.flatMap((entry) => entry.sessionIds),
+      ];
+      if (ids.some((id) => busyIds.has(id))) set.add(task.id);
+    }
+    return set;
+    // tasksRaw changes on every store write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasksRaw, liveAgents]);
+  const taskBySessionId = useMemo(() => {
+    const map = new Map<string, { task: TaskWorkspace; child: TaskChild }>();
+    for (const agent of liveAgents) {
+      const scope = taskForSession(agent.id);
+      if (scope) map.set(agent.id, scope);
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasksRaw, liveAgents]);
   const [removing, setRemoving] = useState<{
     path: string;
     name: string;
@@ -419,15 +459,14 @@ export function ProjectRail({
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
-  const [namingGroup, setNamingGroup] = useState(false);
 
   const closeAddMenu = () => setAddMenu(null);
 
   /** A pathless project — a pure group; opens its repositories sheet so the
-   * user can add members right away. */
-  const submitGroup = (name: string) => {
-    const project = createProjectGroup(name);
-    setNamingGroup(false);
+   * user can add members right away. The group is unnamed until renamed via
+   * its project menu. */
+  const submitGroup = () => {
+    const project = createProjectGroup();
     setRepositoriesProject({
       path: projectRailKey(project.id),
       projectId: project.id,
@@ -668,6 +707,9 @@ export function ProjectRail({
                 onNewTask={onNewTask}
                 onOpenTask={onOpenTask}
                 onTaskMenu={openTaskMenu}
+                activeTaskId={activeTask?.id}
+                scopeRepoIds={scopeRepoIds}
+                taskBusyIds={taskBusyIds}
                 groupLabels={groupLabels}
                 groupColors={groupColors}
                 groupCustomColors={groupCustomColors}
@@ -698,6 +740,9 @@ export function ProjectRail({
               onNewTask={onNewTask}
               onOpenTask={onOpenTask}
               onTaskMenu={openTaskMenu}
+              activeTaskId={activeTask?.id}
+              scopeRepoIds={scopeRepoIds}
+              taskBusyIds={taskBusyIds}
               groupLabels={groupLabels}
               groupColors={groupColors}
               groupCustomColors={groupCustomColors}
@@ -708,6 +753,7 @@ export function ProjectRail({
           <LiveAgentsPreview
             agents={liveAgents}
             activeSessionId={activeSessionId}
+            taskBySessionId={taskBySessionId}
             onSelect={onSelectAgent}
             groupLabels={groupLabels}
             groupColors={groupColors}
@@ -836,19 +882,13 @@ export function ProjectRail({
               className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
               onClick={() => {
                 closeAddMenu();
-                setNamingGroup(true);
+                submitGroup();
               }}
             >
               New project group…
             </button>
           </div>
         </Popover>
-      ) : null}
-      {namingGroup ? (
-        <NewProjectGroupDialog
-          onCancel={() => setNamingGroup(false)}
-          onCreate={submitGroup}
-        />
       ) : null}
       {taskMenu ? (
         <Popover
@@ -932,6 +972,7 @@ const LIVE_AGENT_CAP = 4;
 function LiveAgentsPreview({
   agents,
   activeSessionId,
+  taskBySessionId,
   onSelect,
   groupLabels,
   groupColors,
@@ -940,6 +981,10 @@ function LiveAgentsPreview({
 }: {
   agents: LiveAgent[];
   activeSessionId?: string;
+  taskBySessionId?: ReadonlyMap<
+    string,
+    { task: TaskWorkspace; child: TaskChild }
+  >;
   onSelect?: (sessionId: string) => void;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
@@ -996,6 +1041,7 @@ function LiveAgentsPreview({
               agent={agent}
               now={now}
               selected={agent.id === activeSessionId}
+              taskScope={taskBySessionId?.get(agent.id)}
               onSelect={onSelect}
               groupLabels={groupLabels}
               groupColors={groupColors}
@@ -1028,6 +1074,7 @@ function LiveAgentCard({
   agent,
   now,
   selected,
+  taskScope,
   onSelect,
   groupLabels,
   groupColors,
@@ -1037,6 +1084,7 @@ function LiveAgentCard({
   agent: LiveAgent;
   now: number;
   selected: boolean;
+  taskScope?: { task: TaskWorkspace; child: TaskChild };
   onSelect?: (sessionId: string) => void;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
@@ -1078,13 +1126,20 @@ function LiveAgentCard({
       }`}
     >
       <span className="flex min-w-0 items-center gap-2">
-        <ProjectMascot
-          project={seed}
-          color={color}
-          name={resolveTabGroupMascot(key, groupMascots)}
-          className="size-2 shrink-0"
-          active={live}
-        />
+        {taskScope ? (
+          <CircleDot
+            className={`size-3 shrink-0 ${live ? "text-accent" : "text-content/40"}`}
+            strokeWidth={1.75}
+          />
+        ) : (
+          <ProjectMascot
+            project={seed}
+            color={color}
+            name={resolveTabGroupMascot(key, groupMascots)}
+            className="size-2 shrink-0"
+            active={live}
+          />
+        )}
         {live ? (
           <p className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-snug">
             {agent.title}
@@ -1115,7 +1170,11 @@ function LiveAgentCard({
       </span>
       <span className="mt-1 flex min-w-0 items-center gap-1.5 pl-4 text-[11px] leading-tight text-content/45">
         <HarnessIcon harness={agent.harness} className="size-3 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{project}</span>
+        <span className="min-w-0 flex-1 truncate">
+          {taskScope
+            ? `${taskScope.task.name} · ${taskScope.task.children.length} repo${taskScope.task.children.length === 1 ? "" : "s"}`
+            : project}
+        </span>
         {elapsed ? (
           <span className="shrink-0 tabular-nums">{elapsed}</span>
         ) : null}
@@ -1144,6 +1203,9 @@ function ProjectSection({
   onNewTask,
   onOpenTask,
   onTaskMenu,
+  activeTaskId,
+  scopeRepoIds,
+  taskBusyIds,
   groupLabels,
   groupColors,
   groupCustomColors,
@@ -1173,6 +1235,9 @@ function ProjectSection({
   onNewTask?: (path: string, projectId?: string) => void;
   onOpenTask?: (taskId: string) => void;
   onTaskMenu: (task: TaskWorkspace, x: number, y: number) => void;
+  activeTaskId?: string;
+  scopeRepoIds?: ReadonlySet<string>;
+  taskBusyIds?: ReadonlySet<string>;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
   groupCustomColors: Record<string, string>;
@@ -1225,6 +1290,9 @@ function ProjectSection({
             onNewTask={onNewTask}
             onOpenTask={onOpenTask}
             onTaskMenu={onTaskMenu}
+            activeTaskId={activeTaskId}
+            scopeRepoIds={scopeRepoIds}
+            taskBusyIds={taskBusyIds}
             groupLabels={groupLabels}
             groupColors={groupColors}
             groupCustomColors={groupCustomColors}
@@ -1363,9 +1431,13 @@ function ProjectRepositoryRow({
   cwd,
   busyPaths,
   recents,
+  scoped = false,
   onSelect,
 }: {
   repo: ProjectRecord["repositories"][number];
+  /** The focused session's task spans this repository — secondary scope
+   * highlight alongside the host's `active` state. */
+  scoped?: boolean;
   families: ReadonlyMap<string, RepositoryFamily>;
   hidden: string[];
   cwd: string;
@@ -1416,11 +1488,11 @@ function ProjectRepositoryRow({
           type="button"
           title={prettyCwd(repo.anchor)}
           aria-current={active ? "true" : undefined}
-          className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pl-2 pr-7 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 group-hover/repository:pr-12 ${active ? "bg-content/10 text-content" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
+          className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pl-2 pr-7 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-content/30 group-hover/repository:pr-12 ${active ? "bg-content/10 text-content" : scoped ? "bg-accent/10 text-content/80 hover:bg-accent/15" : "text-content/55 hover:bg-content/5 hover:text-content/85"}`}
           onClick={openRepository}
         >
           <Folder
-            className="size-3 shrink-0 text-content/40"
+            className={`size-3 shrink-0 ${scoped ? "text-accent/70" : "text-content/40"}`}
             strokeWidth={1.5}
           />
           <span className="min-w-0 flex-1 truncate">{name}</span>
@@ -1524,11 +1596,17 @@ function ProjectRepositoryRow({
  * count, needs-input dot. Opens the task's last active repository child. */
 function TaskRailRow({
   task,
+  active = false,
+  busy = false,
   needsInput,
   onOpen,
   onMenu,
 }: {
   task: TaskWorkspace;
+  /** Its session is the focused one — persistent row highlight. */
+  active?: boolean;
+  /** Its agent is mid-turn — pulsing marker. */
+  busy?: boolean;
   needsInput: boolean;
   onOpen: () => void;
   onMenu: (event: MouseEvent<HTMLElement>) => void;
@@ -1556,11 +1634,19 @@ function TaskRailRow({
         aria-label={title}
         onClick={onOpen}
         onContextMenu={onMenu}
-        className="flex w-full min-w-0 flex-col rounded-md px-2 py-1.5 pr-7 text-left outline-none hover:bg-content/8 focus-visible:ring-1 focus-visible:ring-content/30"
+        className={`flex w-full min-w-0 flex-col rounded-md px-2 py-1.5 pr-7 text-left outline-none hover:bg-content/8 focus-visible:ring-1 focus-visible:ring-content/30 ${
+          active ? "bg-content/10" : ""
+        }`}
       >
         <span className="flex min-w-0 items-center gap-2">
           <CircleDot
-            className="size-3 shrink-0 text-content/40"
+            className={`size-3 shrink-0 ${
+              busy
+                ? "animate-pulse text-accent"
+                : active
+                  ? "text-accent/80"
+                  : "text-content/40"
+            }`}
             strokeWidth={1.5}
           />
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug text-content">
@@ -1611,6 +1697,9 @@ function ProjectFamilyCard(
     onNewTask?: (path: string, projectId?: string) => void;
     onOpenTask?: (taskId: string) => void;
     onTaskMenu: (task: TaskWorkspace, x: number, y: number) => void;
+    activeTaskId?: string;
+    scopeRepoIds?: ReadonlySet<string>;
+    taskBusyIds?: ReadonlySet<string>;
   },
 ) {
   const {
@@ -1624,6 +1713,9 @@ function ProjectFamilyCard(
     onNewTask,
     onOpenTask,
     onTaskMenu,
+    activeTaskId,
+    scopeRepoIds,
+    taskBusyIds,
   } = props;
   const project = props.item.project;
   const multiRepo = (project?.repositories.length ?? 0) > 1;
@@ -1751,6 +1843,8 @@ function ProjectFamilyCard(
               <TaskRailRow
                 key={task.id}
                 task={task}
+                active={task.id === activeTaskId}
+                busy={taskBusyIds?.has(task.id) ?? false}
                 needsInput={
                   task.sessionIds?.some((id) =>
                     needsInputSessionIds?.has(id),
@@ -1783,6 +1877,7 @@ function ProjectFamilyCard(
               cwd={cwd}
               busyPaths={busyPaths}
               recents={recents}
+              scoped={scopeRepoIds?.has(repo.id) ?? false}
               onSelect={onSelect}
             />
           ))}

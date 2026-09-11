@@ -1,6 +1,11 @@
 import { prettyCwd } from "../lib/paths";
 import type { DeliveryTabSource } from "../lib/layout";
 import { sessionWorkItems } from "../lib/sessionWorkItem";
+import {
+  subscribeTaskWorkspaces,
+  taskForSession,
+  taskWorkspacesSnapshot,
+} from "../lib/taskWorkspaces";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Archive,
@@ -2236,6 +2241,25 @@ function FolderRenameRow({
   );
 }
 
+/** Task marker on a session card — the session belongs to a task rather
+ * than a bare repository. Resolves against the task store itself so the
+ * card needs no extra props. */
+function SessionTaskChip({ sessionId }: { sessionId: string }) {
+  useSyncExternalStore(subscribeTaskWorkspaces, taskWorkspacesSnapshot);
+  const scope = taskForSession(sessionId);
+  if (!scope) return null;
+  return (
+    <span
+      title={`Task: ${scope.task.name}`}
+      aria-label={`Task ${scope.task.name}`}
+      className="flex shrink-0 items-center gap-0.5 rounded bg-accent/10 px-1 py-px text-[11px] tabular-nums text-accent"
+    >
+      <CircleDot className="size-3" strokeWidth={1.75} />
+      <span className="max-w-36 truncate">{scope.task.name}</span>
+    </span>
+  );
+}
+
 function SessionCard({
   session,
   isActive,
@@ -2544,7 +2568,17 @@ function SessionCard({
             </span>
           ) : null}
         </span>
-        {workItemBadge.length ? <span aria-label="Linked tickets" className="relative mt-1 flex flex-wrap items-center gap-1.5">{workItemBadge}</span> : null}
+        <span className="relative mt-1 flex flex-wrap items-center gap-1.5">
+          <SessionTaskChip sessionId={session.id} />
+          {workItemBadge.length ? (
+            <span
+              aria-label="Linked tickets"
+              className="flex flex-wrap items-center gap-1.5"
+            >
+              {workItemBadge}
+            </span>
+          ) : null}
+        </span>
         <span className="relative mt-1 flex items-center gap-2">
           {gitLabel ? (
             <span className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45">

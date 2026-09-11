@@ -132,13 +132,22 @@ export function useRepositoryFamilies(recents: RecentProject[], cwd: string) {
   const [families, setFamilies] = useState<Map<string, RepositoryFamily>>(
     () => new Map(getVerifiedFamilies()),
   );
-  useEffect(
-    () =>
-      subscribeRepositoryFamilies(() =>
-        setFamilies(new Map(getVerifiedFamilies())),
-      ),
-    [],
-  );
+  // Discovery publishes once per probed path; coalesce the burst into one
+  // rail regroup instead of rows merging a step at a time.
+  useEffect(() => {
+    let timer = 0;
+    const unsubscribe = subscribeRepositoryFamilies(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(
+        () => setFamilies(new Map(getVerifiedFamilies())),
+        40,
+      );
+    });
+    return () => {
+      window.clearTimeout(timer);
+      unsubscribe();
+    };
+  }, []);
   const familyPaths = JSON.stringify(
     [...collectRailProjects(recents, cwd).values()]
       .map((item) => item.path)
