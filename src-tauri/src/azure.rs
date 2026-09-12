@@ -30,6 +30,11 @@ impl AzureConfig {
             base64::engine::general_purpose::STANDARD.encode(format!(":{}", self.token))
         )
     }
+    pub(crate) fn has_capability(&self, name: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == name)
+    }
 }
 
 fn normalize_site(raw: &str) -> Result<String, String> {
@@ -126,8 +131,25 @@ pub(crate) fn request(
     query: &[(&str, String)],
     body: Option<Value>,
 ) -> Result<Value, String> {
-    let (raw, _) = request_bytes(
+    request_method(
         config,
+        if body.is_some() { "POST" } else { "GET" },
+        path,
+        query,
+        body,
+    )
+}
+
+pub(crate) fn request_method(
+    config: &AzureConfig,
+    method: &str,
+    path: &str,
+    query: &[(&str, String)],
+    body: Option<Value>,
+) -> Result<Value, String> {
+    let (raw, _) = request_bytes_method(
+        config,
+        method,
         path,
         query,
         body,
@@ -146,6 +168,26 @@ pub(crate) fn request_bytes(
     accept: &str,
     limit: usize,
 ) -> Result<(Vec<u8>, Option<String>), String> {
+    request_bytes_method(
+        config,
+        if body.is_some() { "POST" } else { "GET" },
+        path,
+        query,
+        body,
+        accept,
+        limit,
+    )
+}
+
+fn request_bytes_method(
+    config: &AzureConfig,
+    method: &str,
+    path: &str,
+    query: &[(&str, String)],
+    body: Option<Value>,
+    accept: &str,
+    limit: usize,
+) -> Result<(Vec<u8>, Option<String>), String> {
     // All paths are built here from encoded components, never from a provider response URL.
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(20))
@@ -153,7 +195,7 @@ pub(crate) fn request_bytes(
         .build();
     let url = format!("{}/{path}", config.site);
     let mut req = agent
-        .request(if body.is_some() { "POST" } else { "GET" }, &url)
+        .request(method, &url)
         .set("Authorization", &config.authorization())
         .set("Accept", accept);
     for (key, value) in query {
@@ -166,7 +208,7 @@ pub(crate) fn request_bytes(
         req.call()
     };
     let response = match result {
-        Ok(response) if response.status() == 200 => response,
+        Ok(response) if (200..300).contains(&response.status()) => response,
         Ok(response) | Err(ureq::Error::Status(_, response)) => {
             return Err(http_error(response.status()))
         }
