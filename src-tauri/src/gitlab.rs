@@ -409,20 +409,24 @@ fn gitlab_issue_relations_for(
             let linked_repo = reference
                 .rsplit_once('#')
                 .map(|(path, _)| path.trim().to_string())
-                .filter(|path| !path.is_empty())
-                .unwrap_or_else(|| repo.to_string());
+                .filter(|path| !path.is_empty());
+            // An unresolvable reference cannot prove same-project identity —
+            // fail safe and render the row display-only.
+            let foreign = linked_repo
+                .as_deref()
+                .is_none_or(|path| !path.eq_ignore_ascii_case(repo));
             Some(serde_json::json!({
                 "key": key,
                 "label": label,
                 "ref": format!("#{iid}"),
-                "foreign": !linked_repo.eq_ignore_ascii_case(repo),
+                "foreign": foreign,
                 "item": {
                     "number": iid,
                     "title": string_field(row, "title").unwrap_or_default(),
                     "url": string_field(row, "web_url").unwrap_or_default(),
                     "state": normalize_state(&string_field(row, "state").unwrap_or_default()),
                     "updatedAt": string_field(row, "updated_at").unwrap_or_default(),
-                    "repo": linked_repo,
+                    "repo": linked_repo.unwrap_or_else(|| repo.to_string()),
                 },
             }))
         })

@@ -132,6 +132,37 @@ describe("confluenceSections", () => {
     expect(sections.map((section) => section.title)).toEqual(["Real"]);
     expect(sections[0].text).toContain("# just a comment");
   });
+
+  it("only closes a fence on the same marker that opened it", () => {
+    const markdown = [
+      "# Real",
+      "",
+      "```",
+      "~~~",
+      "# still code",
+      "```",
+      "",
+      "# After",
+    ].join("\n");
+    const sections = confluenceSections(markdown);
+    expect(sections.map((section) => section.title)).toEqual([
+      "Real",
+      "After",
+    ]);
+    expect(sections[0].text).toContain("# still code");
+  });
+
+  it("escapes tildes so page text cannot inject a fence", () => {
+    const { text } = confluenceMarkdown("<p>~~~</p><p># fake</p>");
+    expect(text).toContain("\\~\\~\\~");
+    expect(text).toContain("\\# fake");
+    expect(confluenceSections(text).map((s) => s.title)).toEqual([]);
+  });
+
+  it("strips private-use markers from provider text", () => {
+    const { text } = confluenceMarkdown("<p>before\uE000after\uE001</p>");
+    expect(text).toBe("beforeafter");
+  });
 });
 
 describe("confluencePageContext", () => {

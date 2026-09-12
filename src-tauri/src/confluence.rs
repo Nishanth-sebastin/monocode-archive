@@ -226,16 +226,11 @@ pub async fn confluence_search(
         ];
         if !cursor.is_empty() {
             // The previous response names its own pagination parameter; older
-            // sites still paginate `content/search` with `start`.
+            // sites still paginate `content/search` with `start`. `nextParam`
+            // is authoritative — anything else defaults to the CQL `cursor`.
             let key = match cursor_param.trim() {
                 known @ ("cursor" | "start") => known,
-                _ => {
-                    if cursor.bytes().all(|b| b.is_ascii_digit()) {
-                        "start"
-                    } else {
-                        "cursor"
-                    }
-                }
+                _ => "cursor",
             };
             params.push((key, cursor.to_string()));
         }

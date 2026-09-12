@@ -104,6 +104,18 @@ describe("groupInboxRelations", () => {
     expect(groups[0].key).toBe("related");
     expect(groups[0].edges).toHaveLength(1);
   });
+
+  it("drops ref-only self-links and dedupes case-variant keys", () => {
+    const groups = groupInboxRelations(item(1), [
+      edge("related", "relates to", null, { ref: "ENG-1" }),
+      edge("related", "relates to", null, { ref: "#1" }),
+      edge("Blocks", "blocks", item(2)),
+      edge("blocks", "blocks", item(2)),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe("blocks");
+    expect(groups[0].edges).toHaveLength(1);
+  });
 });
 
 describe("loadInboxRelations", () => {

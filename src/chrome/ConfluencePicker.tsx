@@ -47,7 +47,10 @@ export function ConfluencePicker({
   const [selected, setSelected] = useState<Map<string, Selection>>(new Map());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [pages, setPages] = useState<Map<string, ConfluencePage>>(new Map());
-  const [previewError, setPreviewError] = useState("");
+  const [previewError, setPreviewError] = useState<{
+    id: string;
+    message: string;
+  } | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const generation = useRef(0);
@@ -130,6 +133,7 @@ export function ConfluencePicker({
   // Recent pages first; debounce text/space changes into a fresh search.
   useEffect(() => {
     if (!site) return;
+    setExpanded(null);
     const timer = window.setTimeout(() => search(), 300);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -142,23 +146,38 @@ export function ConfluencePicker({
       return;
     }
     setExpanded(summary.id);
-    setPreviewError("");
+    setPreviewError(null);
     if (pages.has(summary.id)) return;
     const current = generation.current;
     void confluencePage(site, summary.id)
       .then((page) => {
         if (current !== generation.current) return;
         if (!page) {
-          setPreviewError("This page is unavailable.");
+          setPreviewError({
+            id: summary.id,
+            message: "This page is unavailable.",
+          });
           return;
         }
-        setPages((existing) => new Map(existing).set(summary.id, page));
+        setPages((existing) => {
+          const next = new Map(existing);
+          next.set(summary.id, page);
+          // Bound retained page bodies; the expanded page is the newest entry.
+          while (next.size > 100) {
+            const oldest = next.keys().next().value;
+            if (oldest === undefined) break;
+            next.delete(oldest);
+          }
+          return next;
+        });
       })
       .catch((reason: unknown) => {
         if (current === generation.current)
-          setPreviewError(
-            reason instanceof Error ? reason.message : String(reason),
-          );
+          setPreviewError({
+            id: summary.id,
+            message:
+              reason instanceof Error ? reason.message : String(reason),
+          });
       });
   };
 
@@ -174,12 +193,17 @@ export function ConfluencePicker({
 
   const toggleSection = (page: ConfluencePage, sectionId: string) => {
     setSelected((current) => {
+      const existing = current.get(page.id);
+      // Selecting a section on an unselected page still counts as a page.
+      if (!existing && current.size >= MAX_CONTEXT_ITEMS) return current;
       const next = new Map(current);
-      const existing = next.get(page.id) ?? { sections: new Set<string>() };
-      const sections = new Set(existing.sections ?? []);
+      const sections = new Set(existing?.sections ?? []);
       if (sections.has(sectionId)) sections.delete(sectionId);
       else sections.add(sectionId);
-      next.set(page.id, { sections: sections.size ? sections : null });
+      // Unchecking the last section deselects the page rather than silently
+      // widening it back to the whole page.
+      if (sections.size) next.set(page.id, { sections });
+      else next.delete(page.id);
       return next;
     });
   };
@@ -258,7 +282,10 @@ export function ConfluencePicker({
           ? "Search page titles and content"
           : "Recently updated pages"
       }
-      onClose={onClose}
+      onClose={() => {
+        // Closing mid-send would still land the context after cancel.
+        if (!sending) onClose();
+      }}
       className="max-h-[80vh] text-[13px] text-content [&_header_h2]:text-base"
     >
       <div className="flex max-h-[62vh] min-h-48 flex-col gap-2 p-3">
@@ -366,6 +393,10 @@ export function ConfluencePicker({
                                           .get(page.id)
                                           ?.sections?.has(section.id) ?? false
                                       }
+                                      disabled={
+                                        !selected.has(page.id) &&
+                                        selected.size >= MAX_CONTEXT_ITEMS
+                                      }
                                       onChange={() =>
                                         toggleSection(expandedPage, section.id)
                                       }
@@ -378,9 +409,9 @@ export function ConfluencePicker({
                               </div>
                             ) : null}
                           </>
-                        ) : previewError ? (
+                        ) : previewError && previewError.id === page.id ? (
                           <p role="alert" className="text-red-400">
-                            {previewError}
+                            {previewError.message}
                           </p>
                         ) : (
                           <p className="flex items-center gap-2 text-content/45">
@@ -442,8 +473,9 @@ export function ConfluencePicker({
             <div className="flex justify-end gap-2 border-t border-content/10 pt-2">
               <button
                 type="button"
+                disabled={sending}
                 onClick={onClose}
-                className="rounded-md px-2 py-1.5 text-content/60 hover:bg-content/5"
+                className="rounded-md px-2 py-1.5 text-content/60 hover:bg-content/5 disabled:opacity-40"
               >
                 Cancel
               </button>

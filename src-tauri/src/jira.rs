@@ -128,13 +128,20 @@ pub async fn jira_set_config(
             account: String::new(),
             capabilities: Vec::new(),
         };
-        let viewer = request(&config, "myself", &[]);
+        // A 200 with a degenerate body is inconclusive, not definitive — treat
+        // it like a transport failure so a working Confluence still connects.
+        let viewer = request(&config, "myself", &[]).and_then(|viewer| {
+            if viewer["accountId"].as_str().unwrap_or_default().is_empty() {
+                Err(HttpError::other(
+                    "Jira did not return an authenticated account",
+                ))
+            } else {
+                Ok(viewer)
+            }
+        });
         let confluence = crate::confluence::probe(&config);
         match (viewer, confluence) {
             (Ok(viewer), wiki) => {
-                if viewer["accountId"].as_str().unwrap_or_default().is_empty() {
-                    return Err("Jira did not return an authenticated account".into());
-                }
                 config.account = viewer["displayName"]
                     .as_str()
                     .unwrap_or(&config.email)

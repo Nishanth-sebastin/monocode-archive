@@ -75,7 +75,7 @@ type RawPage = {
   status?: unknown;
   space?: { key?: unknown; name?: unknown };
   version?: { number?: unknown };
-  _links?: { webui?: unknown; base?: unknown };
+  _links?: { webui?: unknown };
 };
 
 function pageSummary(site: string, raw: unknown): ConfluencePageSummary | null {
@@ -130,7 +130,7 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
   let nodes = 0;
   let truncated = storage.length > MAX_STORAGE;
   const escape = (value: string) =>
-    value.replace(/[\\`*_{}\[\]<>#|]/g, "\\$&");
+    value.replace(/[\\`*_{}\[\]<>#|~]/g, "\\$&");
   const stripMarkers = (value: string) => value.replace(/[\uE000\uE001]/g, "");
   const attr = (node: Element, name: string) =>
     node.getAttribute(name) ??
@@ -141,14 +141,31 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
     Array.from(node.getElementsByTagName("*")).find(
       (el) => el.tagName.toLowerCase() === tag,
     );
+  // Only http(s) hrefs without embedded credentials are safe to keep.
+  const safeHref = (value: string): string | null => {
+    try {
+      const url = new URL(value);
+      if (
+        !["https:", "http:"].includes(url.protocol) ||
+        url.username ||
+        url.password
+      )
+        return null;
+      return url.href.replace(/\(/g, "%28").replace(/\)/g, "%29");
+    } catch {
+      return null;
+    }
+  };
   // HTML parsing turns <![CDATA[…]]> into a bogus comment; recover its text.
   const collectText = (node: Node): string => {
     if (node.nodeType === 3 || node.nodeType === 4)
       return stripMarkers(node.textContent ?? "");
     if (node.nodeType === 8)
-      return (node.textContent ?? "")
-        .replace(/^\[CDATA\[/, "")
-        .replace(/\]\]$/, "");
+      return stripMarkers(
+        (node.textContent ?? "")
+          .replace(/^\[CDATA\[/, "")
+          .replace(/\]\]$/, ""),
+      );
     return Array.from(node.childNodes).map(collectText).join("");
   };
   const render = (node: Node, depth: number): string => {
@@ -215,42 +232,27 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
             .map((child) => render(child, depth + 1))
             .join("");
       if (!link) return body;
-      try {
-        const url = new URL(attr(link, "value"));
-        if (
-          ["https:", "http:"].includes(url.protocol) &&
-          !url.username &&
-          !url.password
-        )
-          return `[${body.trim() || escape(url.hostname)}](${url.href.replace(/\(/g, "%28").replace(/\)/g, "%29")})`;
-      } catch {
-        /* unsafe href — keep the link text only */
-      }
-      return body;
+      const href = safeHref(attr(link, "value"));
+      if (!href) return body;
+      return `[${body.trim() || escape(new URL(href).hostname)}](${href})`;
     }
     if (tag === "ac:link-body")
       return Array.from(node.childNodes)
         .map((child) => render(child, depth + 1))
         .join("");
     if (tag === "ac:image") {
+      const attachment = find(node, "ri:attachment");
       const alt =
-        find(node, "ri:attachment")?.getAttribute("ri:filename") ??
-        attr(node, "alt") ??
+        (attachment ? attr(attachment, "filename") : "") ||
+        attr(node, "alt") ||
         "attachment";
       return `[Image: ${escape(alt)}]`;
     }
     if (tag === "ri:page")
       return `[Page: ${escape(attr(node, "content-title") || "untitled")}]`;
     if (tag === "ri:url") {
-      const value = attr(node, "value");
-      try {
-        const url = new URL(value);
-        if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password)
-          return `[${escape(url.hostname)}](${url.href.replace(/\(/g, "%28").replace(/\)/g, "%29")})`;
-      } catch {
-        /* unsafe href — keep nothing */
-      }
-      return "";
+      const href = safeHref(attr(node, "value"));
+      return href ? `[${escape(new URL(href).hostname)}](${href})` : "";
     }
     if (tag === "ri:attachment") return `[Attachment: ${escape(attr(node, "filename") || "file")}]`;
     if (tag === "ri:user") return `@${escape(attr(node, "userkey") || "user")}`;
@@ -285,19 +287,16 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
     if (["em", "i"].includes(tag)) return `_${body}_`;
     if (tag === "u" || tag === "span" || tag === "time") return body;
     if (tag === "pre" || tag === "code") {
+      const text = stripMarkers(node.textContent ?? "");
       if (tag === "pre")
-        return `\`\`\`\n${(node.textContent ?? "").slice(0, 32_000).replace(/```/g, "ˋˋˋ")}\n\`\`\`\n\n`;
-      return `\`${(node.textContent ?? "").replace(/`/g, "ˋ")}\``;
+        return `\`\`\`\n${text.slice(0, 32_000).replace(/```/g, "ˋˋˋ")}\n\`\`\`\n\n`;
+      return `\`${text.replace(/`/g, "ˋ")}\``;
     }
     if (/^h[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${body.trim()}\n\n`;
     if (tag === "a") {
-      try {
-        const url = new URL(node.getAttribute("href") ?? "");
-        if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password)
-          return `[${body || escape(url.hostname)}](${url.href.replace(/\(/g, "%28").replace(/\)/g, "%29")})`;
-      } catch {
-        /* preserve text without unsafe href */
-      }
+      const href = safeHref(node.getAttribute("href") ?? "");
+      if (href)
+        return `[${body || escape(new URL(href).hostname)}](${href})`;
       return body;
     }
     if (tag === "blockquote") return `> ${body.trim().replace(/\n/g, "\n> ")}\n\n`;
@@ -321,7 +320,7 @@ export function confluenceSections(markdown: string): ConfluenceSection[] {
   const sections: ConfluenceSection[] = [];
   const lines = markdown.split("\n");
   let current: { title: string; level: number; body: string[] } | null = null;
-  let fenced = false;
+  let fenced: string | null = null;
   let index = 0;
   const flush = () => {
     if (!current) return;
@@ -334,13 +333,19 @@ export function confluenceSections(markdown: string): ConfluenceSection[] {
     current = null;
   };
   for (const line of lines) {
-    // `#` lines inside fenced code are code, not headings.
-    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    // `#` lines inside fenced code are code, not headings. A fence only
+    // closes on the same marker that opened it — `~~~` inside a ``` block
+    // (or vice versa) is content.
+    const fence = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (fenced === null) fenced = fence[1][0];
+      else if (fence[1][0] === fenced) fenced = null;
+    }
     const heading = fenced ? null : /^(#{1,6})\s+(.+)$/.exec(line);
     if (heading) {
       flush();
       current = {
-        title: heading[2].replace(/\\([\\`*_{}\[\]<>#|])/g, "$1").trim(),
+        title: heading[2].replace(/\\([\\`*_{}\[\]<>#|~])/g, "$1").trim(),
         level: heading[1].length,
         body: [],
       };

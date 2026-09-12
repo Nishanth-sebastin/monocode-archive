@@ -710,10 +710,9 @@ pub async fn azure_item_content(
 /// artifacts are already shown elsewhere in the detail pane.
 fn relation_target_id(site: &str, url: &str) -> Option<u64> {
     // Azure echoes the organization segment verbatim; compare it loosely.
-    if url.len() <= site.len()
-        || !url[..site.len()].eq_ignore_ascii_case(site)
-        || url.as_bytes()[site.len()] != b'/'
-    {
+    // `get` avoids panicking when `site.len()` lands inside a multi-byte char.
+    let head = url.get(..site.len())?;
+    if !head.eq_ignore_ascii_case(site) || url.as_bytes().get(site.len()) != Some(&b'/') {
         return None;
     }
     let rest = &url[site.len() + 1..];

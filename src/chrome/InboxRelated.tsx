@@ -173,7 +173,12 @@ export function InboxRelated({ item }: { item: InboxItem }) {
                       <button
                         type="button"
                         title={`Open ${edge.ref} in the provider`}
-                        onClick={() => void openUrl(linked.url)}
+                        onClick={() => {
+                          // Provider-supplied URL — only hand http(s) to the
+                          // system opener, matching MarkdownLink's guard.
+                          if (/^https?:\/\//i.test(linked.url))
+                            void openUrl(linked.url);
+                        }}
                         className="flex min-w-0 flex-1 items-baseline gap-2 rounded text-left hover:bg-content/5"
                       >
                         <span className="shrink-0 tabular-nums text-content/55">

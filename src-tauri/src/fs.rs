@@ -2158,17 +2158,19 @@ fn graph_issue_item(node: &Value, fallback_repo: &str) -> Option<Value> {
     if number <= 0 {
         return None;
     }
-    let repo = node
+    // Without the repository field the node cannot prove same-repo identity —
+    // mark it foreign so the row renders display-only instead of selectable.
+    let linked = node
         .pointer("/repository/nameWithOwner")
-        .and_then(Value::as_str)
-        .unwrap_or(fallback_repo);
+        .and_then(Value::as_str);
     Some(json!({
         "number": number,
         "title": node.get("title").and_then(Value::as_str).unwrap_or_default(),
         "url": node.get("url").and_then(Value::as_str).unwrap_or_default(),
         "state": node.get("state").and_then(Value::as_str).unwrap_or_default().to_lowercase(),
         "updatedAt": node.get("updatedAt").and_then(Value::as_str).unwrap_or_default(),
-        "repo": repo,
+        "repo": linked.unwrap_or(fallback_repo),
+        "foreign": linked.is_none_or(|repo| !repo.eq_ignore_ascii_case(fallback_repo)),
     }))
 }
 
@@ -2196,9 +2198,7 @@ fn parse_github_issue_relations(json: &str, repo: &str) -> Result<Value, String>
             return;
         }
         if let Some(item) = graph_issue_item(node, repo) {
-            let foreign = item["repo"]
-                .as_str()
-                .is_some_and(|linked| !linked.eq_ignore_ascii_case(repo));
+            let foreign = item["foreign"].as_bool().unwrap_or(true);
             edges.push(json!({
                 "key": key,
                 "label": label,

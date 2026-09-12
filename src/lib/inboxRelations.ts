@@ -67,16 +67,20 @@ export function groupInboxRelations(
   edges: readonly InboxRelationEdge[],
 ): InboxRelationGroup[] {
   const self = contextTicketKey(source);
+  // Ref-only edges can still point back at the source — match its known refs.
+  const selfRefs = new Set<string>();
+  if (source.identifier) selfRefs.add(source.identifier);
+  if (source.number) selfRefs.add(`#${source.number}`);
   const seen = new Set<string>();
   const groups = new Map<string, InboxRelationGroup>();
   for (const edge of edges) {
     if (!edge.ref.trim() && !edge.item) continue;
     const identity = edgeIdentity(source, edge);
-    if (identity === self) continue;
-    const dedupe = `${edge.key}:${identity}`;
+    if (identity === self || (!edge.item && selfRefs.has(edge.ref))) continue;
+    const key = edge.key.trim().toLowerCase() || "related";
+    const dedupe = `${key}:${identity}`;
     if (seen.has(dedupe)) continue;
     seen.add(dedupe);
-    const key = edge.key.trim().toLowerCase() || "related";
     let group = groups.get(key);
     if (!group) {
       group = {

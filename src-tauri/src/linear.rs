@@ -218,9 +218,11 @@ fn parse_linear_relations(data: &Value) -> Result<Value, String> {
         .ok_or_else(|| "Linear did not return that issue".to_string())?;
     let mut edges = Vec::new();
     let mut truncated = false;
-    let mut push = |key: &str, label: &str, node: &Value| {
+    // Returns false only when the cap dropped the edge so `truncated` stays
+    // honest; unparseable targets are not truncation.
+    let mut push = |key: &str, label: &str, node: &Value| -> bool {
         if edges.len() >= 50 {
-            return;
+            return false;
         }
         if let Some(item) = parse_linear_issue(node) {
             edges.push(json!({
@@ -230,14 +232,15 @@ fn parse_linear_relations(data: &Value) -> Result<Value, String> {
                 "item": item,
             }));
         }
+        true
     };
     if let Some(parent) = issue.get("parent") {
-        push("parent", "Parent", parent);
+        truncated |= !push("parent", "Parent", parent);
     }
     truncated |= has_next_page(issue, "children");
     if let Some(nodes) = issue.pointer("/children/nodes").and_then(Value::as_array) {
         for node in nodes {
-            push("children", "Sub-issue", node);
+            truncated |= !push("children", "Sub-issue", node);
         }
     }
     for (field, inverse) in [("relations", false), ("inverseRelations", true)] {
@@ -252,7 +255,7 @@ fn parse_linear_relations(data: &Value) -> Result<Value, String> {
             let kind = string_field(node, "type").unwrap_or_else(|| "related".into());
             let counterpart = if inverse { "issue" } else { "relatedIssue" };
             let (key, label) = relation_label(&kind, inverse);
-            push(&key, &label, &node[counterpart]);
+            truncated |= !push(&key, &label, &node[counterpart]);
         }
     }
     Ok(json!({ "edges": edges, "truncated": truncated }))
