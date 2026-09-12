@@ -10,6 +10,7 @@ import {
   saveProjectCommand,
   saveProjectCommandGroup,
   subscribeProjects,
+  type CommandStep,
   type ProjectCommand,
 } from "../lib/projects";
 import {
@@ -43,6 +44,7 @@ type CommandDraft = {
   command: string;
   repositoryId?: string;
   relativeCwd?: string;
+  steps?: CommandStep[];
 };
 
 type EditState =
@@ -93,12 +95,26 @@ export function ProjectCommandsSheet({
 
   const save = () => {
     if (!editing) return;
-    const result =
-      editing.scope === "project"
-        ? saveProjectCommand(project.id, editing.draft, editing.id)
-        : editing.scope === "reusable"
-          ? saveReusableCommand(editing.draft, editing.id)
-          : saveProjectCommandGroup(project.id, editing.draft, editing.id);
+    let result: { error?: string };
+    if (editing.scope === "group") {
+      result = saveProjectCommandGroup(project.id, editing.draft, editing.id);
+    } else {
+      // Steps mode keeps `command` as faithful display text for menus, rows
+      // and the terminal tab title.
+      const draft = {
+        ...editing.draft,
+        command: editing.draft.steps?.length
+          ? editing.draft.steps
+              .map((step) => step.command)
+              .filter(Boolean)
+              .join("\n")
+          : editing.draft.command,
+      };
+      result =
+        editing.scope === "project"
+          ? saveProjectCommand(project.id, draft, editing.id)
+          : saveReusableCommand(draft, editing.id);
+    }
     if (result.error) {
       setError(result.error);
       return;
@@ -200,6 +216,9 @@ export function ProjectCommandsSheet({
                 ...(command.relativeCwd
                   ? { relativeCwd: command.relativeCwd }
                   : {}),
+                ...(command.steps?.length
+                  ? { steps: command.steps.map((step) => ({ ...step })) }
+                  : {}),
               },
             }),
           () => {
@@ -264,25 +283,157 @@ export function ProjectCommandsSheet({
             {editingCommand ? (
               <>
                 <div>
-                  <label className={labelClass} htmlFor="command-text">
-                    Command
+                  <label className="flex items-center gap-2 text-[13px] text-content">
+                    <ContextCheckbox
+                      label="Run as sequential steps"
+                      className="mt-0"
+                      checked={!!editingCommand.draft.steps}
+                      onChange={() =>
+                        setEditing({
+                          ...editingCommand,
+                          draft: {
+                            ...editingCommand.draft,
+                            steps: editingCommand.draft.steps
+                              ? undefined
+                              : [
+                                  {
+                                    command: editingCommand.draft.command,
+                                  },
+                                ],
+                          },
+                        })
+                      }
+                    />
+                    Run as sequential steps
                   </label>
-                  <input
-                    id="command-text"
-                    value={editingCommand.draft.command}
-                    onChange={(event) =>
-                      setEditing({
-                        ...editingCommand,
-                        draft: {
-                          ...editingCommand.draft,
-                          command: event.target.value,
-                        },
-                      })
-                    }
-                    className={`${inputClass} font-mono`}
-                    placeholder="e.g. npm run dev"
-                  />
+                  <p className="mt-1 text-[11px] text-content/40">
+                    Each step runs to completion before the next starts; a
+                    failing step stops the run.
+                  </p>
                 </div>
+                {editingCommand.draft.steps ? (
+                  <div className="flex flex-col gap-1.5">
+                    {editingCommand.draft.steps.map((step, index) => (
+                      <div key={index} className="flex items-center gap-1.5">
+                        <input
+                          aria-label={`Step ${index + 1}`}
+                          value={step.command}
+                          onChange={(event) =>
+                            setEditing({
+                              ...editingCommand,
+                              draft: {
+                                ...editingCommand.draft,
+                                steps: editingCommand.draft.steps?.map(
+                                  (item, at) =>
+                                    at === index
+                                      ? { ...item, command: event.target.value }
+                                      : item,
+                                ),
+                              },
+                            })
+                          }
+                          className={`${inputClass} min-w-0 flex-1 font-mono`}
+                          placeholder={
+                            index === 0 ? "e.g. docker system prune -f" : ""
+                          }
+                        />
+                        <div className="w-28 shrink-0">
+                          <Select
+                            label={`Step ${index + 1} host`}
+                            value={step.host ?? ""}
+                            options={[
+                              { value: "", label: "Target" },
+                              { value: "native", label: "OS host" },
+                            ]}
+                            onChange={(value) =>
+                              setEditing({
+                                ...editingCommand,
+                                draft: {
+                                  ...editingCommand.draft,
+                                  steps: editingCommand.draft.steps?.map(
+                                    (item, at) =>
+                                      at === index
+                                        ? {
+                                            ...item,
+                                            host:
+                                              value === "native"
+                                                ? "native"
+                                                : undefined,
+                                          }
+                                        : item,
+                                  ),
+                                },
+                              })
+                            }
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          aria-label={`Remove step ${index + 1}`}
+                          onClick={() =>
+                            setEditing({
+                              ...editingCommand,
+                              draft: {
+                                ...editingCommand.draft,
+                                steps: editingCommand.draft.steps?.filter(
+                                  (_, at) => at !== index,
+                                ),
+                              },
+                            })
+                          }
+                          className="grid size-6 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/10 hover:text-red-400"
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditing({
+                          ...editingCommand,
+                          draft: {
+                            ...editingCommand.draft,
+                            steps: [
+                              ...(editingCommand.draft.steps ?? []),
+                              { command: "" },
+                            ],
+                          },
+                        })
+                      }
+                      className="flex h-7 items-center gap-1.5 self-start rounded-md px-2 text-[13px] text-content/70 hover:bg-content/10 hover:text-content"
+                    >
+                      <Plus className="size-3.5" strokeWidth={1.75} />
+                      Add step
+                    </button>
+                    <p className="text-[11px] text-content/40">
+                      OS host runs on the machine itself — use it for steps
+                      like <span className="font-mono">wsl --shutdown</span>{" "}
+                      that must outlive the WSL terminal.
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <label className={labelClass} htmlFor="command-text">
+                      Command
+                    </label>
+                    <input
+                      id="command-text"
+                      value={editingCommand.draft.command}
+                      onChange={(event) =>
+                        setEditing({
+                          ...editingCommand,
+                          draft: {
+                            ...editingCommand.draft,
+                            command: event.target.value,
+                          },
+                        })
+                      }
+                      className={`${inputClass} font-mono`}
+                      placeholder="e.g. npm run dev"
+                    />
+                  </div>
+                )}
                 {editingCommand.scope === "project" &&
                 project.repositories.length ? (
                   <div>

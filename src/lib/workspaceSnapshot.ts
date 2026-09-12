@@ -531,18 +531,57 @@ function sanitizeTerminalCommand(
     value.runId < 1
   )
     return undefined;
+  const steps = Array.isArray(value.steps)
+    ? value.steps
+        .map((step) => {
+          if (!step || typeof step !== "object") return null;
+          const entry = step as Record<string, unknown>;
+          const stepCommand =
+            typeof entry.command === "string" ? entry.command.trim() : "";
+          if (!stepCommand) return null;
+          return {
+            command: stepCommand.slice(0, 4_000),
+            ...(entry.host === "native" ? { host: "native" as const } : {}),
+          };
+        })
+        .filter(
+          (step): step is { command: string; host?: "native" } => !!step,
+        )
+        .slice(0, 12)
+    : undefined;
+  const stepProgress =
+    value.step &&
+    typeof value.step === "object" &&
+    Number.isInteger((value.step as Record<string, unknown>).runId) &&
+    Number.isInteger((value.step as Record<string, unknown>).done)
+      ? {
+          runId: (value.step as { runId: number }).runId,
+          // A done beyond the step list would silently skip the whole run.
+          done: Math.min(
+            steps?.length ?? 0,
+            Math.max(0, (value.step as { done: number }).done),
+          ),
+        }
+      : undefined;
   return {
     ...(typeof value.presetId === "string" && value.presetId
       ? { presetId: value.presetId.slice(0, 128) }
       : {}),
     name: value.name.trim().slice(0, 200),
     text: value.text.slice(0, 4_000),
+    ...(steps?.length ? { steps } : {}),
     runId: value.runId,
     ...(typeof value.launched === "number" &&
     Number.isInteger(value.launched) &&
     value.launched >= 0
       ? { launched: value.launched }
       : {}),
+    ...(typeof value.failed === "number" &&
+    Number.isInteger(value.failed) &&
+    value.failed >= 0
+      ? { failed: value.failed }
+      : {}),
+    ...(stepProgress ? { step: stepProgress } : {}),
   };
 }
 

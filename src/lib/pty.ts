@@ -118,8 +118,9 @@ export async function spawnPty(
   cwd: string,
   cols: number,
   rows: number,
+  exec?: string,
 ): Promise<void> {
-  await invoke("pty_spawn", { id, cwd, cols, rows });
+  await invoke("pty_spawn", { id, cwd, cols, rows, exec });
 }
 
 export async function writePty(id: string, data: string): Promise<void> {

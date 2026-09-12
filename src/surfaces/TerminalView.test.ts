@@ -10,7 +10,16 @@ const mocks = vi.hoisted(() => {
   const killPty = vi.fn();
   const resizePty = vi.fn();
   const subscribePty = vi.fn(() => () => {});
-  return { spawnPty, writePty, getPtyStatus, killPty, resizePty, subscribePty };
+  const homeDir = vi.fn(() => Promise.resolve("/home/native"));
+  return {
+    spawnPty,
+    writePty,
+    getPtyStatus,
+    killPty,
+    resizePty,
+    subscribePty,
+    homeDir,
+  };
 });
 
 vi.mock("@xterm/xterm", () => ({
@@ -57,6 +66,10 @@ vi.mock("../lib/pty", () => ({
   killPty: mocks.killPty,
   resizePty: mocks.resizePty,
   subscribePty: mocks.subscribePty,
+}));
+vi.mock("../lib/fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/fs")>()),
+  homeDir: mocks.homeDir,
 }));
 vi.mock("../lib/terminalLayout", () => ({
   applyTerminalChrome: vi.fn(),
@@ -132,6 +145,7 @@ describe("TerminalView bound commands", () => {
       "/repo",
       expect.any(Number),
       expect.any(Number),
+      undefined,
     );
     expect(mocks.writePty).toHaveBeenCalledWith("t1", "npm run dev\r");
     expect(onMetaChange).toHaveBeenCalledWith({ command: { launched: 1 } });
@@ -219,6 +233,154 @@ describe("TerminalView bound commands", () => {
     await act(async () => root.unmount());
     await flush();
     expect(mocks.killPty).toHaveBeenCalledTimes(1);
+    host.remove();
+  });
+});
+
+describe("TerminalView step commands", () => {
+  let exitHandler: ((code: number | null) => void) | undefined;
+
+  beforeEach(() => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("ResizeObserver", class {
+      observe() {}
+      disconnect() {}
+    });
+    exitHandler = undefined;
+    mocks.spawnPty.mockResolvedValue(undefined);
+    mocks.writePty.mockResolvedValue(undefined);
+    mocks.getPtyStatus.mockResolvedValue({ foreground: null });
+    mocks.killPty.mockResolvedValue(undefined);
+    mocks.resizePty.mockResolvedValue(undefined);
+    mocks.homeDir.mockResolvedValue("/home/native");
+    mocks.subscribePty.mockImplementation((id, _onData, onExit) => {
+      exitHandler = onExit;
+      return () => {};
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  const stepsCommand = (
+    steps: { command: string; host?: "native" }[],
+    overrides: Partial<TerminalCommand> = {},
+  ): TerminalCommand => ({
+    presetId: "cmd1",
+    name: "Maintenance",
+    text: steps.map((step) => step.command).join("\n"),
+    steps,
+    runId: 1,
+    ...overrides,
+  });
+
+  it("runs steps as sequential one-shot processes", async () => {
+    const { host, root, onMetaChange, run } = render(
+      stepsCommand([
+        { command: "docker system prune -f" },
+        { command: "wsl --shutdown", host: "native" },
+      ]),
+    );
+    await act(async () => run());
+    await flush();
+    // Step one replaces the interactive shell spawn entirely.
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(1);
+    expect(mocks.spawnPty).toHaveBeenNthCalledWith(
+      1,
+      "t1",
+      "/repo",
+      expect.any(Number),
+      expect.any(Number),
+      "docker system prune -f",
+    );
+    // Step two waits for the first step's exit, then runs on the OS host.
+    await act(async () => exitHandler?.(0));
+    await flush();
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(2);
+    expect(mocks.spawnPty).toHaveBeenNthCalledWith(
+      2,
+      "t1",
+      "/home/native",
+      expect.any(Number),
+      expect.any(Number),
+      "wsl --shutdown",
+    );
+    expect(onMetaChange).toHaveBeenCalledWith({
+      command: { step: { runId: 1, done: 1 } },
+    });
+    await act(async () => exitHandler?.(0));
+    await flush();
+    expect(onMetaChange).toHaveBeenCalledWith({ command: { launched: 1 } });
+    // The tab hands an interactive shell back when the sequence completes.
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(3);
+    expect(mocks.spawnPty).toHaveBeenNthCalledWith(
+      3,
+      "t1",
+      "/repo",
+      expect.any(Number),
+      expect.any(Number),
+      undefined,
+    );
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("stops the sequence when a step fails and does not mark it launched", async () => {
+    const { host, root, onMetaChange, run } = render(
+      stepsCommand([{ command: "step one" }, { command: "step two" }]),
+    );
+    await act(async () => run());
+    await flush();
+    await act(async () => exitHandler?.(1));
+    await flush();
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(1);
+    expect(onMetaChange).toHaveBeenCalledWith({
+      command: { failed: 1, step: { runId: 1, done: 0 } },
+    });
+    expect(onMetaChange).not.toHaveBeenCalledWith({
+      command: { launched: 1 },
+    });
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("resumes at the persisted step instead of re-running completed ones", async () => {
+    const { host, root, run } = render(
+      stepsCommand([{ command: "step one" }, { command: "step two" }], {
+        step: { runId: 1, done: 1 },
+      }),
+    );
+    await act(async () => run());
+    await flush();
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(1);
+    expect(mocks.spawnPty).toHaveBeenCalledWith(
+      "t1",
+      "/repo",
+      expect.any(Number),
+      expect.any(Number),
+      "step two",
+    );
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("does not re-fire a failed run without a new runId", async () => {
+    const { host, root, run } = render(
+      stepsCommand([{ command: "step one" }], { failed: 1 }),
+    );
+    await act(async () => run());
+    await flush();
+    // Interactive shell only — the failed step never re-runs silently.
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(1);
+    expect(mocks.spawnPty).toHaveBeenCalledWith(
+      "t1",
+      "/repo",
+      expect.any(Number),
+      expect.any(Number),
+      undefined,
+    );
+    await act(async () => root.unmount());
     host.remove();
   });
 });

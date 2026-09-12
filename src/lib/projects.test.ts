@@ -377,6 +377,48 @@ describe("saved commands", () => {
     ).toBeTruthy();
   });
 
+  it("sanitizes sequential steps and preserves the native host flag", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    expect(
+      saveProjectCommand(project.id, {
+        name: "WSL maintenance",
+        command: "docker system prune -f\nwsl --shutdown",
+        steps: [
+          { command: "docker system prune -f" },
+          { command: "  " },
+          { command: "wsl --shutdown", host: "native" },
+          // Unknown hosts collapse to the resolved target.
+          { command: "wsl -d Ubuntu", host: "wsl" as never },
+        ],
+      }).error,
+    ).toBeUndefined();
+    const [command] = loadProjects()[0].commands;
+    expect(command.steps).toEqual([
+      { command: "docker system prune -f" },
+      { command: "wsl --shutdown", host: "native" },
+      { command: "wsl -d Ubuntu" },
+    ]);
+    // Steps mode with only empty steps is an error, not a silent plain
+    // command.
+    expect(
+      saveProjectCommand(project.id, {
+        name: "Empty",
+        command: "x",
+        steps: [{ command: " " }],
+      }).error,
+    ).toBeTruthy();
+    // Turning steps off clears them on edit.
+    saveProjectCommand(
+      project.id,
+      { name: "WSL maintenance", command: "wsl --shutdown" },
+      command.id,
+    );
+    expect(loadProjects()[0].commands[0].steps).toBeUndefined();
+  });
+
   it("removing a repository drops its bound commands and empties groups", () => {
     const project = ensureProjectForPath(
       "/tmp/app",

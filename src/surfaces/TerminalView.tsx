@@ -15,6 +15,7 @@ import {
   type TerminalMetaPatch,
 } from "../lib/terminalTab";
 import { isLightScheme, SCHEME_CHANGE_EVENT } from "../lib/appearance";
+import { homeDir } from "../lib/fs";
 import {
   applyTerminalChrome,
   fitTerminal,
@@ -122,6 +123,12 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
   const termRef = useRef<Terminal | null>(null);
   const spawned = useRef(false);
   const startingRef = useRef<Promise<void>>(Promise.resolve());
+  /** Spawn routine the mount effect installs; the step runner drives it. */
+  const startPtyRef = useRef<(exec: string | undefined, dir: string) => Promise<void>>(
+    () => Promise.reject(new Error("Terminal is not mounted")),
+  );
+  /** Resolved by the next PTY exit while a command step is in flight. */
+  const exitWaiterRef = useRef<((code: number | null) => void) | null>(null);
   const applySizeRef = useRef<() => void>(() => {});
   const onMetaChangeRef = useRef(onMetaChange);
   onMetaChangeRef.current = onMetaChange;
@@ -201,33 +208,56 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
         if (closed) return;
         spawned.current = false;
         runningProcessRef.current = null;
-        const status = code == null ? "" : ` (${code})`;
-        term.writeln(`\r\n[process exited${status}]`);
+        const waiter = exitWaiterRef.current;
+        exitWaiterRef.current = null;
+        if (!waiter) {
+          const status = code == null ? "" : ` (${code})`;
+          term.writeln(`\r\n[process exited${status}]`);
+        }
         // The shell is gone — a dead terminal must not stay "running" or a
         // bound command could never re-run.
         onMetaChangeRef.current?.({
           foreground: null,
           title: defaultTerminalTitle(cwd),
         });
+        waiter?.(code);
       },
     );
 
-    const starting = spawnPty(id, cwd, term.cols, term.rows)
-      .then(() => {
-        if (!closed) spawned.current = true;
-      })
-      .catch((error) => {
-        spawned.current = false;
-        if (!closed) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          term.writeln(`\x1b[31m${message}\x1b[0m`);
-        }
-        throw error;
-      });
-    startingRef.current = starting;
-    latestSpawn.set(id, starting);
-    void starting.catch(() => undefined);
+    // Every spawn this mount owns, so unmount kills whichever one is live
+    // while a newer mount's spawn stays untouched.
+    const myStarts = new Set<Promise<void>>();
+    const startPty = (exec: string | undefined, dir: string) => {
+      const starting = spawnPty(id, dir, term.cols, term.rows, exec)
+        .then(() => {
+          if (!closed) spawned.current = true;
+        })
+        .catch((error) => {
+          spawned.current = false;
+          if (!closed) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            term.writeln(`\x1b[31m${message}\x1b[0m`);
+          }
+          throw error;
+        });
+      myStarts.add(starting);
+      startingRef.current = starting;
+      latestSpawn.set(id, starting);
+      void starting.catch(() => undefined);
+      return starting;
+    };
+    startPtyRef.current = startPty;
+
+    // A steps run spawns each step itself — only open an interactive shell
+    // when nothing is pending.
+    const stepsPending =
+      !!command?.steps?.length &&
+      (command.launched ?? 0) < command.runId &&
+      command.failed !== command.runId;
+    const starting = stepsPending
+      ? Promise.resolve()
+      : startPty(undefined, cwd);
 
     const dataSub = term.onData((data) => {
       void starting
@@ -334,13 +364,21 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
       renderSub.dispose();
       bufferSub.dispose();
       unsubscribe();
-      void starting
+      // The newest spawn this mount started may still be in flight — wait for
+      // it before killing so `pty_kill` never races ahead of the host insert.
+      // A newer mount's spawn is not ours and must survive.
+      const last = [...myStarts].pop();
+      void Promise.resolve(last)
         .catch(() => undefined)
         .then(() => {
-          if (latestSpawn.get(id) !== starting) return;
+          const live = latestSpawn.get(id);
+          if (!live || !myStarts.has(live)) return;
           latestSpawn.delete(id);
           void killPty(id);
         });
+      // Wake a step runner blocked on a PTY exit so it can bail out.
+      exitWaiterRef.current?.(null);
+      exitWaiterRef.current = null;
       term.dispose();
       termRef.current = null;
       spawned.current = false;
@@ -391,10 +429,81 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
   // A bound saved command is written to the PTY exactly once per runId.
   // `launched` is persisted through the meta patch, so remounting the view or
   // restarting the app re-shows the terminal without re-running the command.
+  // Deps are deliberately narrow — progress/launched meta patches rebuild the
+  // `command` object on every merge and must not retrigger a running sequence.
+  const commandRunId = command?.runId;
+  const commandText = command?.text;
+  const commandSteps = command?.steps;
   useEffect(() => {
     if (!command || (command.launched ?? 0) >= command.runId) return;
+    if (command.failed === command.runId) return;
     const pending = command;
     let cancelled = false;
+    const steps = pending.steps;
+    if (steps?.length) {
+      const runId = pending.runId;
+      let done = pending.step?.runId === runId ? pending.step.done : 0;
+      const note = (text: string, color: 2 | 31 = 2) =>
+        termRef.current?.writeln(`\r\n\x1b[${color}m${text}\x1b[0m`);
+      const fail = (text: string) => {
+        note(text, 31);
+        onMetaChangeRef.current?.({
+          command: { failed: runId, step: { runId, done } },
+        });
+      };
+      void (async () => {
+        for (let i = done; i < steps.length; i++) {
+          if (cancelled || !termRef.current) return;
+          const step = steps[i];
+          let dir = cwd;
+          if (step.host === "native") {
+            // OS host home — where wsl.exe/diskpart actually belong when the
+            // resolved target lives inside WSL.
+            try {
+              dir = await homeDir();
+            } catch {
+              dir = cwd;
+            }
+          }
+          if (cancelled || !termRef.current) return;
+          note(
+            `── step ${i + 1}/${steps.length}${step.host === "native" ? " (OS host)" : ""}: ${step.command}`,
+          );
+          const exited = new Promise<number | null>((resolve) => {
+            exitWaiterRef.current = resolve;
+          });
+          try {
+            await startPtyRef.current(step.command, dir);
+          } catch {
+            exitWaiterRef.current = null;
+            if (!cancelled && termRef.current) fail(`step ${i + 1} failed to start`);
+            return;
+          }
+          const code = await exited;
+          if (cancelled || !termRef.current) return;
+          if (code !== 0) {
+            fail(
+              code == null
+                ? `step ${i + 1} was interrupted`
+                : `step ${i + 1} failed (${code})`,
+            );
+            return;
+          }
+          done = i + 1;
+          onMetaChangeRef.current?.({
+            command: { step: { runId, done } },
+          });
+        }
+        if (cancelled || !termRef.current) return;
+        onMetaChangeRef.current?.({ command: { launched: runId } });
+        note("── all steps finished");
+        // Hand an interactive shell back so the tab stays usable.
+        void startPtyRef.current(undefined, cwd).catch(() => undefined);
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
     void startingRef.current
       .then(() =>
         cancelled || !spawned.current
@@ -410,7 +519,8 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
     return () => {
       cancelled = true;
     };
-  }, [id, command]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, commandRunId, commandText, commandSteps]);
 
   useEffect(() => {
     if (!active) return;

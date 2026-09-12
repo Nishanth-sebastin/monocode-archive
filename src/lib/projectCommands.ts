@@ -1,6 +1,7 @@
 import { slash } from "./paths";
 import {
   repositoryDisplayName,
+  type CommandStep,
   type ProjectCommand,
   type ProjectRecord,
 } from "./projects";
@@ -17,6 +18,8 @@ export type ReusableCommand = {
   command: string;
   /** Directory relative to the resolved root. */
   relativeCwd?: string;
+  /** When set, the steps run in order and `command` is display text only. */
+  steps?: CommandStep[];
 };
 
 const KEY = "monocode.projectCommands.v1";
@@ -27,6 +30,26 @@ const MAX_COMMAND_TEXT = 4_000;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
+const MAX_STEPS = 12;
+
+function sanitizeSteps(value: unknown): CommandStep[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const steps = value
+    .map((step): CommandStep | null => {
+      if (!isRecord(step)) return null;
+      const command =
+        typeof step.command === "string" ? step.command.trim() : "";
+      if (!command) return null;
+      return {
+        command: command.slice(0, MAX_COMMAND_TEXT),
+        ...(step.host === "native" ? { host: "native" as const } : {}),
+      };
+    })
+    .filter((step): step is CommandStep => !!step)
+    .slice(0, MAX_STEPS);
+  return steps.length ? steps : undefined;
+}
+
 function sanitizeReusable(value: unknown): ReusableCommand | null {
   if (!isRecord(value)) return null;
   const id = typeof value.id === "string" ? value.id.trim() : "";
@@ -35,11 +58,13 @@ function sanitizeReusable(value: unknown): ReusableCommand | null {
   if (!id || !name || !command) return null;
   const relativeCwd =
     typeof value.relativeCwd === "string" ? value.relativeCwd.trim() : "";
+  const steps = sanitizeSteps(value.steps);
   return {
     id: id.slice(0, 128),
     name: name.slice(0, 200),
     command: command.slice(0, MAX_COMMAND_TEXT),
     ...(relativeCwd ? { relativeCwd: relativeCwd.slice(0, 500) } : {}),
+    ...(steps ? { steps } : {}),
   };
 }
 
@@ -99,8 +124,17 @@ export function saveReusableCommand(
   const name = draft.name.trim().slice(0, 200);
   const command = draft.command.trim().slice(0, MAX_COMMAND_TEXT);
   if (!name) return { error: "Name the command." };
-  if (!command) return { error: "Enter the command to run." };
   const relativeCwd = draft.relativeCwd?.trim().slice(0, 500);
+  const steps = draft.steps
+    ?.map((step) => ({
+      command: step.command.trim().slice(0, MAX_COMMAND_TEXT),
+      ...(step.host === "native" ? { host: "native" as const } : {}),
+    }))
+    .filter((step) => step.command)
+    .slice(0, MAX_STEPS);
+  if (draft.steps && !steps?.length)
+    return { error: "Add a step or turn steps off." };
+  if (!command) return { error: "Enter the command to run." };
   const commands = loadReusableCommands();
   if (commandId && !commands.some((item) => item.id === commandId))
     return { error: "That command no longer exists." };
@@ -111,6 +145,7 @@ export function saveReusableCommand(
     name,
     command,
     ...(relativeCwd ? { relativeCwd } : {}),
+    ...(steps?.length ? { steps } : {}),
   };
   const index = commandId
     ? commands.findIndex((item) => item.id === commandId)

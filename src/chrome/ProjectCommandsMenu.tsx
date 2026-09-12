@@ -17,7 +17,7 @@ import { Popover, type PopoverAnchor } from "./Popover";
 
 type CommandLike = Pick<
   ProjectCommand,
-  "id" | "name" | "command" | "repositoryId" | "relativeCwd"
+  "id" | "name" | "command" | "repositoryId" | "relativeCwd" | "steps"
 >;
 
 /**
@@ -109,6 +109,9 @@ export function ProjectCommandsMenu({
     const target = resolveCommandTarget({ command, project, task, fallbackCwd });
     const file = bound(command.id);
     const running = !!file?.foreground;
+    const failed =
+      file?.command?.failed !== undefined &&
+      file.command.failed === file.command.runId;
     return (
       <div
         key={command.id}
@@ -117,11 +120,14 @@ export function ProjectCommandsMenu({
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] text-content">
             {command.name}
+            {failed ? (
+              <span className="text-red-400"> · step failed</span>
+            ) : null}
           </div>
           <div className="truncate text-[11px] text-content/40">
             {"error" in target
               ? target.error
-              : `${command.command} — ${target.source === "task" ? "task worktree" : target.label ? `${target.label} checkout` : "project folder"} ${prettyCwd(target.cwd)}`}
+              : `${command.steps?.length ? `${command.steps.length} steps · ` : ""}${command.command} — ${target.source === "task" ? "task worktree" : target.label ? `${target.label} checkout` : "project folder"} ${prettyCwd(target.cwd)}`}
           </div>
         </div>
         {running && file ? (

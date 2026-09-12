@@ -28,13 +28,16 @@ export type SavedRepositorySet = {
 /** A saved project command run in a project terminal. `repositoryId` binds the
  * command to one member repository — inside a task it resolves to that
  * repository's exact task worktree; absent means the task's primary copy or
- * the project folder. `relativeCwd` descends from the resolved root. */
+ * the project folder. `relativeCwd` descends from the resolved root. `steps`
+ * runs a fixed sequence one process at a time. */
 export type ProjectCommand = {
   id: string;
   name: string;
   command: string;
   repositoryId?: string;
   relativeCwd?: string;
+  /** When set, the steps run in order and `command` is display text only. */
+  steps?: CommandStep[];
 };
 
 /** Ordered group of saved commands launched together. Membership/order only. */
@@ -121,6 +124,36 @@ function sanitizeSet(value: unknown): SavedRepositorySet | null {
   return { id: record.id.slice(0, 128), name: record.name.slice(0, 200), repositoryIds };
 }
 
+const MAX_STEPS = 12;
+
+/** One step of a sequential command. `host: "native"` runs the step in the
+ * OS host shell instead of the resolved target — the distinction that lets a
+ * maintenance flow shut down WSL without killing the terminal it was
+ * launched from. */
+export type CommandStep = {
+  command: string;
+  host?: "native";
+};
+
+function sanitizeSteps(value: unknown): CommandStep[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const steps = value
+    .map((step): CommandStep | null => {
+      if (!step || typeof step !== "object") return null;
+      const record = step as Record<string, unknown>;
+      const command =
+        typeof record.command === "string" ? record.command.trim() : "";
+      if (!command) return null;
+      return {
+        command: command.slice(0, MAX_COMMAND_TEXT),
+        ...(record.host === "native" ? { host: "native" as const } : {}),
+      };
+    })
+    .filter((step): step is CommandStep => !!step)
+    .slice(0, MAX_STEPS);
+  return steps.length ? steps : undefined;
+}
+
 function sanitizeCommand(value: unknown): ProjectCommand | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
@@ -133,6 +166,7 @@ function sanitizeCommand(value: unknown): ProjectCommand | null {
     !record.command.trim()
   )
     return null;
+  const steps = sanitizeSteps(record.steps);
   return {
     id: record.id.slice(0, 128),
     name: record.name.trim().slice(0, 200),
@@ -143,6 +177,7 @@ function sanitizeCommand(value: unknown): ProjectCommand | null {
     ...(typeof record.relativeCwd === "string" && record.relativeCwd.trim()
       ? { relativeCwd: record.relativeCwd.trim().slice(0, 500) }
       : {}),
+    ...(steps ? { steps } : {}),
   };
 }
 
@@ -627,8 +662,17 @@ export function saveProjectCommand(
   const name = draft.name.trim().slice(0, 200);
   const command = draft.command.trim().slice(0, MAX_COMMAND_TEXT);
   if (!name) return { error: "Name the command." };
-  if (!command) return { error: "Enter the command to run." };
   const relativeCwd = draft.relativeCwd?.trim().slice(0, 500);
+  const steps = draft.steps
+    ?.map((step) => ({
+      command: step.command.trim().slice(0, MAX_COMMAND_TEXT),
+      ...(step.host === "native" ? { host: "native" as const } : {}),
+    }))
+    .filter((step) => step.command)
+    .slice(0, MAX_STEPS);
+  if (draft.steps && !steps?.length)
+    return { error: "Add a step or turn steps off." };
+  if (!command) return { error: "Enter the command to run." };
   const current = loadProjects().find((entry) => entry.id === projectId);
   if (!current) return { error: "Project not found." };
   if (
@@ -647,6 +691,7 @@ export function saveProjectCommand(
       command,
       ...(draft.repositoryId ? { repositoryId: draft.repositoryId } : {}),
       ...(relativeCwd ? { relativeCwd } : {}),
+      ...(steps?.length ? { steps } : {}),
     };
     const index = commandId
       ? project.commands.findIndex((item) => item.id === commandId)

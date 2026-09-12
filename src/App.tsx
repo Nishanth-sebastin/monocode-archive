@@ -5555,6 +5555,7 @@ export default function App({
         command: string;
         repositoryId?: string;
         relativeCwd?: string;
+        steps?: { command: string; host?: "native" }[];
       },
       project: ProjectRecord | undefined,
       task: TaskWorkspace | null | undefined,
@@ -5620,6 +5621,7 @@ export default function App({
               presetId: command.id,
               name: command.name,
               text: command.command,
+              ...(command.steps?.length ? { steps: command.steps } : {}),
               runId: 1,
             },
           };
@@ -5648,6 +5650,11 @@ export default function App({
                 command: {
                   name: command.name,
                   text: command.command,
+                  // Explicit undefined clears keys a fresh run no longer has —
+                  // the meta merge keeps old keys otherwise.
+                  steps: command.steps?.length ? command.steps : undefined,
+                  failed: undefined,
+                  step: undefined,
                   runId: (bound.command?.runId ?? 0) + 1,
                 },
               }),
@@ -5667,6 +5674,7 @@ export default function App({
           presetId: command.id,
           name: command.name,
           text: command.command,
+          ...(command.steps?.length ? { steps: command.steps } : {}),
           runId: 1,
         },
       };

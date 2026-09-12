@@ -48,8 +48,12 @@ export function applyTerminalMeta(
       merged.presetId === file.command.presetId &&
       merged.name === file.command.name &&
       merged.text === file.command.text &&
+      merged.steps === file.command.steps &&
       merged.runId === file.command.runId &&
-      merged.launched === file.command.launched
+      merged.launched === file.command.launched &&
+      merged.failed === file.command.failed &&
+      merged.step?.runId === file.command.step?.runId &&
+      merged.step?.done === file.command.step?.done
     ) {
       command = file.command;
     } else {

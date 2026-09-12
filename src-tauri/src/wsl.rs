@@ -141,6 +141,26 @@ pub fn terminal_command(location: &Location) -> Result<Command, String> {
     Ok(command)
 }
 
+#[cfg(any(windows, test))]
+fn exec_args(location: &Location, exec: &str) -> Vec<String> {
+    wsl_args(
+        &location.distribution,
+        &location.path,
+        "/bin/sh",
+        &["-lc".into(), exec.into()],
+    )
+}
+
+/// One command line inside the distribution — a saved command step. `wsl.exe`
+/// propagates the shell's exit code, so the PTY exit carries the step result.
+#[cfg(windows)]
+pub fn exec_command(location: &Location, exec: &str) -> Result<Command, String> {
+    let _: String = request(location, "canonical", json!({}))?;
+    let mut command = wsl_command()?;
+    command.args(exec_args(location, exec));
+    Ok(command)
+}
+
 pub struct LinuxProcess {
     location: Location,
     pid: u32,
@@ -1078,6 +1098,19 @@ with tempfile.TemporaryDirectory(prefix='monocode-env-') as directory:
             ]
         );
         assert_eq!(terminal.last().unwrap(), "exec \"${SHELL:-/bin/sh}\" -l");
+        assert_eq!(
+            exec_args(&value, "docker system prune -f"),
+            vec![
+                "--distribution",
+                "Ubuntu Work",
+                "--cd",
+                "/home/me/Zażółć repo/Case",
+                "--exec",
+                "/bin/sh",
+                "-lc",
+                "docker system prune -f"
+            ]
+        );
         assert_eq!(location(&value.identity()).unwrap(), Some(value.clone()));
         assert_eq!(
             location("\\\\wsl$\\Ubuntu Work\\home\\me\\Zażółć repo\\Case").unwrap(),
