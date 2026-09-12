@@ -102,6 +102,8 @@ import { CwdPicker } from "./CwdPicker";
 import { FileMentionPicker } from "./FileMentionPicker";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { InboxMiniCard } from "./InboxMiniCard";
+import { DictationControl } from "./DictationControl";
+import { useDictation } from "./useDictation";
 import { NoteMiniCard } from "./NoteMiniCard";
 import { HandoffMiniCard } from "./HandoffMiniCard";
 import { ModelPicker } from "./ModelPicker";
@@ -613,6 +615,15 @@ export function Composer({
     [contextDraft, inboxCard, noteCard, handoffCard],
   );
 
+  const dictation = useDictation({
+    textareaRef: ref,
+    draft,
+    commitDraft: (value: string) => {
+      setDraft(value);
+      syncHasValue(value, attachmentsRef.current);
+    },
+  });
+
   useEffect(() => {
     syncHasValue(ref.current?.value ?? "", attachmentsRef.current);
   }, [contextDraft, inboxCard, noteCard, handoffCard, syncHasValue]);
@@ -906,7 +917,7 @@ export function Composer({
     if (!focused) return;
     if (
       document.querySelector(
-        "[data-model-picker], [data-access-picker], [data-model-settings], [data-file-picker], [data-branch-picker], [data-skill-picker], [data-session-folder-picker], [data-mention-picker], [data-attach-picker], [data-composer-plus]",
+        "[data-model-picker], [data-access-picker], [data-model-settings], [data-file-picker], [data-branch-picker], [data-skill-picker], [data-session-folder-picker], [data-mention-picker], [data-attach-picker], [data-composer-plus], [data-dictation-menu]",
       )
     )
       return;
@@ -1500,6 +1511,32 @@ export function Composer({
                 `${HARNESS_TITLE[harness]} does not support attachments. Choose another agent or remove the files.`}
             </p>
           ) : null}
+          {dictation.error ? (
+            <p
+              role="alert"
+              className="flex items-center gap-2 px-3 pt-2 text-xs text-red-400"
+            >
+              <span className="min-w-0 flex-1">{dictation.error}</span>
+              {dictation.micBlocked ? (
+                <button
+                  type="button"
+                  onClick={dictation.openMicSettings}
+                  className="shrink-0 underline hover:text-red-300"
+                >
+                  Open Settings
+                </button>
+              ) : null}
+              <button
+                type="button"
+                title="Dismiss"
+                aria-label="Dismiss dictation error"
+                onClick={dictation.dismissError}
+                className="grid size-4 shrink-0 place-items-center rounded hover:bg-content/10"
+              >
+                <X className="size-3" />
+              </button>
+            </p>
+          ) : null}
           {contextDraft ? <AgentContextChips context={hideTicketCards ? { ...contextDraft, entries: contextDraft.entries.filter(entry => !entry.ticket) } : contextDraft} onDismiss={onContextDismiss} /> : null}
           {inboxCard && !hideTicketCards ? (
             <InboxMiniCard
@@ -1531,6 +1568,7 @@ export function Composer({
                 text={draft}
                 names={skillNames}
                 mentions={mentionIndex.labels}
+                dim={dictation.dim}
               />
             </div>
             <textarea
@@ -1701,6 +1739,11 @@ export function Composer({
             </div>
 
             <div className="flex shrink-0 items-center gap-1">
+              <DictationControl
+                dictation={dictation}
+                enabled={enabled}
+                hotkeys={hotkeys && enabled}
+              />
               <ComposerAction
                 busy={busy}
                 hasValue={hasValue}
@@ -1728,6 +1771,51 @@ function ComposerHighlight({
   text,
   names,
   mentions,
+  dim,
+}: {
+  text: string;
+  names: ReadonlySet<string>;
+  mentions: ReadonlyMap<string, ProjectFile>;
+  /** Provisional dictation span — rendered dimmed until the final transcript
+   * replaces it. */
+  dim?: { start: number; end: number } | null;
+}) {
+  const dimmed =
+    dim && dim.end > dim.start && dim.end <= text.length ? dim : null;
+  return (
+    <>
+      {dimmed ? (
+        <>
+          <HighlightParts
+            text={text.slice(0, dimmed.start)}
+            names={names}
+            mentions={mentions}
+          />
+          <span className="opacity-50">
+            <HighlightParts
+              text={text.slice(dimmed.start, dimmed.end)}
+              names={names}
+              mentions={mentions}
+            />
+          </span>
+          <HighlightParts
+            text={text.slice(dimmed.end)}
+            names={names}
+            mentions={mentions}
+          />
+        </>
+      ) : (
+        <HighlightParts text={text} names={names} mentions={mentions} />
+      )}
+      {text.endsWith("\n") ? "\n" : null}
+    </>
+  );
+}
+
+function HighlightParts({
+  text,
+  names,
+  mentions,
 }: {
   text: string;
   names: ReadonlySet<string>;
@@ -1747,7 +1835,6 @@ function ComposerHighlight({
           <MentionRuns key={index} text={part.text} mentions={mentions} />
         ),
       )}
-      {text.endsWith("\n") ? "\n" : null}
     </>
   );
 }

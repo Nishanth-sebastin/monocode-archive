@@ -145,9 +145,9 @@ struct HostState {
     /// Set while a worker starts up so two concurrent starts cannot both
     /// spawn — `session` only exists once the join handle does.
     starting: bool,
-    /// The session's cancel flag while stop/cancel joins the worker — keeps
-    /// the final pass abortable and blocks an overlapping start.
-    finishing: Option<Arc<AtomicBool>>,
+    /// The session's id and cancel flag while stop/cancel joins the worker —
+    /// keeps the final pass abortable and blocks an overlapping start.
+    finishing: Option<(u64, Arc<AtomicBool>)>,
 }
 
 struct Download {
@@ -530,16 +530,25 @@ pub fn dictation_start(
 pub fn dictation_stop(
     app: AppHandle,
     host: State<'_, DictationHost>,
+    session_id: Option<u64>,
 ) -> Result<DictationResult, String> {
     let session = {
         let mut state = host.inner.lock().unwrap();
+        // A stop for a session that isn't current must not take over whatever
+        // session replaced it — the caller's session is already gone.
+        match state.session.as_ref() {
+            Some(session) if session_id.is_some_and(|id| id != session.id) => {
+                return Err("No dictation in progress".into());
+            }
+            _ => {}
+        }
         let Some(session) = state.session.take() else {
             return Err("No dictation in progress".into());
         };
         session.stop.store(true, Ordering::Relaxed);
         // Keep the cancel flag reachable so the final pass can still abort,
         // and block a new session from overlapping this one.
-        state.finishing = Some(Arc::clone(&session.cancel));
+        state.finishing = Some((session.id, Arc::clone(&session.cancel)));
         session
     };
     let id = session.id;
@@ -555,22 +564,33 @@ pub fn dictation_stop(
 }
 
 #[tauri::command(async)]
-pub fn dictation_cancel(app: AppHandle, host: State<'_, DictationHost>) -> Result<(), String> {
+pub fn dictation_cancel(
+    app: AppHandle,
+    host: State<'_, DictationHost>,
+    session_id: Option<u64>,
+) -> Result<(), String> {
     let session = {
         let mut state = host.inner.lock().unwrap();
+        match state.session.as_ref() {
+            Some(session) if session_id.is_some_and(|id| id != session.id) => {
+                return Err("No dictation in progress".into());
+            }
+            _ => {}
+        }
         match state.session.take() {
             Some(session) => {
                 session.cancel.store(true, Ordering::Relaxed);
-                state.finishing = Some(Arc::clone(&session.cancel));
+                state.finishing = Some((session.id, Arc::clone(&session.cancel)));
                 session
             }
             None => {
                 // Stop already took the session — abort its final pass.
                 return match state.finishing.as_ref() {
-                    Some(cancel) => {
+                    Some((id, cancel)) if session_id.is_none_or(|wanted| wanted == *id) => {
                         cancel.store(true, Ordering::Relaxed);
                         Ok(())
                     }
+                    Some(_) => Err("No dictation in progress".into()),
                     None if state.starting => Err("Dictation is starting — try again".into()),
                     None => Err("No dictation in progress".into()),
                 };

@@ -7,6 +7,7 @@ authors = ["Nick"]
 repository = "https://github.com/hardbeat920/monocode"
 homepage = "https://usemono.dev"
 license.workspace = true
+default-run = "monocode"
 
 [lib]
 name = "monocode_lib"
