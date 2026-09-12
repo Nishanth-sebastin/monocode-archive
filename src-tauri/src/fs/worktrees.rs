@@ -846,7 +846,7 @@ pub(crate) mod tests {
                 .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            110
+            111
         );
     }
 
