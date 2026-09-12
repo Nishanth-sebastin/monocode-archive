@@ -222,6 +222,49 @@ export function subscribeLiveAgentsEnabled(onStoreChange: () => void) {
     window.removeEventListener(LIVE_AGENTS_ENABLED_CHANGE_EVENT, onStoreChange);
 }
 
+const KEEP_AWAKE_KEY = "monocode.keepAwake";
+
+export const KEEP_AWAKE_DEFAULT = false;
+
+/** Fired on `window` when the idle-sleep setting flips. */
+export const KEEP_AWAKE_CHANGE_EVENT = "monocode:keep-awake-change";
+
+export function loadKeepAwakeEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem(KEEP_AWAKE_KEY);
+    if (raw == null) return KEEP_AWAKE_DEFAULT;
+    return raw === "1" || raw === "true";
+  } catch {
+    return KEEP_AWAKE_DEFAULT;
+  }
+}
+
+export function saveKeepAwakeEnabled(value: boolean) {
+  try {
+    localStorage.setItem(KEEP_AWAKE_KEY, value ? "1" : "0");
+  } catch {
+    // private mode / quota
+  }
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent<boolean>(KEEP_AWAKE_CHANGE_EVENT, { detail: value }),
+  );
+}
+
+export function subscribeKeepAwakeEnabled(onStoreChange: () => void) {
+  if (typeof window === "undefined") return () => {};
+  // The storage event converges the other open windows onto the same value.
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === null || event.key === KEEP_AWAKE_KEY) onStoreChange();
+  };
+  window.addEventListener(KEEP_AWAKE_CHANGE_EVENT, onStoreChange);
+  window.addEventListener("storage", onStorage);
+  return () => {
+    window.removeEventListener(KEEP_AWAKE_CHANGE_EVENT, onStoreChange);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
 const GRID_ARCADE_ENABLED_KEY = "monocode.gridArcadeEnabled";
 
 export const GRID_ARCADE_ENABLED_DEFAULT = true;
