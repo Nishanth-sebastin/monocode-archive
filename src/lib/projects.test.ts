@@ -5,6 +5,7 @@ import type { RepositoryFamily } from "./repositoryFamilies";
 import {
   addRepositoryToProject,
   createProjectGroup,
+  deleteProjectCommand,
   deleteRepositorySet,
   ensureProjectForPath,
   familyForRepository,
@@ -20,6 +21,8 @@ import {
   removeRepositoryFromProject,
   renameRepositorySet,
   repositoryDisplayName,
+  saveProjectCommand,
+  saveProjectCommandGroup,
   saveRepositorySet,
   type ProjectRecord,
 } from "./projects";
@@ -80,6 +83,37 @@ describe("loadProjects", () => {
     expect(project.repositories).toHaveLength(1);
     expect(project.sets).toEqual([
       { id: "s1", name: "Backend", repositoryIds: ["r1"] },
+    ]);
+  });
+
+  it("drops commands bound to non-members and prunes empty groups", () => {
+    saveRaw([
+      {
+        id: "p1",
+        anchor: "/tmp/app",
+        repositories: [
+          { id: "r1", commonDir: "/tmp/app/.git", anchor: "/tmp/app" },
+        ],
+        sets: [],
+        commands: [
+          { id: "c1", name: "Dev", command: "npm run dev", repositoryId: "r1" },
+          { id: "c2", name: "Gone", command: "npm run x", repositoryId: "gone" },
+          { id: "c3", name: "Root", command: "make" },
+          { name: "No id", command: "x" },
+        ],
+        commandGroups: [
+          { id: "g1", name: "All", commandIds: ["c1", "c2", "c3"] },
+          { id: "g2", name: "Dead", commandIds: ["c2"] },
+        ],
+      },
+    ]);
+    const [stored] = loadProjects();
+    expect(stored.commands.map((command) => command.id)).toEqual([
+      "c1",
+      "c3",
+    ]);
+    expect(stored.commandGroups).toEqual([
+      { id: "g1", name: "All", commandIds: ["c1", "c3"] },
     ]);
   });
 
@@ -279,6 +313,169 @@ describe("saved sets", () => {
     expect(loadProjects()[0].sets[0].name).toBe("Pair");
     deleteRepositorySet(project.id, one.id);
     expect(loadProjects()[0].sets.map((set) => set.id)).toEqual([two.id]);
+  });
+});
+
+describe("saved commands", () => {
+  it("saves, edits and deletes project commands", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    const [repo] = loadProjects()[0].repositories;
+    expect(
+      saveProjectCommand(project.id, {
+        name: "Dev",
+        command: "npm run dev",
+        repositoryId: repo.id,
+      }).error,
+    ).toBeUndefined();
+    const [command] = loadProjects()[0].commands;
+    expect(command.name).toBe("Dev");
+    expect(command.repositoryId).toBe(repo.id);
+    saveProjectCommand(
+      project.id,
+      { name: "Dev server", command: "npm run dev -- --open" },
+      command.id,
+    );
+    const edited = loadProjects()[0].commands[0];
+    expect(edited.name).toBe("Dev server");
+    expect(edited.repositoryId).toBeUndefined();
+    deleteProjectCommand(project.id, command.id);
+    expect(loadProjects()[0].commands).toEqual([]);
+  });
+
+  it("rejects empty fields and foreign repository bindings", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    expect(
+      saveProjectCommand(project.id, { name: " ", command: "x" }).error,
+    ).toBeTruthy();
+    expect(
+      saveProjectCommand(project.id, { name: "x", command: " " }).error,
+    ).toBeTruthy();
+    // A binding to a repository outside the project is an error, not a
+    // silent no-op.
+    expect(
+      saveProjectCommand(project.id, {
+        name: "Foreign",
+        command: "x",
+        repositoryId: "not-a-member",
+      }).error,
+    ).toBeTruthy();
+    expect(loadProjects()[0].commands).toEqual([]);
+    // Missing ids and unknown projects report errors too.
+    expect(
+      saveProjectCommand(project.id, { name: "x", command: "y" }, "gone")
+        .error,
+    ).toBeTruthy();
+    expect(
+      saveProjectCommand("no-such-project", { name: "x", command: "y" })
+        .error,
+    ).toBeTruthy();
+  });
+
+  it("sanitizes sequential steps and preserves the native host flag", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    expect(
+      saveProjectCommand(project.id, {
+        name: "WSL maintenance",
+        command: "docker system prune -f\nwsl --shutdown",
+        steps: [
+          { command: "docker system prune -f" },
+          { command: "  " },
+          { command: "wsl --shutdown", host: "native" },
+          // Unknown hosts collapse to the resolved target.
+          { command: "wsl -d Ubuntu", host: "wsl" as never },
+        ],
+      }).error,
+    ).toBeUndefined();
+    const [command] = loadProjects()[0].commands;
+    expect(command.steps).toEqual([
+      { command: "docker system prune -f" },
+      { command: "wsl --shutdown", host: "native" },
+      { command: "wsl -d Ubuntu" },
+    ]);
+    // Steps mode with only empty steps is an error, not a silent plain
+    // command.
+    expect(
+      saveProjectCommand(project.id, {
+        name: "Empty",
+        command: "x",
+        steps: [{ command: " " }],
+      }).error,
+    ).toBeTruthy();
+    // Turning steps off clears them on edit.
+    saveProjectCommand(
+      project.id,
+      { name: "WSL maintenance", command: "wsl --shutdown" },
+      command.id,
+    );
+    expect(loadProjects()[0].commands[0].steps).toBeUndefined();
+  });
+
+  it("removing a repository drops its bound commands and empties groups", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    addRepositoryToProject(project.id, {
+      commonDir: "/tmp/lib/.git",
+      anchor: "/tmp/lib",
+    });
+    const [app, lib] = loadProjects()[0].repositories;
+    saveProjectCommand(project.id, {
+      name: "Lib dev",
+      command: "npm run dev",
+      repositoryId: lib.id,
+    });
+    saveProjectCommand(project.id, { name: "App dev", command: "npm start" });
+    const [libCommand, appCommand] = loadProjects()[0].commands;
+    saveProjectCommandGroup(project.id, {
+      name: "Both",
+      commandIds: [libCommand.id, appCommand.id],
+    });
+    saveProjectCommandGroup(project.id, {
+      name: "Lib only",
+      commandIds: [libCommand.id],
+    });
+    removeRepositoryFromProject(project.id, lib.id);
+    const after = loadProjects()[0];
+    expect(after.commands.map((item) => item.id)).toEqual([appCommand.id]);
+    // "Lib only" had no surviving members; "Both" keeps the unbound command.
+    expect(after.commandGroups.map((group) => group.name)).toEqual(["Both"]);
+    expect(after.commandGroups[0].commandIds).toEqual([appCommand.id]);
+    // Repositories the command never referenced are untouched.
+    expect(after.repositories.map((r) => r.id)).toEqual([app.id]);
+  });
+
+  it("prunes deleted commands from groups", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    saveProjectCommand(project.id, { name: "Dev", command: "npm run dev" });
+    saveProjectCommand(project.id, { name: "Test", command: "npm test" });
+    const [dev, test] = loadProjects()[0].commands;
+    expect(
+      saveProjectCommandGroup(project.id, {
+        name: "All",
+        commandIds: [dev.id, test.id, "foreign"],
+      }).error,
+    ).toBeUndefined();
+    expect(loadProjects()[0].commandGroups[0].commandIds).toEqual([
+      dev.id,
+      test.id,
+    ]);
+    deleteProjectCommand(project.id, dev.id);
+    expect(loadProjects()[0].commandGroups[0].commandIds).toEqual([test.id]);
+    deleteProjectCommand(project.id, test.id);
+    expect(loadProjects()[0].commandGroups).toEqual([]);
   });
 });
 

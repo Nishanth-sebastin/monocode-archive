@@ -208,6 +208,37 @@ describe("sanitizeSessionForPersist", () => {
     });
   });
 
+  it("keeps the action run evidence on the user turn", () => {
+    const session = newSession("codex", "/tmp/project");
+    session.blocks = [
+      {
+        id: "u1",
+        role: "user",
+        text: "Action: Review\n\nCheck the diff.",
+        action: { actionId: "review", name: "Review", revision: "0a1b2c3d" },
+      },
+    ];
+    expect(sanitizeSessionForPersist(session).blocks[0]).toMatchObject({
+      role: "user",
+      action: { actionId: "review", name: "Review", revision: "0a1b2c3d" },
+    });
+  });
+
+  it("drops malformed action evidence instead of persisting it", () => {
+    const session = newSession("codex", "/tmp/project");
+    session.blocks = [
+      {
+        id: "u1",
+        role: "user",
+        text: "hi",
+        action: { name: "Review" } as unknown as Block["action"],
+      },
+    ];
+    expect(
+      sanitizeSessionForPersist(session).blocks[0].action,
+    ).toBeUndefined();
+  });
+
   it("keeps structured task lists", () => {
     const session = newSession("codex", "/tmp/project");
     session.blocks = [

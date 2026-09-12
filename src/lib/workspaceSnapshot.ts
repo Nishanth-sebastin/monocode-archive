@@ -20,6 +20,7 @@ import {
 } from "./projectTerminal";
 import { normalizeProjectPath } from "./recents";
 import { pathKey } from "./paths";
+import { sanitizeSteps } from "./projects";
 import { reconcileProjectReturn, type ProjectReturnMemory } from "./projectReturn";
 import type { InboxAskContext } from "./inboxAsk";
 import {
@@ -529,6 +530,8 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
   ) {
     return null;
   }
+  const command =
+    value.terminal === true ? sanitizeTerminalCommand(value.command) : undefined;
   return {
     id: value.id,
     path: value.path,
@@ -543,6 +546,63 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
       ? { changeKind: value.changeKind }
       : {}),
     ...(value.terminal === true ? { terminal: true } : {}),
+    ...(command ? { command } : {}),
+  };
+}
+
+function sanitizeTerminalCommand(
+  raw: unknown,
+): FilePaneTab["command"] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  if (
+    typeof value.name !== "string" ||
+    !value.name.trim() ||
+    typeof value.text !== "string" ||
+    !value.text.trim() ||
+    typeof value.runId !== "number" ||
+    !Number.isInteger(value.runId) ||
+    value.runId < 1
+  )
+    return undefined;
+  const steps = sanitizeSteps(value.steps);
+  // Progress only means something for this run's step list — a `step` left
+  // over from an older runId, or with no steps at all, is dropped rather
+  // than restored as stale state.
+  const stepProgress =
+    steps?.length &&
+    value.step &&
+    typeof value.step === "object" &&
+    (value.step as Record<string, unknown>).runId === value.runId &&
+    Number.isInteger((value.step as Record<string, unknown>).done)
+      ? {
+          runId: value.runId,
+          // A done beyond the step list would silently skip the whole run.
+          done: Math.min(
+            steps.length,
+            Math.max(0, (value.step as { done: number }).done),
+          ),
+        }
+      : undefined;
+  return {
+    ...(typeof value.presetId === "string" && value.presetId
+      ? { presetId: value.presetId.slice(0, 128) }
+      : {}),
+    name: value.name.trim().slice(0, 200),
+    text: value.text.slice(0, 4_000),
+    ...(steps?.length ? { steps } : {}),
+    runId: value.runId,
+    ...(typeof value.launched === "number" &&
+    Number.isInteger(value.launched) &&
+    value.launched >= 0
+      ? { launched: value.launched }
+      : {}),
+    ...(typeof value.failed === "number" &&
+    Number.isInteger(value.failed) &&
+    value.failed >= 0
+      ? { failed: value.failed }
+      : {}),
+    ...(stepProgress ? { step: stepProgress } : {}),
   };
 }
 

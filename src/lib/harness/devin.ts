@@ -1,4 +1,4 @@
-import { nativeModelId } from "../models";
+import { findModel, nativeModelId } from "../models";
 import { pathKey } from "../paths";
 import type { RuntimeMode } from "../session";
 import type { UserQuestionReply } from "../userQuestion";
@@ -28,11 +28,13 @@ import {
   devinModeIdsFromConfig,
   devinModesFromSetup,
   devinModelConfigId,
+  devinModelSelectionForUid,
   devinPermissionOptionId,
   devinPermissionRequest,
   devinPromptBlocks,
   devinSpawnArgs,
   devinStopReasonMessage,
+  isDevinAuthMessage,
   sessionIdFromResult,
   stringField,
   type DevinConfigOption,
@@ -168,6 +170,8 @@ export async function compactDevinContext(
       live.cancelled = false;
       live.muteUpdates = false;
       try {
+        await applyModelSelection(live, input);
+        if (live.cancelled) return;
         live.onEvent({ type: "status", text: "Compacting context…" });
         live.promptInFlight += 1;
         try {
@@ -378,6 +382,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   // everything and replay it once installed — live.muteUpdates then decides
   // which of the replayed events reach the UI.
   const earlyNotifications: { method: string; params: unknown }[] = [];
+  /** Dedupes repeated identical auth-error stderr lines into one block. */
+  let lastAuthLine: string | undefined;
 
   handlers.onNotification = (method, params) => {
     const live = liveRef.current;
@@ -428,7 +434,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     },
     (line) => {
       console.debug("[monocode] devin stderr", line);
-      if (/log ?in|sign ?in|not authenticated|unauthori/i.test(line)) {
+      if (isDevinAuthMessage(line) && line !== lastAuthLine) {
+        lastAuthLine = line;
         emit({
           type: "session.error",
           message: `${line.trim()}\n\n${AUTH_HELP}`,
@@ -498,7 +505,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
           SESSION_TIMEOUT_MS,
         );
       } catch (error) {
-        throw devinAuthError(error);
+        throw devinAuthError(error, "create a session");
       }
       acpSessionId = sessionIdFromResult(setup);
     }
@@ -558,7 +565,17 @@ async function applyModelSelection(
   live: Live,
   input: HarnessSessionInput,
 ): Promise<void> {
-  const base = nativeModelId(input.model, input.cwd).trim();
+  // Devin folds the reasoning level into the model uid. The picker's
+  // `reasoning` setting carries the chosen variant's uid — apply it only when
+  // it belongs to the selected model's group.
+  const reasoning = input.modelSettings?.reasoning?.trim();
+  const offered = findModel(input.model, input.cwd)
+    ?.settings?.find((setting) => setting.id === "reasoning")
+    ?.options.some((option) => option.value === reasoning);
+  const base = (reasoning && offered
+    ? reasoning
+    : nativeModelId(input.model, input.cwd)
+  ).trim();
   if (!base) return;
   const current = live.configOptions.find(
     (option) => option.id === live.modelConfigId,
@@ -642,7 +659,7 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
     const detail = error instanceof Error ? error.message : String(error);
     live.onEvent({
       type: "session.error",
-      message: /log ?in|sign ?in|auth|credential|unauthori/i.test(detail)
+      message: isDevinAuthMessage(detail)
         ? `${detail.trim()}\n\n${AUTH_HELP}`
         : detail,
     });
@@ -688,16 +705,28 @@ function handleNotification(live: Live, method: string, params: unknown) {
 
   if (kind === "config_option_update") {
     const previous = devinCurrentModelId(live.configOptions);
-    const next = devinConfigOptions(
+    const incoming = devinConfigOptions(
       update?.configOptions ?? update?.config_options,
     );
-    if (next.length) {
-      live.configOptions = next;
-      const current = devinCurrentModelId(next);
+    if (incoming.length) {
+      // Merge by option id — Devin may send only the changed options rather
+      // than the whole array, and dropping `model` here would loop writes.
+      const merged = [...live.configOptions];
+      for (const option of incoming) {
+        const at = merged.findIndex((entry) => entry.id === option.id);
+        if (at >= 0) merged[at] = option;
+        else merged.push(option);
+      }
+      live.configOptions = merged;
+      const current = devinCurrentModelId(merged);
       if (current && current !== previous && !live.muteUpdates) {
+        const selection = devinModelSelectionForUid(merged, current, live.cwd);
         live.onEvent({
           type: "session.configChanged",
-          model: `devin:${current}`,
+          model: selection.id,
+          ...(selection.reasoning
+            ? { modelSettings: { reasoning: selection.reasoning } }
+            : {}),
         });
       }
     }

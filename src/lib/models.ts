@@ -476,6 +476,15 @@ export function resolveModel(
       (model) => (model.nativeId ?? nativeIdFrom(model.id)) === slug,
     );
     if (byNative) return byNative;
+    // Ids persisted before variants were grouped into one model — a Devin
+    // variant uid (e.g. `devin:claude-sonnet-5-medium`) lives on as one of the
+    // group's setting option values.
+    const bySetting = available.find((model) =>
+      model.settings?.some((setting) =>
+        setting.options.some((option) => option.value === slug),
+      ),
+    );
+    if (bySetting) return bySetting;
     const prefix = available.find((model) => {
       const native = model.nativeId ?? nativeIdFrom(model.id);
       return native.startsWith(slug) || slug.startsWith(native);
@@ -901,7 +910,7 @@ function compatibleSettingValue(
   return undefined;
 }
 
-function nativeIdFrom(id: string): string {
+export function nativeIdFrom(id: string): string {
   const trimmed = id.trim();
   const colon = trimmed.indexOf(":");
   const slug = colon >= 0 ? trimmed.slice(colon + 1) : trimmed;

@@ -288,6 +288,142 @@ describe("collectWorkspaceSnapshot", () => {
     ]);
     expect(snapshot.projectTerminals[0]?.pane.files[0]?.id).toBe(term.id);
   });
+
+  it("round-trips a bound command so a restart never re-runs it", () => {
+    const term = {
+      ...newTerminalFile("/tmp/a", "Dev"),
+      command: {
+        presetId: "c1",
+        name: "Dev",
+        text: "npm run dev",
+        runId: 2,
+        launched: 2,
+      },
+    };
+    const dock = createProjectTerminal("/tmp/a", term);
+    const snapshot = collectWorkspaceSnapshot(
+      [{ ...newTab("s1"), id: "t1" }],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+      [dock],
+    );
+    const restored = hydrateWorkspaceSnapshot(
+      parseWorkspaceSnapshot(snapshot)!,
+      new Map(),
+    );
+    const file = restored?.projectTerminals?.[0]?.pane.files[0];
+    expect(file?.command).toEqual({
+      presetId: "c1",
+      name: "Dev",
+      text: "npm run dev",
+      runId: 2,
+      launched: 2,
+    });
+    // `launched` >= `runId`: the command stays a record, never a re-run.
+    expect((file!.command!.launched ?? 0) >= file!.command!.runId).toBe(true);
+  });
+
+  it("round-trips a steps command with its progress and failure marker", () => {
+    const term = {
+      ...newTerminalFile("/tmp/a", "Maintenance"),
+      command: {
+        presetId: "c1",
+        name: "Maintenance",
+        text: "docker system prune -f\nwsl --shutdown",
+        steps: [
+          { command: "docker system prune -f" },
+          { command: "wsl --shutdown", host: "native" as const },
+        ],
+        runId: 3,
+        failed: 3,
+        launched: 3,
+        step: { runId: 3, done: 1 },
+      },
+    };
+    const dock = createProjectTerminal("/tmp/a", term);
+    const snapshot = collectWorkspaceSnapshot(
+      [{ ...newTab("s1"), id: "t1" }],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+      [dock],
+    );
+    const restored = hydrateWorkspaceSnapshot(
+      parseWorkspaceSnapshot(snapshot)!,
+      new Map(),
+    );
+    const file = restored?.projectTerminals?.[0]?.pane.files[0];
+    expect(file?.command).toEqual({
+      presetId: "c1",
+      name: "Maintenance",
+      text: "docker system prune -f\nwsl --shutdown",
+      steps: [
+        { command: "docker system prune -f" },
+        { command: "wsl --shutdown", host: "native" },
+      ],
+      runId: 3,
+      failed: 3,
+      launched: 3,
+      step: { runId: 3, done: 1 },
+    });
+  });
+
+  it("drops step progress that does not belong to the stored run", () => {
+    const term = {
+      ...newTerminalFile("/tmp/a", "Maintenance"),
+      command: {
+        name: "Maintenance",
+        text: "a\nb",
+        steps: [{ command: "a" }, { command: "b" }],
+        runId: 2,
+        // Stale progress from an older run — restoring it would resume at
+        // the wrong step.
+        step: { runId: 1, done: 2 },
+      },
+    };
+    const dock = createProjectTerminal("/tmp/a", term);
+    const snapshot = collectWorkspaceSnapshot(
+      [{ ...newTab("s1"), id: "t1" }],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+      [dock],
+    );
+    const restored = hydrateWorkspaceSnapshot(
+      parseWorkspaceSnapshot(snapshot)!,
+      new Map(),
+    );
+    const file = restored?.projectTerminals?.[0]?.pane.files[0];
+    expect(file?.command?.steps).toHaveLength(2);
+    expect(file?.command?.step).toBeUndefined();
+  });
+
+  it("drops a malformed bound command but keeps the terminal", () => {
+    const term = {
+      ...newTerminalFile("/tmp/a", "Dev"),
+      command: { name: "Dev" }, // no text/runId
+    };
+    const dock = createProjectTerminal("/tmp/a", term);
+    const snapshot = collectWorkspaceSnapshot(
+      [{ ...newTab("s1"), id: "t1" }],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+      [dock],
+    );
+    const restored = hydrateWorkspaceSnapshot(
+      parseWorkspaceSnapshot(snapshot)!,
+      new Map(),
+    );
+    const file = restored?.projectTerminals?.[0]?.pane.files[0];
+    expect(file?.terminal).toBe(true);
+    expect(file?.command).toBeUndefined();
+  });
 });
 
 describe("parseWorkspaceSnapshot", () => {

@@ -1,10 +1,13 @@
 import { SessionIssues } from "../chrome/SessionIssues";
 import { TaskScopeChip } from "../chrome/TaskScopeChip";
+import { AgentActionsMenu } from "../chrome/AgentActionsMenu";
 import {
   subscribeTaskWorkspaces,
   taskForSession,
   taskWorkspacesSnapshot,
+  projectForTask,
 } from "../lib/taskWorkspaces";
+import { projectForPath } from "../lib/projects";
 import { requestAgentContext, contextFromText } from "../lib/agentContext";
 import { ChevronDown, GripVertical, X } from "../chrome/icons";
 import {
@@ -90,7 +93,11 @@ type Props = {
     sessionId: string,
     text: string,
     attachments: Attachment[],
-    options?: { intent?: TurnIntent },
+    options?: {
+      intent?: TurnIntent;
+      action?: import("../lib/agentActions").ActionRunRef;
+      followUpBehavior?: import("../lib/settings").FollowUpBehavior;
+    },
   ) => void;
   onStop: (sessionId: string) => void;
   onCompactContext: (sessionId: string) => boolean;
@@ -149,6 +156,15 @@ type Props = {
     model: string,
   ) => void;
   onNewTerminal: (sessionId: string) => void;
+  /** Runs an agent action in a fresh conversation rooted at `cwd`. */
+  onRunAgentAction?: (args: {
+    sourceSessionId: string;
+    cwd: string;
+    harness: HarnessId;
+    model: string;
+    text: string;
+    action: import("../lib/agentActions").ActionRunRef;
+  }) => void;
   onPaneDragStart?: (event: ReactPointerEvent<HTMLElement>) => void;
 };
 
@@ -195,6 +211,7 @@ export const SessionPane = memo(function SessionPane({
   onSecondOpinion,
   onHandoff,
   onNewTerminal,
+  onRunAgentAction,
   onPaneDragStart,
 }: Props) {
   const title = sessionDisplayTitle(session.title, session.harness);
@@ -325,6 +342,13 @@ export const SessionPane = memo(function SessionPane({
     [session.id, workCwd, tasksRaw],
   );
   const taskScoped = Boolean(taskScope);
+  const actionProject = useMemo(
+    () =>
+      taskScope
+        ? projectForTask(taskScope.task)
+        : projectForPath(workCwd),
+    [taskScope, workCwd],
+  );
   const isEmpty = session.blocks.length === 0;
   const showDeckProjectPicker = isEmpty && !looksLikeProject(session.cwd);
   const dockComposer = !isEmpty || inSplit || !!session.inboxAsk;
@@ -414,6 +438,35 @@ export const SessionPane = memo(function SessionPane({
       onResumeQueue={() => onResumeQueue(session.id)}
       onOpenFile={onOpenFile}
       busy={!!session.busy}
+      actionsSlot={
+        session.inboxAsk ? undefined : (
+          <AgentActionsMenu
+            session={session}
+            workCwd={workCwd}
+            task={taskScope?.task}
+            project={actionProject}
+            onRun={(run) =>
+              onSubmit(session.id, run.text, [], {
+                action: run.action,
+                followUpBehavior: "queue",
+              })
+            }
+            onRunNew={
+              onRunAgentAction
+                ? (run, destination) =>
+                    onRunAgentAction({
+                      sourceSessionId: session.id,
+                      cwd: destination.cwd,
+                      harness: destination.harness,
+                      model: destination.model,
+                      text: run.text,
+                      action: run.action,
+                    })
+                : undefined
+            }
+          />
+        )
+      }
     />
   );
 

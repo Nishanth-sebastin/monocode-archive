@@ -49,6 +49,7 @@ import { runUpdateFlow } from "./lib/updater";
 import { displayAttachments, prepareAttachments } from "./lib/attachments";
 import {
   basename,
+  listDir,
   notifyGitChanged,
   pickFolder,
   restoreSessionCheckout,
@@ -111,6 +112,7 @@ import {
   findProjectTerminal,
   mapProjectTerminal,
   nextDockTerminalTitle,
+  patchDockTerminal,
   patchProjectTerminals,
   reorderDockTerminals,
   selectDockTerminal,
@@ -120,6 +122,11 @@ import {
   type DockSide,
   type ProjectTerminalDock as ProjectTerminal,
 } from "./lib/projectTerminal";
+import { writePty } from "./lib/pty";
+import { resolveCommandTarget } from "./lib/projectCommands";
+import { ProjectCommandsMenu } from "./chrome/ProjectCommandsMenu";
+import { ProjectCommandsSheet } from "./chrome/ProjectCommandsSheet";
+import type { PopoverAnchor } from "./chrome/Popover";
 import {
   applyGroupedReorder,
   insertTabBesideActive,
@@ -200,6 +207,7 @@ import { type EditorNavigationTarget, type OpenFileFn } from "./lib/search";
 import {
   mergeModelSettings,
   modelCatalogKey,
+  nativeIdFrom,
   preferredModelSettings,
   resolveModel,
   saveLastModelSettings,
@@ -241,6 +249,7 @@ import {
   updateTask,
   updateTaskChild,
   type TaskChildDraft,
+  type TaskWorkspace,
 } from "./lib/taskWorkspaces";
 import {
   ensureProjectForPath,
@@ -249,7 +258,11 @@ import {
   isProjectRailKey,
   loadProjects,
   projectContainsPath,
+  projectForPath,
   projectRailKey,
+  projectsSnapshot,
+  subscribeProjects,
+  type ProjectRecord,
 } from "./lib/projects";
 import { getVerifiedFamilies } from "./lib/repositoryFamilies";
 import { probeRepositoryFamily } from "./hooks/useRepositoryFamilies";
@@ -296,6 +309,7 @@ import {
   type Session,
   type TurnIntent,
 } from "./lib/session";
+import type { ActionRunRef } from "./lib/agentActions";
 
 import {
   canDispatchQueuedHead,
@@ -510,11 +524,13 @@ function scheduleHarnessFlush(run: () => void): ScheduledFlush {
 function userTurnCards(
   noteCard: NoteComposerCard | undefined,
   secondOpinion?: SecondOpinionMeta,
+  action?: ActionRunRef,
 ) {
-  if (!noteCard && !secondOpinion) return undefined;
+  if (!noteCard && !secondOpinion && !action) return undefined;
   return {
     ...(secondOpinion ? { secondOpinion } : {}),
     ...(noteCard ? { noteCard: noteCardMeta(noteCard) } : {}),
+    ...(action ? { action } : {}),
   };
 }
 
@@ -704,6 +720,24 @@ export default function App({
   const [sidebarTab, setSidebarTab] = useState<SidebarTabId>(
     () => loadSidebarTabOrder()[0] ?? "sessions",
   );
+  const [commandsMenu, setCommandsMenu] = useState<{
+    anchor: PopoverAnchor;
+    path?: string;
+    projectId?: string;
+    taskId?: string;
+  } | null>(null);
+  /** ProjectRecord.id of the project whose commands are being edited. */
+  const [commandsSheet, setCommandsSheet] = useState<string | null>(null);
+  // The rail's own anchored overlays go stale when the visible folder
+  // changes — close them rather than leaving a floating menu behind.
+  useEffect(() => {
+    setCommandsMenu(null);
+    setCommandsSheet(null);
+  }, [projectCwd]);
+  // Live project list — the commands menu/sheet re-resolve on every store
+  // write instead of parsing localStorage each render.
+  const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
+  const projectsList = useMemo(() => loadProjects(), [projectsRaw]);
   const [filesSearchOpen, setFilesSearchOpen] = useState(false);
   const [searchFocusToken, setSearchFocusToken] = useState(0);
   const [searchViewOpen, setSearchViewOpen] = useState(false);
@@ -800,6 +834,9 @@ export default function App({
   dirtyFilesRef.current = dirtyFiles;
   const projectTerminalsRef = useRef(projectTerminals);
   projectTerminalsRef.current = projectTerminals;
+  /** Saved-command ids with a launch still awaiting its cwd check — a fast
+   * second click must not queue a duplicate terminal. */
+  const commandLaunchRef = useRef(new Set<string>());
   const projectTerminalFocusedRef = useRef(projectTerminalFocused);
   projectTerminalFocusedRef.current = projectTerminalFocused;
   const activeTabIdRef = useRef(activeTabId);
@@ -1032,6 +1069,16 @@ export default function App({
             resolved,
             session.modelSettings,
           );
+          // A legacy variant-level id (e.g. `devin:x-medium`) resolved to its
+          // group — keep the level by stamping it into the reasoning setting.
+          if (resolved.id !== session.model) {
+            const legacy = nativeIdFrom(session.model);
+            for (const setting of resolved.settings ?? []) {
+              if (setting.options.some((option) => option.value === legacy)) {
+                modelSettings[setting.id] = legacy;
+              }
+            }
+          }
           if (
             resolved.id === session.model &&
             sameSettings(modelSettings, session.modelSettings)
@@ -1052,6 +1099,52 @@ export default function App({
       (session) => activeTab && leafIds(activeTab.layout).includes(session.id),
     );
   const sessionDefaults = active ?? sessions[0];
+  // Saved commands resolve their owning project at open: explicit id → rail
+  // path → the active task's project → the current folder's project.
+  const commandsProject = !commandsMenu
+    ? undefined
+    : commandsMenu.projectId
+      ? projectsList.find((entry) => entry.id === commandsMenu.projectId)
+      : commandsMenu.path
+        ? projectForPath(commandsMenu.path)
+        : (() => {
+            const scope = active
+              ? taskForSession(active.id, sessionWorkCwd(active))
+              : null;
+            return (
+              (scope ? projectForTask(scope.task) : undefined) ??
+              projectForPath(projectCwd)
+            );
+          })();
+  const commandsTask = !commandsMenu
+    ? null
+    : commandsMenu.taskId
+      ? (loadTaskWorkspaces().find(
+          (entry) => entry.id === commandsMenu.taskId,
+        ) ?? null)
+      : (() => {
+          const scope = active
+            ? taskForSession(active.id, sessionWorkCwd(active))
+            : null;
+          return scope && scope.task.projectId === commandsProject?.id
+            ? scope.task
+            : null;
+        })();
+  // Reusable commands still need a folder when the rail entry is not a stored
+  // project — the path the menu was opened on, else the current folder.
+  const commandsFallbackCwd = commandsMenu?.path ?? projectCwd;
+  // A command's bound terminal can live in any project's dock — the menu
+  // resolves running/failed state across all of them, not just the visible
+  // one, or a run bound elsewhere would look like a fresh Play button.
+  const boundCommandFiles = useMemo(() => {
+    const map = new Map<string, FilePaneTab>();
+    for (const dock of projectTerminals) {
+      for (const file of dock.pane.files) {
+        if (file.command?.presetId) map.set(file.command.presetId, file);
+      }
+    }
+    return map;
+  }, [projectTerminals]);
   const activeSkillContext = active
     ? nativeSkillContextForSession(active)
     : null;
@@ -4077,11 +4170,14 @@ export default function App({
         intent?: TurnIntent;
         planBlockId?: string;
         buildTarget?: PlanBuildTarget;
+        action?: ActionRunRef;
       },
     ) => {
       if (removingSessionIds.current.has(sessionId)) return;
       let storedCurrent = sessionsRef.current.find((s) => s.id === sessionId);
-      const repair = options?.repair ?? storedCurrent?.queuedMessages?.find(row => row.id === options?.queuedMessageId)?.repair;
+      const queuedRow = storedCurrent?.queuedMessages?.find(row => row.id === options?.queuedMessageId);
+      const repair = options?.repair ?? queuedRow?.repair;
+      const action = options?.action ?? queuedRow?.action;
       if (!storedCurrent) return;
       if (repair) {
         if (repairCheckingRef.current.has(sessionId)) return false;
@@ -4142,7 +4238,36 @@ export default function App({
       ) {
         return;
       }
-      if (isPreparingHandoff(current)) return;
+      if (isPreparingHandoff(current)) {
+        // A provider switch is resolving — drop nothing an action submitted;
+        // the queue dispatches once the session is ready again.
+        if (!action) return;
+        setSubmissionSessions((prev) =>
+          prev.map((s) =>
+            s.id === sessionId
+              ? {
+                  ...s,
+                  queuedMessages: [
+                    ...(s.queuedMessages ?? []),
+                    {
+                      id: crypto.randomUUID(),
+                      repair,
+                      text,
+                      attachments,
+                      noteCard,
+                      handoffCard,
+                      intent,
+                      action,
+                    },
+                  ],
+                  queueStatus:
+                    s.queueStatus === "paused" ? "paused" : "active",
+                }
+              : s,
+          ),
+        );
+        return;
+      }
       saveRecentModelChoice(current.harness, current.model);
       const workCwd = sessionWorkCwd(current);
       const submittedText = repair ? composeAgentContext(repair.context, "") : intent === "build" ? "Build approved plan" : text;
@@ -4181,6 +4306,7 @@ export default function App({
                         noteCard,
                         handoffCard,
                         intent,
+                        action,
                       },
                     ],
                     queueStatus:
@@ -4206,7 +4332,7 @@ export default function App({
           return;
         }
         const visible = displayAttachments(attachments);
-        const cards = userTurnCards(noteCard);
+        const cards = userTurnCards(noteCard, undefined, action);
         setSessions((prev) =>
           prev.map((s) => {
             if (s.id !== sessionId) return s;
@@ -4283,7 +4409,9 @@ export default function App({
           : card
             ? SECOND_OPINION_TITLE
             : submittedText;
-      const cards = rawCommand ? undefined : userTurnCards(noteCard, card);
+      const cards = rawCommand
+        ? undefined
+        : userTurnCards(noteCard, card, action);
       const live = isLiveHarness(current.harness);
       const queuedHandoff =
         live && !pendingSwitch ? pendingHandoff(current) : null;
@@ -5388,6 +5516,7 @@ export default function App({
             noteCard: head.noteCard,
             handoffCard: head.handoffCard,
             intent: head.intent,
+            action: head.action,
           });
         }, 0),
       );
@@ -5434,7 +5563,13 @@ export default function App({
             ? {
                 ...session,
                 queuedMessages: session.queuedMessages?.map((message) =>
-                  message.id === messageId && !message.repair ? { ...message, text } : message,
+                  message.id === messageId && !message.repair
+                    ? // Edited text no longer matches the action's captured
+                      // revision — drop the evidence stamp.
+                      message.text === text
+                      ? message
+                      : { ...message, text, action: undefined }
+                    : message,
                 ),
                 editingQueuedMessageId: undefined,
               }
@@ -5459,6 +5594,7 @@ export default function App({
         queuedMessageId: message.id,
         noteCard: message.noteCard,
         handoffCard: message.handoffCard,
+        action: message.action,
       });
     },
     [onSubmit],
@@ -5594,6 +5730,236 @@ export default function App({
     },
     [openSessionBeside],
   );
+
+  const onRunAgentAction = useCallback(
+    (args: {
+      sourceSessionId: string;
+      cwd: string;
+      harness: HarnessId;
+      model: string;
+      text: string;
+      action: ActionRunRef;
+    }) => {
+      const source = sessionsRef.current.find(
+        (session) => session.id === args.sourceSessionId,
+      );
+      const session = {
+        ...newSession(
+          args.harness,
+          args.cwd,
+          args.model,
+          source?.runtimeMode,
+        ),
+        title: formatSessionTitle(args.harness, args.action.name),
+      };
+      openSessionBeside(args.sourceSessionId, session, args.cwd);
+      onSubmit(session.id, args.text, [], {
+        action: args.action,
+        followUpBehavior: "queue",
+      });
+    },
+    [onSubmit, openSessionBeside],
+  );
+
+  const onOpenCommands = useCallback(
+    (options: {
+      anchor: PopoverAnchor;
+      path?: string;
+      projectId?: string;
+      taskId?: string;
+    }) => setCommandsMenu(options),
+    [],
+  );
+
+  /**
+   * Runs a saved command in the project dock. A bound terminal is reused —
+   * running (or a launch still in flight) → focus only, idle → rerun in
+   * place — so one command can never launch twice, and a remount or restart
+   * never re-fires it. Returns an error string for the menu to show.
+   */
+  const onRunProjectCommand = useCallback(
+    async (
+      command: {
+        id: string;
+        name: string;
+        command: string;
+        repositoryId?: string;
+        relativeCwd?: string;
+        steps?: { command: string; host?: "native" }[];
+      },
+      project: ProjectRecord | undefined,
+      task: TaskWorkspace | null | undefined,
+      fallbackCwd?: string,
+    ): Promise<string | undefined> => {
+      const target = resolveCommandTarget({
+        command,
+        project,
+        task,
+        fallbackCwd,
+      });
+      if ("error" in target) return target.error;
+      const projectPath = projectCwdRef.current;
+      if (!looksLikeProject(projectPath))
+        return "Open a project folder to run commands.";
+      // A launch already in flight (still awaiting the cwd check) must not
+      // let a fast second click queue a duplicate.
+      if (commandLaunchRef.current.has(command.id)) return;
+      commandLaunchRef.current.add(command.id);
+      try {
+        return await runProjectCommand(command, target, projectPath);
+      } finally {
+        commandLaunchRef.current.delete(command.id);
+      }
+    },
+    [focusProjectTerminal],
+  );
+
+  /** Body of `onRunProjectCommand`, split out so the in-flight guard can wrap
+   * every await uniformly. */
+  const runProjectCommand = async (
+    command: {
+      id: string;
+      name: string;
+      command: string;
+      repositoryId?: string;
+      relativeCwd?: string;
+      steps?: { command: string; host?: "native" }[];
+    },
+    target: { cwd: string },
+    projectPath: string,
+  ): Promise<string | undefined> => {
+      // The bound terminal can live in another project's dock — dedupe has
+      // to search everywhere, not just the visible dock.
+      let boundPath: string | undefined;
+      let bound: FilePaneTab | undefined;
+      for (const dock of projectTerminalsRef.current) {
+        const found = dock.pane.files.find(
+          (file) => file.command?.presetId === command.id,
+        );
+        if (found) {
+          boundPath = dock.projectPath;
+          bound = found;
+          break;
+        }
+      }
+      if (bound && boundPath) {
+        // A terminal bound to a different project's dock can't be focused or
+        // re-fired from here — mutating it would run invisible work.
+        if (!sameProjectPath(boundPath, projectPath)) {
+          return `"${command.name}" is bound to a terminal in ${prettyCwd(boundPath)}.`;
+        }
+        const fileId = bound.id;
+        const dockPath = boundPath;
+        const focus = () => {
+          if (sameProjectPath(dockPath, projectPath)) focusProjectTerminal();
+        };
+        const reveal = (entry: ProjectTerminal) =>
+          withDockOpen(selectDockTerminal(entry, fileId), true);
+        // runId > launched means a launch is queued but the PTY write hasn't
+        // landed — treat as running so a fast second click can't double-fire.
+        // A failed run is over even when `launched` never landed, so it stays
+        // re-runnable instead of wedging the terminal.
+        const launchPending =
+          (bound.command?.runId ?? 0) > (bound.command?.launched ?? 0) &&
+          bound.command?.failed !== bound.command?.runId;
+        if (bound.foreground || launchPending) {
+          setProjectTerminals((prev) =>
+            mapProjectTerminal(prev, dockPath, reveal),
+          );
+          focus();
+          return;
+        }
+        // pty_spawn silently falls back to $HOME for a missing directory —
+        // check first so a stale worktree can't run elsewhere. Only a rerun
+        // or fresh launch pays the (possibly WSL) roundtrip.
+        const exists = await listDir(target.cwd)
+          .then(() => true)
+          .catch(() => false);
+        if (!exists) return `Directory not found: ${target.cwd}`;
+        if (!sameProjectPath(bound.cwd, target.cwd)) {
+          // The target moved (task worktree, repository or subdirectory
+          // changed) — a PTY can't change directory, so replace the terminal
+          // in its own dock.
+          const file: FilePaneTab = {
+            ...newTerminalFile(target.cwd, command.name),
+            command: {
+              presetId: command.id,
+              name: command.name,
+              text: command.command,
+              ...(command.steps?.length ? { steps: command.steps } : {}),
+              runId: 1,
+            },
+          };
+          setProjectTerminals((prev) =>
+            mapProjectTerminal(prev, dockPath, (entry) => ({
+              ...entry,
+              open: true,
+              pane: {
+                ...entry.pane,
+                files: entry.pane.files.map((item) =>
+                  item.id === fileId ? file : item,
+                ),
+                activeFileId: file.id,
+              },
+            })),
+          );
+          focus();
+          return;
+        }
+        // Same target — re-fire with the command's current text so edits are
+        // never replayed stale.
+        setProjectTerminals((prev) =>
+          mapProjectTerminal(prev, dockPath, (entry) =>
+            reveal(
+              patchDockTerminal(entry, fileId, {
+                // Tab label follows an edited command name.
+                title: command.name,
+                command: {
+                  name: command.name,
+                  text: command.command,
+                  // Explicit undefined clears keys a fresh run no longer has —
+                  // the meta merge keeps old keys otherwise.
+                  steps: command.steps?.length ? command.steps : undefined,
+                  failed: undefined,
+                  step: undefined,
+                  runId: (bound.command?.runId ?? 0) + 1,
+                },
+              }),
+            ),
+          ),
+        );
+        focus();
+        return;
+      }
+      const exists = await listDir(target.cwd)
+        .then(() => true)
+        .catch(() => false);
+      if (!exists) return `Directory not found: ${target.cwd}`;
+      const file: FilePaneTab = {
+        ...newTerminalFile(target.cwd, command.name),
+        command: {
+          presetId: command.id,
+          name: command.name,
+          text: command.command,
+          ...(command.steps?.length ? { steps: command.steps } : {}),
+          runId: 1,
+        },
+      };
+      setProjectTerminals((prev) =>
+        findProjectTerminal(prev, projectPath)
+          ? mapProjectTerminal(prev, projectPath, (entry) =>
+              addTerminalToDock(entry, file),
+            )
+          : [...prev, createProjectTerminal(projectPath, file)],
+      );
+      focusProjectTerminal();
+  };
+
+  const onStopProjectCommand = useCallback((fileId: string) => {
+    // Ctrl-C — stops the foreground process, keeps the terminal and its
+    // scrollback so the bound command stays re-runnable.
+    void writePty(fileId, "\x03").catch(() => undefined);
+  }, []);
 
   const autoContinueKey = sessions
     .filter(
@@ -6555,6 +6921,7 @@ export default function App({
     onSecondOpinion,
     onHandoff,
     onNewTerminal: onNewTerminalInSession,
+    onRunAgentAction,
   };
 
   return (
@@ -6626,6 +6993,7 @@ export default function App({
         onSelectProject={onSelectProject}
         onOpenProject={pickProject}
         onNewTask={onNewTask}
+        onOpenCommands={onOpenCommands}
         onOpenTask={onOpenTask}
         focusTaskId={focusTaskId}
         onEditTask={onEditTask}
@@ -6694,6 +7062,46 @@ export default function App({
           onClose={() => setTaskSheet(null)}
         />
       )}
+      {commandsMenu ? (
+        <ProjectCommandsMenu
+          anchor={commandsMenu.anchor}
+          project={commandsProject}
+          task={commandsTask}
+          boundFiles={boundCommandFiles}
+          fallbackCwd={commandsFallbackCwd}
+          onRun={(command) =>
+            onRunProjectCommand(
+              command,
+              commandsProject,
+              commandsTask,
+              commandsFallbackCwd,
+            )
+          }
+          onStop={onStopProjectCommand}
+          onManage={() => {
+            // A menu opened on an explicit project whose record no longer
+            // resolves was deleted — don't silently edit another project's
+            // commands.
+            const project = commandsMenu.projectId
+              ? commandsProject
+              : (commandsProject ??
+                (commandsMenu.path && looksLikeProject(commandsMenu.path)
+                  ? ensureProjectForPath(commandsMenu.path)
+                  : undefined) ??
+                (looksLikeProject(projectCwd)
+                  ? ensureProjectForPath(projectCwd)
+                  : undefined));
+            if (project) setCommandsSheet(project.id);
+          }}
+          onClose={() => setCommandsMenu(null)}
+        />
+      ) : null}
+      {commandsSheet ? (
+        <ProjectCommandsSheet
+          projectId={commandsSheet}
+          onClose={() => setCommandsSheet(null)}
+        />
+      ) : null}
       {taskPrSheetTaskId && (
         <TaskPrSheet
           taskId={taskPrSheetTaskId}
@@ -6820,6 +7228,11 @@ export default function App({
                       onCloseOtherTerminals={onCloseOtherProjectTerminals}
                       onReorderTerminals={onReorderProjectTerminals}
                       onTerminalMetaChange={onTerminalMetaChange}
+                      onOpenCommands={
+                        show
+                          ? (rect) => onOpenCommands({ anchor: rect })
+                          : undefined
+                      }
                     />
                   </div>
                 );

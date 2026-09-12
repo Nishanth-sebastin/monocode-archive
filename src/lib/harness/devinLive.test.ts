@@ -30,6 +30,10 @@ const {
   stopDevinSession,
 } = await import("./devin");
 import type { HarnessEvent } from "./types";
+import {
+  resetHarnessModelOverlays,
+  setHarnessModels,
+} from "../models";
 
 const MODES = ["accept-edits", "smart", "ask", "plan", "bypass"];
 
@@ -89,6 +93,7 @@ const baseInput = (events: HarnessEvent[], text: string, id = "t1") => ({
 describe("devin live turn sequence", () => {
   beforeEach(() => {
     sent.length = 0;
+    resetHarnessModelOverlays();
   });
 
   it("starts a session, applies the advertised supervised mode, and streams a turn", async () => {
@@ -424,5 +429,151 @@ describe("devin live turn sequence", () => {
     onExit!(1);
     await turn.catch(() => undefined);
     expect(events.some((e) => e.type === "session.ended")).toBe(true);
+  });
+
+  it("writes the reasoning variant uid and maps reported models back to the group", async () => {
+    const modelOptions = [
+      { value: "swe-2-medium", name: "SWE-2 Medium" },
+      { value: "swe-2-high", name: "SWE-2 High" },
+    ];
+    const setup = {
+      ...SETUP,
+      modes: { ...SETUP.modes, currentModeId: "accept-edits" },
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          type: "select",
+          currentValue: "swe-2-medium",
+          options: modelOptions,
+        },
+      ],
+    };
+    setHarnessModels("devin", [
+      {
+        id: "devin:swe-2",
+        harness: "devin",
+        name: "SWE-2",
+        nativeId: "swe-2-medium",
+        settings: [
+          {
+            id: "reasoning",
+            label: "Reasoning",
+            kind: "select",
+            value: "swe-2-medium",
+            options: [
+              { value: "swe-2-medium", label: "Medium" },
+              { value: "swe-2-high", label: "High" },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const events: HarnessEvent[] = [];
+    const turn = sendDevinTurn({
+      ...baseInput(events, "hey", "t9"),
+      model: "devin:swe-2",
+      modelSettings: { reasoning: "swe-2-high" },
+    } as never);
+
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
+    await waitFor(() => byMethod("session/new").length > 0, "session/new");
+    reply(byMethod("session/new")[0].id, setup);
+
+    // High reasoning → the `swe-2-high` variant uid, not a reassembled base.
+    await waitFor(
+      () => byMethod("session/set_config_option").length > 0,
+      "set_config_option",
+    );
+    expect(lastByMethod("session/set_config_option").params).toMatchObject({
+      sessionId: "S1",
+      configId: "model",
+      value: "swe-2-high",
+    });
+    reply(lastByMethod("session/set_config_option").id, {});
+
+    // Devin reporting the applied value maps back to the group id + reasoning.
+    notify({
+      sessionUpdate: "config_option_update",
+      configOptions: [
+        { ...setup.configOptions[0], currentValue: "swe-2-high" },
+      ],
+    });
+    await waitFor(
+      () => events.some((e) => e.type === "session.configChanged"),
+      "configChanged",
+    );
+    const changed = events.find((e) => e.type === "session.configChanged");
+    expect(changed).toMatchObject({
+      model: "devin:swe-2",
+      modelSettings: { reasoning: "swe-2-high" },
+    });
+
+    await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
+    reply(lastByMethod("session/prompt").id, { stopReason: "end_turn" });
+    await turn;
+    await stopDevinSession("t9");
+  });
+
+  it("ignores a reasoning uid the selected model does not offer", async () => {
+    setHarnessModels("devin", [
+      {
+        id: "devin:swe-2",
+        harness: "devin",
+        name: "SWE-2",
+        nativeId: "swe-2-medium",
+        settings: [
+          {
+            id: "reasoning",
+            label: "Reasoning",
+            kind: "select",
+            value: "swe-2-medium",
+            options: [
+              { value: "swe-2-medium", label: "Medium" },
+              { value: "swe-2-high", label: "High" },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const events: HarnessEvent[] = [];
+    const turn = sendDevinTurn({
+      ...baseInput(events, "hey", "t8"),
+      model: "devin:swe-2",
+      modelSettings: { reasoning: "other-model-high" },
+    } as never);
+
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
+    await waitFor(() => byMethod("session/new").length > 0, "session/new");
+    reply(byMethod("session/new")[0].id, {
+      ...SETUP,
+      modes: { ...SETUP.modes, currentModeId: "accept-edits" },
+    });
+
+    // The foreign uid is not offered by swe-2 → the base variant is sent.
+    await waitFor(
+      () => byMethod("session/set_config_option").length > 0,
+      "set_config_option",
+    );
+    expect(lastByMethod("session/set_config_option").params).toMatchObject({
+      sessionId: "S1",
+      configId: "model",
+      value: "swe-2-medium",
+    });
+    reply(lastByMethod("session/set_config_option").id, {});
+    await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
+    reply(lastByMethod("session/prompt").id, { stopReason: "end_turn" });
+    await turn;
+    await stopDevinSession("t8");
   });
 });

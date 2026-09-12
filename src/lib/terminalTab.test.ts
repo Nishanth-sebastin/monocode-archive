@@ -49,6 +49,33 @@ describe("applyTerminalMeta", () => {
     });
     expect(applyTerminalMeta(file, { foreground: "vite" })).toBe(file);
   });
+
+  it("merges a bound command's run state", () => {
+    const file = {
+      ...newTerminalFile("/repo", "dev"),
+      command: {
+        presetId: "c1",
+        name: "Dev",
+        text: "npm run dev",
+        runId: 1,
+      },
+    };
+    const launched = applyTerminalMeta(file, { command: { launched: 1 } });
+    expect(launched.command).toEqual({
+      presetId: "c1",
+      name: "Dev",
+      text: "npm run dev",
+      runId: 1,
+      launched: 1,
+    });
+    expect(launched).not.toBe(file);
+    // An identical patch is a no-op — no new object, no extra render.
+    expect(
+      applyTerminalMeta(launched, { command: { launched: 1 } }),
+    ).toBe(launched);
+    const rerun = applyTerminalMeta(launched, { command: { runId: 2 } });
+    expect(rerun.command).toMatchObject({ runId: 2, launched: 1 });
+  });
 });
 
 describe("listRunningTerminals", () => {
