@@ -118,7 +118,7 @@ describe("agent action store", () => {
 
 describe("actionContextSources", () => {
   it("marks task and ticket unavailable without them", () => {
-    const sources = actionContextSources({});
+    const sources = actionContextSources({ cwd: "/tmp/repo" });
     expect(
       sources.find((source) => source.kind === "task")?.available,
     ).toBe(false);
@@ -127,6 +127,43 @@ describe("actionContextSources", () => {
     ).toBe(false);
     expect(
       sources.find((source) => source.kind === "changes")?.available,
+    ).toBe(true);
+  });
+
+  it("does not offer changes for a cwd that is not project-shaped", () => {
+    // Home directories and bare paths would make the changes source scan a
+    // meaningless or enormous tree.
+    for (const cwd of ["/", process.env.HOME ?? "", "C:\\", ""]) {
+      const sources = actionContextSources({ cwd });
+      expect(
+        sources.find((source) => source.kind === "changes")?.available,
+        cwd || "(empty)",
+      ).toBe(false);
+    }
+    // A task with no prepared working copy and no project cwd has nothing to
+    // scan either.
+    const bare = task({ children: [] });
+    expect(
+      actionContextSources({ task: bare, cwd: "/" }).find(
+        (source) => source.kind === "changes",
+      )?.available,
+    ).toBe(false);
+    // …but a task child working copy is always a valid scan target.
+    const withCopy = task({
+      children: [
+        {
+          id: "c1",
+          repositoryId: "r1",
+          workingCopy: "/tmp/worktrees/t1-app",
+          sessionIds: [],
+          launch: { state: "ready" as const },
+        },
+      ],
+    });
+    expect(
+      actionContextSources({ task: withCopy, cwd: "/" }).find(
+        (source) => source.kind === "changes",
+      )?.available,
     ).toBe(true);
   });
 

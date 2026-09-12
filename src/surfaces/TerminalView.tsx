@@ -195,8 +195,16 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
       },
       (code) => {
         if (closed) return;
+        spawned.current = false;
+        runningProcessRef.current = null;
         const status = code == null ? "" : ` (${code})`;
         term.writeln(`\r\n[process exited${status}]`);
+        // The shell is gone — a dead terminal must not stay "running" or a
+        // bound command could never re-run.
+        onMetaChangeRef.current?.({
+          foreground: null,
+          title: defaultTerminalTitle(cwd),
+        });
       },
     );
 

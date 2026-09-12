@@ -1,5 +1,5 @@
 import { promptBlocks, type PromptContentBlock } from "../attachments";
-import type { AgentModel } from "../models";
+import { modelsFor, type AgentModel } from "../models";
 import type { Attachment, RuntimeMode, ToolPreview } from "../session";
 import { normalizeTaskListStatus } from "../taskList";
 import type { UserQuestion, UserQuestionReply } from "../userQuestion";
@@ -33,7 +33,7 @@ export const AUTH_HELP =
  * spurious "not signed in" error while the session works fine.
  */
 const DEVIN_AUTH_MESSAGE =
-  /not (?:signed|logged) in|not authenticated|unauthori[sz]ed|authentication (?:required|failed|error)|(?:please|then|must) (?:log|sign) ?in|(?:log|sign) ?in (?:required|first|again|to continue)|invalid (?:api key|access token|token|credentials?)|expired (?:token|credentials?|session)|forbidden|permission denied|devin auth login/i;
+  /not (?:signed|logged) in|not authenticated|unauthori[sz]ed|authentication (?:required|failed|error)|(?:please|then|must) (?:log|sign) ?in|(?:log|sign) ?in (?:required|first|again|to continue)|(?:signed|logged) out|invalid (?:api key|access token|token|credentials?)|expired (?:token|credentials?|session)|(?:token|credentials?|session)(?:\s+(?:has|have|is))?\s+expired|(?:401|403)[^\n]*(?:unauthori[sz]ed|forbidden)|(?:unauthori[sz]ed|forbidden)[^\n]*\b(?:401|403)\b|devin auth login/i;
 
 export function isDevinAuthMessage(text: string): boolean {
   return DEVIN_AUTH_MESSAGE.test(text);
@@ -71,6 +71,8 @@ export type DevinElicitField = {
 };
 
 const MAX_CATALOG_ITEMS = 200;
+/** Raw variant cap before grouping — Devin currently ships ~420 choices. */
+const MAX_CATALOG_VARIANTS = 2000;
 const MAX_DESCRIPTION_CHARS = 240;
 
 /** Devin advertises image and embedded-context prompt blocks. */
@@ -211,16 +213,24 @@ export function devinModelConfigId(options: DevinConfigOption[]): string {
  * primary's level is split out.
  */
 const DEVIN_LEVELS: { re: RegExp; level: string }[] = [
-  { re: /\bNo Thinking\b/, level: "none" },
-  { re: /\bNone\b/, level: "none" },
-  { re: /\bMinimal\b/, level: "minimal" },
-  { re: /\bLow(?:\s+Thinking)?\b/, level: "low" },
-  { re: /\bMedium(?:\s+Thinking)?\b/, level: "medium" },
-  { re: /\bX-?High(?:\s+Thinking)?\b/, level: "xhigh" },
-  { re: /\bHigh(?:\s+Thinking)?\b/, level: "high" },
-  { re: /\bMax\b/, level: "max" },
-  { re: /\bThinking\b/, level: "thinking" },
+  { re: /\bNo Thinking\b/i, level: "none" },
+  { re: /\bNone\b/i, level: "none" },
+  { re: /\bMinimal\b/i, level: "minimal" },
+  { re: /\bLow(?:\s+Thinking)?\b/i, level: "low" },
+  { re: /\bMedium(?:\s+Thinking)?\b/i, level: "medium" },
+  { re: /\b(?:X-?High|Extra[- ]High)(?:\s+Thinking)?\b/i, level: "xhigh" },
+  { re: /\bHigh(?:\s+Thinking)?\b/i, level: "high" },
+  { re: /\bMax(?:\s+Thinking)?\b/i, level: "max" },
+  { re: /\bThinking\b/i, level: "thinking" },
 ];
+
+/**
+ * Last resort when a label carries no level word (e.g. Devin starts omitting
+ * `name` so the label is the uid itself): strip trailing speed/context
+ * segments, then a trailing level segment, from the uid.
+ */
+const DEVIN_UID_LEVEL =
+  /^(.*?)[-_](none|minimal|low|medium|high|xhigh|max|thinking)((?:[-_](?:fast|priority|1m))*)$/i;
 
 const DEVIN_LEVEL_RANK: Record<string, number> = {
   default: 0,
@@ -268,6 +278,17 @@ function parseDevinVariant(
     }
   }
   if (!best) {
+    const suffix = DEVIN_UID_LEVEL.exec(uid);
+    if (suffix?.[1]) {
+      const tail = (suffix[3] ?? "").replace(/priority/gi, "fast");
+      const descriptor = `${suffix[1]}${tail}`.replace(/[-_]+/g, " ").trim();
+      return {
+        uid,
+        descriptor: descriptor || name,
+        level: suffix[2]!.toLowerCase(),
+        contextWindow,
+      };
+    }
     return { uid, descriptor: name, level: "default", contextWindow };
   }
   const descriptor = `${name.slice(0, best.index)} ${name.slice(best.end)}`
@@ -290,25 +311,31 @@ function parseDevinVariant(
 function devinGroupedModels(
   variants: DevinVariant[],
   currentUid?: string,
+  usedIds: Set<string> = new Set(),
 ): AgentModel[] {
-  const groups = new Map<string, DevinVariant[]>();
+  // Case-fold the key — labels that differ only in casing ("Model A" /
+  // "model a") are the same family.
+  const groups = new Map<string, { descriptor: string; list: DevinVariant[] }>();
   for (const variant of variants) {
-    const list = groups.get(variant.descriptor) ?? [];
-    list.push(variant);
-    groups.set(variant.descriptor, list);
+    const key = variant.descriptor.toLowerCase();
+    const group = groups.get(key);
+    if (group) group.list.push(variant);
+    else groups.set(key, { descriptor: variant.descriptor, list: [variant] });
   }
   const models: AgentModel[] = [];
-  const usedIds = new Set<string>();
-  for (const [descriptor, members] of groups) {
+  for (const { descriptor, list: members } of groups.values()) {
     if (models.length >= MAX_CATALOG_ITEMS) break;
-    const seen = new Set<string>();
-    const levels = members.filter((member) =>
-      seen.has(member.level) ? false : (seen.add(member.level), true),
-    );
-    levels.sort(
+    // Every variant stays selectable — two uids can share a level word
+    // ("X" vs "X Thinking" labels), so disambiguate duplicate labels with the
+    // uid rather than dropping a variant.
+    const sorted = [...members].sort(
       (a, b) =>
         (DEVIN_LEVEL_RANK[a.level] ?? 9) - (DEVIN_LEVEL_RANK[b.level] ?? 9),
     );
+    const levelCounts = new Map<string, number>();
+    for (const member of sorted) {
+      levelCounts.set(member.level, (levelCounts.get(member.level) ?? 0) + 1);
+    }
     const active =
       (currentUid
         ? members.find((member) => member.uid === currentUid)
@@ -330,7 +357,7 @@ function devinGroupedModels(
       name: descriptor,
       nativeId: active.uid,
       ...(active.contextWindow ? { contextWindow: active.contextWindow } : {}),
-      ...(levels.length > 1
+      ...(sorted.length > 1
         ? {
             settings: [
               {
@@ -338,9 +365,12 @@ function devinGroupedModels(
                 label: "Reasoning",
                 kind: "select" as const,
                 value: active.uid,
-                options: levels.map((member) => ({
+                options: sorted.map((member) => ({
                   value: member.uid,
-                  label: DEVIN_LEVEL_LABEL[member.level] ?? member.level,
+                  label:
+                    (levelCounts.get(member.level) ?? 0) > 1
+                      ? `${DEVIN_LEVEL_LABEL[member.level] ?? member.level} (${member.uid})`
+                      : (DEVIN_LEVEL_LABEL[member.level] ?? member.level),
                 })),
               },
             ],
@@ -360,7 +390,7 @@ export function devinModelsFromConfig(
     options.find((option) => option.category === "model");
   const seen = new Set<string>();
   const variants: DevinVariant[] = [];
-  for (const choice of (model?.options ?? []).slice(0, MAX_CATALOG_ITEMS)) {
+  for (const choice of (model?.options ?? []).slice(0, MAX_CATALOG_VARIANTS)) {
     if (seen.has(choice.value)) continue;
     seen.add(choice.value);
     variants.push(
@@ -378,17 +408,26 @@ export function devinModelsFromConfig(
 export function devinModelSelectionForUid(
   options: DevinConfigOption[],
   uid: string,
+  cwd?: string,
 ): { id: string; reasoning?: string } {
-  for (const model of devinModelsFromConfig(options)) {
-    const reasoning = model.settings?.find(
-      (setting) => setting.id === "reasoning",
-    );
-    if (reasoning?.options.some((option) => option.value === uid)) {
-      return { id: model.id, reasoning: uid };
+  const find = (models: AgentModel[]) => {
+    for (const model of models) {
+      const reasoning = model.settings?.find(
+        (setting) => setting.id === "reasoning",
+      );
+      if (reasoning?.options.some((option) => option.value === uid)) {
+        return { id: model.id, reasoning: uid };
+      }
+      if (model.nativeId === uid) return { id: model.id };
     }
-    if (model.nativeId === uid) return { id: model.id };
-  }
-  return { id: `devin:${uid}` };
+    return undefined;
+  };
+  // The picker catalog (from `devin models list`) is the id space the picker
+  // displays — prefer it so a reported uid maps to the same row the user sees.
+  return (
+    find(modelsFor("devin", cwd)) ??
+    find(devinModelsFromConfig(options)) ?? { id: `devin:${uid}` }
+  );
 }
 
 /** The model Devin reports as active after session setup or a config update. */
@@ -408,7 +447,7 @@ export function devinModelsFromJson(raw: unknown): AgentModel[] {
   const families = Array.isArray(rec?.families) ? rec.families : [];
   const seen = new Set<string>();
   const variants: DevinVariant[] = [];
-  const familiesOnly: AgentModel[] = [];
+  const familiesOnly: { slug: string; label: string }[] = [];
   for (const item of families) {
     const family = asRecord(item);
     if (!family) continue;
@@ -419,15 +458,9 @@ export function devinModelsFromJson(raw: unknown): AgentModel[] {
       slug ??
       "";
     const entries = Array.isArray(family.variants) ? family.variants : [];
-    if (slug && entries.length === 0) {
-      familiesOnly.push({
-        id: `devin:${slug}`,
-        harness: "devin",
-        name: label || slug,
-        nativeId: slug,
-      });
-    }
+    if (slug && entries.length === 0) familiesOnly.push({ slug, label });
     for (const entry of entries) {
+      if (variants.length >= MAX_CATALOG_VARIANTS) break;
       const variant = asRecord(entry);
       const uid = stringField(variant ?? {}, "model_uid");
       if (!uid || seen.has(uid)) continue;
@@ -442,7 +475,18 @@ export function devinModelsFromJson(raw: unknown): AgentModel[] {
       );
     }
   }
-  return [...devinGroupedModels(variants), ...familiesOnly];
+  const usedIds = new Set<string>();
+  const models = devinGroupedModels(variants, undefined, usedIds);
+  for (const { slug, label } of familiesOnly) {
+    if (models.length >= MAX_CATALOG_ITEMS) break;
+    let id = `devin:${slug}`;
+    for (let suffix = 2; usedIds.has(id); suffix += 1) {
+      id = `devin:${slug}-${suffix}`;
+    }
+    usedIds.add(id);
+    models.push({ id, harness: "devin", name: label || slug, nativeId: slug });
+  }
+  return models;
 }
 
 export function devinModelsFromOutput(stdout: string): AgentModel[] {

@@ -48,6 +48,7 @@ export function AgentActionsMenu({
   const [open, setOpen] = useState(false);
   const [running, setRunning] = useState<AgentAction | null>(null);
   const [managing, setManaging] = useState(false);
+  const [active, setActive] = useState(0);
   const raw = useSyncExternalStore(
     subscribeAgentActions,
     agentActionsSnapshot,
@@ -82,15 +83,33 @@ export function AgentActionsMenu({
           side="top"
           align="start"
           width={240}
+          autoFocus
+          tabIndex={-1}
           onDismiss={() => setOpen(false)}
           role="menu"
           aria-label="Agent actions"
           className="p-1.5"
+          onKeyDown={(event) => {
+            const count = actions.length + 1;
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              setActive((index) => (index + 1) % count);
+            } else if (event.key === "ArrowUp") {
+              event.preventDefault();
+              setActive((index) => (index - 1 + count) % count);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              setOpen(false);
+              const picked = actions[active];
+              if (picked) setRunning(picked);
+              else setManaging(true);
+            }
+          }}
         >
           <p className="px-2 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-content/40">
             Agent actions
           </p>
-          {actions.map((action) => (
+          {actions.map((action, index) => (
             <button
               key={action.id}
               type="button"
@@ -99,7 +118,7 @@ export function AgentActionsMenu({
                 setOpen(false);
                 setRunning(action);
               }}
-              className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/10"
+              className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/10 ${index === active ? "bg-content/10" : ""}`}
             >
               <Zap className="size-3.5 shrink-0 text-content/45" />
               <span className="min-w-0 flex-1 truncate text-[13px]">
@@ -125,7 +144,7 @@ export function AgentActionsMenu({
                 setOpen(false);
                 setManaging(true);
               }}
-              className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/10"
+              className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/10 ${active === actions.length ? "bg-content/10" : ""}`}
             >
               <SlidersHorizontal className="size-3.5 shrink-0 text-content/45" />
               <span className="min-w-0 flex-1 truncate text-[13px]">

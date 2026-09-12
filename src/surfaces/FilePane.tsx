@@ -172,6 +172,7 @@ function FilePaneComponent({
                   id={file.id}
                   cwd={file.cwd}
                   active={focused && file.id === pane.activeFileId}
+                  command={file.command}
                   onMetaChange={(patch) =>
                     onTerminalMetaChange?.(file.id, patch)
                   }

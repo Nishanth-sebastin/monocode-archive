@@ -197,6 +197,91 @@ describe("devinConfigOptions + models", () => {
     });
   });
 
+  it("keeps 'X Thinking' variants selectable alongside 'X' labels", () => {
+    const models = devinModelsFromConfig(
+      devinConfigOptions([
+        {
+          id: "model",
+          type: "select",
+          options: [
+            { value: "sol-high", name: "Sol High" },
+            { value: "sol-high-thinking", name: "Sol High Thinking" },
+            { value: "sol-max", name: "Sol Max Thinking" },
+          ],
+        },
+      ]),
+    );
+    // "Sol High" and "Sol High Thinking" collapse to the same level word —
+    // both uids stay selectable with a disambiguated label, and "Max
+    // Thinking" folds into the Sol group as Max.
+    expect(models).toHaveLength(1);
+    const reasoning = models[0]!.settings?.find(
+      (setting) => setting.id === "reasoning",
+    );
+    expect(reasoning?.options).toEqual([
+      { value: "sol-high", label: "High (sol-high)" },
+      { value: "sol-high-thinking", label: "High (sol-high-thinking)" },
+      { value: "sol-max", label: "Max" },
+    ]);
+  });
+
+  it("parses spelled-out and lowercase level words, and falls back to the uid", () => {
+    const models = devinModelsFromConfig(
+      devinConfigOptions([
+        {
+          id: "model",
+          type: "select",
+          options: [
+            { value: "a-xhigh", name: "Model A Extra High" },
+            { value: "a-low", name: "model a low" },
+            // Labels without a level word — the uid suffix carries it.
+            { value: "b-medium", name: "Second choice" },
+            { value: "b-high", name: "First choice" },
+          ],
+        },
+      ]),
+    );
+    const a = models.find((model) => model.id === "devin:model-a");
+    expect(
+      a?.settings?.find((setting) => setting.id === "reasoning")?.options,
+    ).toEqual([
+      { value: "a-low", label: "Low" },
+      { value: "a-xhigh", label: "Extra High" },
+    ]);
+    // With no level word in either label, both uids still group under the
+    // uid-derived descriptor.
+    const b = models.find((model) => model.name === "b");
+    expect(
+      b?.settings?.find((setting) => setting.id === "reasoning")?.options,
+    ).toEqual([
+      { value: "b-medium", label: "Medium" },
+      { value: "b-high", label: "High" },
+    ]);
+  });
+
+  it("keeps grouped reasoning options past the raw choice cap", () => {
+    // More raw choices than the old pre-group cap — truncating before
+    // grouping would drop the Tail family entirely.
+    const options = Array.from({ length: 300 }, (_, index) => ({
+      value: `filler-${index}-high`,
+      name: "Filler High",
+    }));
+    options.push(
+      { value: "tail-low", name: "Tail Low" },
+      { value: "tail-max", name: "Tail Max" },
+    );
+    const models = devinModelsFromConfig(
+      devinConfigOptions([{ id: "model", type: "select", options }]),
+    );
+    const tail = models.find((model) => model.name === "Tail");
+    expect(
+      tail?.settings?.find((setting) => setting.id === "reasoning")?.options,
+    ).toEqual([
+      { value: "tail-low", label: "Low" },
+      { value: "tail-max", label: "Max" },
+    ]);
+  });
+
   it("reads modes from the setup modes block and the mode config option", () => {
     expect(devinModesFromSetup(SESSION_NEW)).toEqual({
       currentModeId: "accept-edits",
@@ -542,6 +627,21 @@ describe("isDevinAuthMessage", () => {
     expect(isDevinAuthMessage("401 Unauthorized")).toBe(true);
     expect(isDevinAuthMessage("please run `devin auth login`")).toBe(true);
     expect(isDevinAuthMessage("Please log in to continue")).toBe(true);
+    // Reversed phrasing and logged-out states count too.
+    expect(isDevinAuthMessage("token expired")).toBe(true);
+    expect(isDevinAuthMessage("session has expired")).toBe(true);
+    expect(isDevinAuthMessage("credentials have expired")).toBe(true);
+    expect(isDevinAuthMessage("signed out — sign in again")).toBe(true);
+  });
+
+  it("ignores unrelated permission and service errors", () => {
+    expect(isDevinAuthMessage("permission denied: /etc/shadow")).toBe(false);
+    expect(isDevinAuthMessage("rm: cannot remove: Permission denied")).toBe(
+      false,
+    );
+    expect(isDevinAuthMessage("sandbox forbidden syscall")).toBe(false);
+    expect(isDevinAuthMessage("upstream 403 on artifact upload")).toBe(false);
+    expect(isDevinAuthMessage("request denied by sandbox policy")).toBe(false);
   });
 
   it("devinAuthError only appends the auth hint for real auth failures", () => {

@@ -49,6 +49,7 @@ import { runUpdateFlow } from "./lib/updater";
 import { displayAttachments, prepareAttachments } from "./lib/attachments";
 import {
   basename,
+  listDir,
   notifyGitChanged,
   pickFolder,
   restoreSessionCheckout,
@@ -205,6 +206,7 @@ import { type EditorNavigationTarget, type OpenFileFn } from "./lib/search";
 import {
   mergeModelSettings,
   modelCatalogKey,
+  nativeIdFrom,
   preferredModelSettings,
   resolveModel,
   saveLastModelSettings,
@@ -255,6 +257,8 @@ import {
   projectContainsPath,
   projectForPath,
   projectRailKey,
+  projectsSnapshot,
+  subscribeProjects,
   type ProjectRecord,
 } from "./lib/projects";
 import { getVerifiedFamilies } from "./lib/repositoryFamilies";
@@ -711,12 +715,22 @@ export default function App({
   } | null>(null);
   /** ProjectRecord.id of the project whose commands are being edited. */
   const [commandsSheet, setCommandsSheet] = useState<string | null>(null);
+  // The rail's own anchored overlays go stale when the visible folder
+  // changes — close them rather than leaving a floating menu behind.
+  useEffect(() => {
+    setCommandsMenu(null);
+    setCommandsSheet(null);
+  }, [projectCwd]);
+  // Live project list — the commands menu/sheet re-resolve on every store
+  // write instead of parsing localStorage each render.
+  const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
+  const projectsList = useMemo(() => loadProjects(), [projectsRaw]);
   // Saved commands resolve their owning project at open: explicit id → rail
   // path → the active task's project → the current folder's project.
   const commandsProject = !commandsMenu
     ? undefined
     : commandsMenu.projectId
-      ? loadProjects().find((entry) => entry.id === commandsMenu.projectId)
+      ? projectsList.find((entry) => entry.id === commandsMenu.projectId)
       : commandsMenu.path
         ? projectForPath(commandsMenu.path)
         : (() => {
@@ -742,9 +756,9 @@ export default function App({
             ? scope.task
             : null;
         })();
-  const commandsSheetProject = commandsSheet
-    ? loadProjects().find((entry) => entry.id === commandsSheet)
-    : undefined;
+  // Reusable commands still need a folder when the rail entry is not a stored
+  // project — the path the menu was opened on, else the current folder.
+  const commandsFallbackCwd = commandsMenu?.path ?? projectCwd;
   const [filesSearchOpen, setFilesSearchOpen] = useState(false);
   const [searchFocusToken, setSearchFocusToken] = useState(0);
   const [searchViewOpen, setSearchViewOpen] = useState(false);
@@ -1051,6 +1065,16 @@ export default function App({
             resolved,
             session.modelSettings,
           );
+          // A legacy variant-level id (e.g. `devin:x-medium`) resolved to its
+          // group — keep the level by stamping it into the reasoning setting.
+          if (resolved.id !== session.model) {
+            const legacy = nativeIdFrom(session.model);
+            for (const setting of resolved.settings ?? []) {
+              if (setting.options.some((option) => option.value === legacy)) {
+                modelSettings[setting.id] = legacy;
+              }
+            }
+          }
           if (
             resolved.id === session.model &&
             sameSettings(modelSettings, session.modelSettings)
@@ -3984,7 +4008,36 @@ export default function App({
       ) {
         return;
       }
-      if (isPreparingHandoff(current)) return;
+      if (isPreparingHandoff(current)) {
+        // A provider switch is resolving — drop nothing an action submitted;
+        // the queue dispatches once the session is ready again.
+        if (!action) return;
+        setSubmissionSessions((prev) =>
+          prev.map((s) =>
+            s.id === sessionId
+              ? {
+                  ...s,
+                  queuedMessages: [
+                    ...(s.queuedMessages ?? []),
+                    {
+                      id: crypto.randomUUID(),
+                      repair,
+                      text,
+                      attachments,
+                      noteCard,
+                      handoffCard,
+                      intent,
+                      action,
+                    },
+                  ],
+                  queueStatus:
+                    s.queueStatus === "paused" ? "paused" : "active",
+                }
+              : s,
+          ),
+        );
+        return;
+      }
       const workCwd = sessionWorkCwd(current);
       const submittedText = repair ? composeAgentContext(repair.context, "") : intent === "build" ? "Build approved plan" : text;
       const rawCommand = isNativeCommandPrompt(submittedText, current.harness);
@@ -5258,7 +5311,13 @@ export default function App({
             ? {
                 ...session,
                 queuedMessages: session.queuedMessages?.map((message) =>
-                  message.id === messageId && !message.repair ? { ...message, text } : message,
+                  message.id === messageId && !message.repair
+                    ? // Edited text no longer matches the action's captured
+                      // revision — drop the evidence stamp.
+                      message.text === text
+                      ? message
+                      : { ...message, text, action: undefined }
+                    : message,
                 ),
                 editingQueuedMessageId: undefined,
               }
@@ -5462,11 +5521,12 @@ export default function App({
 
   /**
    * Runs a saved command in the project dock. A bound terminal is reused —
-   * running → focus only, idle → rerun in place — so one command can never
-   * launch twice, and a remount or restart never re-fires it.
+   * running (or a launch still in flight) → focus only, idle → rerun in
+   * place — so one command can never launch twice, and a remount or restart
+   * never re-fires it. Returns an error string for the menu to show.
    */
   const onRunProjectCommand = useCallback(
-    (
+    async (
       command: {
         id: string;
         name: string;
@@ -5476,37 +5536,109 @@ export default function App({
       },
       project: ProjectRecord | undefined,
       task: TaskWorkspace | null | undefined,
-    ) => {
-      const target = resolveCommandTarget({ command, project, task });
-      if ("error" in target) return;
+      fallbackCwd?: string,
+    ): Promise<string | undefined> => {
+      const target = resolveCommandTarget({
+        command,
+        project,
+        task,
+        fallbackCwd,
+      });
+      if ("error" in target) return target.error;
       const projectPath = projectCwdRef.current;
-      if (!looksLikeProject(projectPath)) return;
-      const dock = findProjectTerminal(
-        projectTerminalsRef.current,
-        projectPath,
-      );
-      const bound = dock?.pane.files.find(
-        (file) => file.command?.presetId === command.id,
-      );
-      if (bound) {
+      if (!looksLikeProject(projectPath))
+        return "Open a project folder to run commands.";
+      // The bound terminal can live in another project's dock — dedupe has
+      // to search everywhere, not just the visible dock.
+      let boundPath: string | undefined;
+      let bound: FilePaneTab | undefined;
+      for (const dock of projectTerminalsRef.current) {
+        const found = dock.pane.files.find(
+          (file) => file.command?.presetId === command.id,
+        );
+        if (found) {
+          boundPath = dock.projectPath;
+          bound = found;
+          break;
+        }
+      }
+      if (bound && boundPath) {
+        const fileId = bound.id;
+        const dockPath = boundPath;
+        const focus = () => {
+          if (sameProjectPath(dockPath, projectPath)) focusProjectTerminal();
+        };
+        const reveal = (entry: ProjectTerminal) =>
+          withDockOpen(selectDockTerminal(entry, fileId), true);
+        // runId > launched means a launch is queued but the PTY write hasn't
+        // landed — treat as running so a fast second click can't double-fire.
+        const launchPending =
+          (bound.command?.runId ?? 0) > (bound.command?.launched ?? 0);
+        if (bound.foreground || launchPending) {
+          setProjectTerminals((prev) =>
+            mapProjectTerminal(prev, dockPath, reveal),
+          );
+          focus();
+          return;
+        }
+        // pty_spawn silently falls back to $HOME for a missing directory —
+        // check first so a stale worktree can't run elsewhere. Only a rerun
+        // or fresh launch pays the (possibly WSL) roundtrip.
+        const exists = await listDir(target.cwd)
+          .then(() => true)
+          .catch(() => false);
+        if (!exists) return `Directory not found: ${target.cwd}`;
+        if (!sameProjectPath(bound.cwd, target.cwd)) {
+          // The target moved (task worktree, repository or subdirectory
+          // changed) — a PTY can't change directory, so replace the terminal
+          // in its own dock.
+          const file: FilePaneTab = {
+            ...newTerminalFile(target.cwd, command.name),
+            command: {
+              presetId: command.id,
+              name: command.name,
+              text: command.command,
+              runId: 1,
+            },
+          };
+          setProjectTerminals((prev) =>
+            mapProjectTerminal(prev, dockPath, (entry) => ({
+              ...entry,
+              open: true,
+              pane: {
+                ...entry.pane,
+                files: entry.pane.files.map((item) =>
+                  item.id === fileId ? file : item,
+                ),
+                activeFileId: file.id,
+              },
+            })),
+          );
+          focus();
+          return;
+        }
+        // Same target — re-fire with the command's current text so edits are
+        // never replayed stale.
         setProjectTerminals((prev) =>
-          mapProjectTerminal(prev, projectPath, (entry) =>
-            withDockOpen(
-              selectDockTerminal(
-                bound.foreground
-                  ? entry
-                  : patchDockTerminal(entry, bound.id, {
-                      command: { runId: (bound.command?.runId ?? 0) + 1 },
-                    }),
-                bound.id,
-              ),
-              true,
+          mapProjectTerminal(prev, dockPath, (entry) =>
+            reveal(
+              patchDockTerminal(entry, fileId, {
+                command: {
+                  name: command.name,
+                  text: command.command,
+                  runId: (bound.command?.runId ?? 0) + 1,
+                },
+              }),
             ),
           ),
         );
-        focusProjectTerminal();
+        focus();
         return;
       }
+      const exists = await listDir(target.cwd)
+        .then(() => true)
+        .catch(() => false);
+      if (!exists) return `Directory not found: ${target.cwd}`;
       const file: FilePaneTab = {
         ...newTerminalFile(target.cwd, command.name),
         command: {
@@ -6637,8 +6769,14 @@ export default function App({
           project={commandsProject}
           task={commandsTask}
           dock={currentProjectDock}
+          fallbackCwd={commandsFallbackCwd}
           onRun={(command) =>
-            onRunProjectCommand(command, commandsProject, commandsTask)
+            onRunProjectCommand(
+              command,
+              commandsProject,
+              commandsTask,
+              commandsFallbackCwd,
+            )
           }
           onStop={onStopProjectCommand}
           onManage={() => {
@@ -6655,9 +6793,9 @@ export default function App({
           onClose={() => setCommandsMenu(null)}
         />
       ) : null}
-      {commandsSheetProject ? (
+      {commandsSheet ? (
         <ProjectCommandsSheet
-          project={commandsSheetProject}
+          projectId={commandsSheet}
           onClose={() => setCommandsSheet(null)}
         />
       ) : null}

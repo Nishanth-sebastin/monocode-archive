@@ -1,4 +1,5 @@
 import { gitDiffFiles } from "./fs";
+import { looksLikeProject } from "./paths";
 import type { ProjectRecord } from "./projects";
 import type { Session } from "./session";
 import {
@@ -49,7 +50,8 @@ export type ActionRunRef = {
 const KEY = "monocode.agentActions.v1";
 const EVENT = "monocode:agent-actions-changed";
 const MAX_ACTIONS = 50;
-const MAX_INSTRUCTIONS = 16_000;
+export const MAX_ACTION_INSTRUCTIONS = 16_000;
+const MAX_INSTRUCTIONS = MAX_ACTION_INSTRUCTIONS;
 
 const STARTER_ACTIONS: AgentAction[] = [
   {
@@ -126,7 +128,8 @@ function readStore(): StoreShape {
     if (!raw) return { seeded: false, actions: [] };
     return sanitizeStore(JSON.parse(raw));
   } catch {
-    return { seeded: true, actions: [] };
+    // Corrupt data recovers by re-seeding rather than bricking the store.
+    return { seeded: false, actions: [] };
   }
 }
 
@@ -156,7 +159,11 @@ export function loadAgentActions(): AgentAction[] {
 
 /** Raw snapshot for useSyncExternalStore — stable until a write lands. */
 export function agentActionsSnapshot(): string | null {
-  return localStorage.getItem(KEY);
+  try {
+    return localStorage.getItem(KEY);
+  } catch {
+    return null;
+  }
 }
 
 export function subscribeAgentActions(listener: () => void): () => void {
@@ -238,14 +245,20 @@ export type ActionContextSource = {
   reason?: string;
 };
 
-/** Which sources can contribute for this session/task — resolved live at
+/** Which sources can contribute for this task/cwd — resolved live at
  * sheet open, never cached across invocations. */
 export function actionContextSources(input: {
   task?: TaskWorkspace | null;
-  session?: Session;
   ticket?: Session["linkedWorkItem"];
+  cwd?: string;
 }): ActionContextSource[] {
   const ticket = input.task?.ticket ?? input.ticket;
+  // A bare cwd that is not project-shaped (home, /) would make `changes`
+  // scan a meaningless or enormous tree — only offer it where a task working
+  // copy or a project-like directory exists.
+  const changesCwd =
+    (input.task?.children.some((child) => child.workingCopy) ?? false) ||
+    !!(input.cwd && looksLikeProject(input.cwd));
   return [
     {
       kind: "task",
@@ -257,7 +270,13 @@ export function actionContextSources(input: {
       available: !!ticket,
       ...(ticket ? {} : { reason: "No linked ticket" }),
     },
-    { kind: "changes", available: true },
+    {
+      kind: "changes",
+      available: changesCwd,
+      ...(changesCwd
+        ? {}
+        : { reason: "No project or task working copy" }),
+    },
   ];
 }
 
@@ -341,33 +360,31 @@ export async function gatherActionContext(input: {
 }
 
 async function changesContextText(cwds: readonly { label: string; cwd: string }[]) {
-  const sections: string[] = [];
-  for (const { label, cwd } of cwds) {
-    try {
-      const index = await gitDiffFiles(cwd);
-      const files = index.files;
-      if (!files.length) {
-        sections.push(`${label} (${cwd}): clean working tree`);
-        continue;
+  const sections = await Promise.all(
+    cwds.map(async ({ label, cwd }) => {
+      try {
+        const index = await gitDiffFiles(cwd);
+        const files = index.files;
+        if (!files.length) {
+          return `${label} (${cwd}): clean working tree`;
+        }
+        const head = `${label} (${cwd})${index.branch ? ` on ${index.branch}` : ""}: ${files.length} changed, +${index.additions} −${index.deletions}`;
+        const shown = files
+          .slice(0, MAX_CHANGES_FILES)
+          .map(
+            (file) =>
+              `  ${file.status} ${file.relative} (+${file.additions} −${file.deletions})`,
+          );
+        const rest =
+          files.length > MAX_CHANGES_FILES
+            ? [`  … and ${files.length - MAX_CHANGES_FILES} more`]
+            : [];
+        return [head, ...shown, ...rest].join("\n");
+      } catch (error) {
+        return `${label} (${cwd}): could not read changes — ${error instanceof Error ? error.message : String(error)}`;
       }
-      const head = `${label} (${cwd})${index.branch ? ` on ${index.branch}` : ""}: ${files.length} changed, +${index.additions} −${index.deletions}`;
-      const shown = files
-        .slice(0, MAX_CHANGES_FILES)
-        .map(
-          (file) =>
-            `  ${file.status} ${file.relative} (+${file.additions} −${file.deletions})`,
-        );
-      const rest =
-        files.length > MAX_CHANGES_FILES
-          ? [`  … and ${files.length - MAX_CHANGES_FILES} more`]
-          : [];
-      sections.push([head, ...shown, ...rest].join("\n"));
-    } catch (error) {
-      sections.push(
-        `${label} (${cwd}): could not read changes — ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
+    }),
+  );
   return sections.join("\n\n");
 }
 
@@ -424,4 +441,9 @@ export function actionRevision(text: string): string {
     hash = ((hash << 5) + hash + text.charCodeAt(index)) | 0;
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+// Seed once at module load so render-path reads stay side-effect free.
+if (typeof window !== "undefined") {
+  loadAgentActions();
 }

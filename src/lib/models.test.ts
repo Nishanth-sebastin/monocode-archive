@@ -16,6 +16,7 @@ import {
   preferredModelId,
   preferredModelSettings,
   resetHarnessModelOverlays,
+  resolveModel,
   saveDefaultModel,
   saveLastModelChoice,
   saveLastModelSettings,
@@ -304,6 +305,47 @@ describe("live catalog overlays", () => {
     expect(hasLiveCatalog("pi")).toBe(true);
     expect(hasLiveCatalog("omp")).toBe(false);
   });
+});
+
+it("resolveModel maps a persisted variant-level id to its grouped model", () => {
+  // Sessions saved before Devin variants were grouped store ids like
+  // `devin:claude-sonnet-5-medium`; the grouped catalog only carries that uid
+  // as a reasoning option value.
+  setHarnessModels("devin", [
+    {
+      id: "devin:claude-sonnet-5",
+      harness: "devin",
+      name: "Claude Sonnet 5",
+      nativeId: "claude-sonnet-5-medium",
+      settings: [
+        {
+          id: "reasoning",
+          label: "Reasoning",
+          kind: "select",
+          value: "claude-sonnet-5-medium",
+          options: [
+            { value: "claude-sonnet-5-low", label: "Low" },
+            { value: "claude-sonnet-5-medium", label: "Medium" },
+            { value: "claude-sonnet-5-high", label: "High" },
+          ],
+        },
+      ],
+    },
+  ]);
+  try {
+    expect(resolveModel("devin", "devin:claude-sonnet-5-high").id).toBe(
+      "devin:claude-sonnet-5",
+    );
+    expect(resolveModel("devin", "devin:claude-sonnet-5-medium").id).toBe(
+      "devin:claude-sonnet-5",
+    );
+    // An unrelated id falls back to the catalog rather than erroring.
+    expect(resolveModel("devin", "devin:gpt-9-ultra").id).toBe(
+      "devin:claude-sonnet-5",
+    );
+  } finally {
+    resetHarnessModelOverlays();
+  }
 });
 
 it("keeps Windows-discovered model catalogs out of WSL pickers", () => {

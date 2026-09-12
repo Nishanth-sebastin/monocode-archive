@@ -461,4 +461,61 @@ describe("devin live turn sequence", () => {
     await turn;
     await stopDevinSession("t7");
   });
+
+  it("ignores a reasoning uid the selected model does not offer", async () => {
+    setHarnessModels("devin", [
+      {
+        id: "devin:swe-2",
+        harness: "devin",
+        name: "SWE-2",
+        nativeId: "swe-2-medium",
+        settings: [
+          {
+            id: "reasoning",
+            label: "Reasoning",
+            kind: "select",
+            value: "swe-2-medium",
+            options: [
+              { value: "swe-2-medium", label: "Medium" },
+              { value: "swe-2-high", label: "High" },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const events: HarnessEvent[] = [];
+    const turn = sendDevinTurn({
+      ...baseInput(events, "hey", "t8"),
+      model: "devin:swe-2",
+      modelSettings: { reasoning: "other-model-high" },
+    } as never);
+
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
+    await waitFor(() => byMethod("session/new").length > 0, "session/new");
+    reply(byMethod("session/new")[0].id, {
+      ...SETUP,
+      modes: { ...SETUP.modes, currentModeId: "accept-edits" },
+    });
+
+    // The foreign uid is not offered by swe-2 → the base variant is sent.
+    await waitFor(
+      () => byMethod("session/set_config_option").length > 0,
+      "set_config_option",
+    );
+    expect(lastByMethod("session/set_config_option").params).toMatchObject({
+      sessionId: "S1",
+      configId: "model",
+      value: "swe-2-medium",
+    });
+    reply(lastByMethod("session/set_config_option").id, {});
+    await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
+    reply(lastByMethod("session/prompt").id, { stopReason: "end_turn" });
+    await turn;
+    await stopDevinSession("t8");
+  });
 });

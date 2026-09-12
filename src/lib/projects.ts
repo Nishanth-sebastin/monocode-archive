@@ -485,9 +485,23 @@ export function removeRepositoryFromProject(
     const repositories = project.repositories.filter(
       (repo) => repo.id !== repositoryId,
     );
+    // Commands bound to the removed repository could never resolve again;
+    // drop them and any now-empty groups rather than orphaning rows.
+    const removed = new Set(
+      project.commands
+        .filter((item) => item.repositoryId === repositoryId)
+        .map((item) => item.id),
+    );
     return {
       ...project,
       repositories,
+      commands: project.commands.filter((item) => !removed.has(item.id)),
+      commandGroups: project.commandGroups
+        .map((group) => ({
+          ...group,
+          commandIds: group.commandIds.filter((id) => !removed.has(id)),
+        }))
+        .filter((group) => group.commandIds.length > 0),
       sets: project.sets
         .map((set) => ({
           ...set,
@@ -615,12 +629,18 @@ export function saveProjectCommand(
   if (!name) return { error: "Name the command." };
   if (!command) return { error: "Enter the command to run." };
   const relativeCwd = draft.relativeCwd?.trim().slice(0, 500);
+  const current = loadProjects().find((entry) => entry.id === projectId);
+  if (!current) return { error: "Project not found." };
+  if (
+    draft.repositoryId &&
+    !current.repositories.some((repo) => repo.id === draft.repositoryId)
+  )
+    return { error: "Choose a repository in this project." };
+  if (commandId && !current.commands.some((item) => item.id === commandId))
+    return { error: "That command no longer exists." };
+  if (!commandId && current.commands.length >= MAX_COMMANDS)
+    return { error: `This project already has ${MAX_COMMANDS} commands.` };
   updateProject(projectId, (project) => {
-    if (
-      draft.repositoryId &&
-      !project.repositories.some((repo) => repo.id === draft.repositoryId)
-    )
-      return project;
     const entry: ProjectCommand = {
       id: commandId ?? crypto.randomUUID(),
       name,
@@ -634,9 +654,7 @@ export function saveProjectCommand(
     const commands =
       index >= 0
         ? project.commands.map((item) => (item.id === commandId ? entry : item))
-        : project.commands.length >= MAX_COMMANDS
-          ? project.commands
-          : [...project.commands, entry];
+        : [...project.commands, entry];
     return { ...project, commands };
   });
   return {};
@@ -681,10 +699,17 @@ export function saveProjectCommandGroup(
 ): { error?: string } {
   const name = draft.name.trim().slice(0, 200);
   if (!name) return { error: "Name the group." };
+  const current = loadProjects().find((entry) => entry.id === projectId);
+  if (!current) return { error: "Project not found." };
+  const memberIds = new Set(current.commands.map((item) => item.id));
+  const commandIds = draft.commandIds.filter((id) => memberIds.has(id));
+  if (!commandIds.length)
+    return { error: "Select project commands for the group." };
+  if (groupId && !current.commandGroups.some((item) => item.id === groupId))
+    return { error: "That group no longer exists." };
+  if (!groupId && current.commandGroups.length >= MAX_COMMAND_GROUPS)
+    return { error: `This project already has ${MAX_COMMAND_GROUPS} groups.` };
   updateProject(projectId, (project) => {
-    const memberIds = new Set(project.commands.map((item) => item.id));
-    const commandIds = draft.commandIds.filter((id) => memberIds.has(id));
-    if (!commandIds.length) return project;
     const entry: ProjectCommandGroup = {
       id: groupId ?? crypto.randomUUID(),
       name,
@@ -698,9 +723,7 @@ export function saveProjectCommandGroup(
         ? project.commandGroups.map((item) =>
             item.id === groupId ? entry : item,
           )
-        : project.commandGroups.length >= MAX_COMMAND_GROUPS
-          ? project.commandGroups
-          : [...project.commandGroups, entry];
+        : [...project.commandGroups, entry];
     return { ...project, commandGroups };
   });
   return {};

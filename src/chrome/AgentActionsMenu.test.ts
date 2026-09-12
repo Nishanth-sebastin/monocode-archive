@@ -148,6 +148,98 @@ describe("AgentActionsMenu", () => {
     }
   });
 
+  it("does not submit when the sheet is closed while context gathers", async () => {
+    // Hold the changes scan open so Cancel lands mid-gather — a late resolve
+    // must not submit after the sheet is gone.
+    let release!: (value: unknown) => void;
+    vi.mocked(invoke).mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    const { host, root, onRun, run } = render();
+    try {
+      await act(async () => run());
+      await act(async () =>
+        host
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Agent actions"]',
+          )!
+          .click(),
+      );
+      await act(async () =>
+        menuItems()
+          .find((item) => item.textContent?.trim() === "Review")!
+          .click(),
+      );
+      await act(async () => buttonByText("Run")!.click());
+      await act(async () => buttonByText("Cancel")!.click());
+      expect(dialog()).toBeNull();
+      await act(async () => release({ ...cleanIndex }));
+      expect(onRun).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("runs in a new conversation even when the session already queued it", async () => {
+    const queuedSession: Session = {
+      ...newSession("codex", "/tmp/project"),
+      queuedMessages: [
+        {
+          id: "q1",
+          text: "Action: Implement",
+          attachments: [],
+          action: {
+            actionId: "implement",
+            name: "Implement",
+            revision: "abcd1234",
+          },
+        },
+      ],
+    };
+    const { host, root, onRun, onRunNew, run } = render({
+      session: queuedSession,
+    });
+    try {
+      await act(async () => run());
+      await act(async () =>
+        host
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Agent actions"]',
+          )!
+          .click(),
+      );
+      await act(async () =>
+        menuItems()
+          .find((item) => item.textContent?.trim() === "Implement")!
+          .click(),
+      );
+      // The same-session run is guarded…
+      const submit = dialog()!.querySelector<HTMLButtonElement>(
+        "button.bg-accent",
+      )!;
+      expect(submit.textContent).toContain("Queued");
+      expect(submit.disabled).toBe(true);
+      // …but a new conversation is a fresh session and stays runnable.
+      const radio = [
+        ...dialog()!.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+      ][1]!;
+      await act(async () => radio.click());
+      const start = buttonByText("Start session and run")!;
+      expect(start.disabled).toBe(false);
+      await act(async () => start.click());
+      expect(onRun).not.toHaveBeenCalled();
+      expect(onRunNew).toHaveBeenCalledOnce();
+      const [runData, destination] = onRunNew.mock.calls[0]!;
+      expect(runData.action.actionId).toBe("implement");
+      expect(destination.cwd).toBe("/tmp/project");
+      expect(destination.harness).toBe("codex");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("queues on a busy session and refuses a second identical queued run", async () => {
     const busy: Session = {
       ...newSession("codex", "/tmp/project"),

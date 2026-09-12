@@ -78,6 +78,17 @@ describe("joinRelativeCwd", () => {
       joinRelativeCwd("//wsl.localhost/Ubuntu/home/me/app", "pkg"),
     ).toEqual({ cwd: "//wsl.localhost/Ubuntu/home/me/app/pkg" });
   });
+
+  it("normalizes Windows separators on every platform", () => {
+    // A saved `apps\web` is a Windows-style relative dir — not a literal
+    // backslash directory — wherever the command later runs.
+    expect(joinRelativeCwd("/tmp/app", "apps\\web")).toEqual({
+      cwd: "/tmp/app/apps/web",
+    });
+    expect(joinRelativeCwd("/tmp/app", "apps\\..\\up")).toHaveProperty(
+      "error",
+    );
+  });
 });
 
 describe("resolveCommandTarget", () => {
@@ -182,6 +193,29 @@ describe("resolveCommandTarget", () => {
         }),
         task: null,
       }),
+    ).toHaveProperty("error");
+  });
+
+  it("runs reusable commands in the launch folder for unstored projects", () => {
+    // A rail entry that is not a stored project has no record — the folder
+    // the menu was opened on is the root.
+    expect(
+      resolveCommandTarget({
+        command: {},
+        task: null,
+        fallbackCwd: "/tmp/scratch",
+      }),
+    ).toEqual({ cwd: "/tmp/scratch", source: "project" });
+    expect(
+      resolveCommandTarget({
+        command: { relativeCwd: "pkg" },
+        task: null,
+        fallbackCwd: "/tmp/scratch",
+      }),
+    ).toEqual({ cwd: "/tmp/scratch/pkg", source: "project" });
+    // Without it, there is still no silent fallback.
+    expect(
+      resolveCommandTarget({ command: {}, task: null }),
     ).toHaveProperty("error");
   });
 });

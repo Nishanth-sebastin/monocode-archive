@@ -102,6 +102,10 @@ export function saveReusableCommand(
   if (!command) return { error: "Enter the command to run." };
   const relativeCwd = draft.relativeCwd?.trim().slice(0, 500);
   const commands = loadReusableCommands();
+  if (commandId && !commands.some((item) => item.id === commandId))
+    return { error: "That command no longer exists." };
+  if (!commandId && commands.length >= MAX_COMMANDS)
+    return { error: `You already have ${MAX_COMMANDS} reusable commands.` };
   const entry: ReusableCommand = {
     id: commandId ?? crypto.randomUUID(),
     name,
@@ -114,9 +118,7 @@ export function saveReusableCommand(
   const list =
     index >= 0
       ? commands.map((item) => (item.id === commandId ? entry : item))
-      : commands.length >= MAX_COMMANDS
-        ? commands
-        : [...commands, entry];
+      : [...commands, entry];
   saveReusableCommands(list);
   return {};
 }
@@ -156,7 +158,9 @@ export function joinRelativeCwd(
   base: string,
   relative: string | undefined,
 ): { cwd: string } | { error: string } {
-  const rel = slash(relative ?? "").trim();
+  // Saved relative dirs normalize separators on every platform — a stored
+  // `apps\web` is a Windows-style path, not a literal backslash directory.
+  const rel = slash((relative ?? "").replace(/\\/g, "/")).trim();
   if (!rel) return { cwd: base };
   if (rel.startsWith("/") || rel.startsWith("~") || /^[A-Za-z]:/.test(rel))
     return { error: "The directory must be relative." };
@@ -190,6 +194,8 @@ export function resolveCommandTarget(input: {
   command: { repositoryId?: string; relativeCwd?: string };
   project?: ProjectRecord;
   task?: TaskWorkspace | null;
+  /** Folder a reusable command was launched from when no project owns it. */
+  fallbackCwd?: string;
 }): ResolvedCommandTarget | { error: string } {
   const { command, project, task } = input;
   let base: string | undefined;
@@ -235,7 +241,8 @@ export function resolveCommandTarget(input: {
     base =
       project?.lastPath ??
       project?.anchor ??
-      project?.repositories[0]?.anchor;
+      project?.repositories[0]?.anchor ??
+      input.fallbackCwd;
     source = "project";
   }
 
@@ -258,6 +265,7 @@ export function resolveCommandGroup(input: {
   commands: readonly ProjectCommand[];
   project?: ProjectRecord;
   task?: TaskWorkspace | null;
+  fallbackCwd?: string;
 }): {
   runs: { command: ProjectCommand; target: ResolvedCommandTarget }[];
   failures: { command: ProjectCommand; error: string }[];
@@ -269,6 +277,7 @@ export function resolveCommandGroup(input: {
       command,
       project: input.project,
       task: input.task,
+      fallbackCwd: input.fallbackCwd,
     });
     if ("error" in target) failures.push({ command, error: target.error });
     else runs.push({ command, target });

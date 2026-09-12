@@ -164,6 +164,8 @@ export async function compactDevinContext(
       live.cancelled = false;
       live.muteUpdates = false;
       try {
+        await applyModelSelection(live, input);
+        if (live.cancelled) return;
         live.onEvent({ type: "status", text: "Compacting context…" });
         live.promptInFlight += 1;
         try {
@@ -356,6 +358,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   const acp = new AcpClient(input.sessionId, handlers);
   const liveRef: { current: Live | null } = { current: null };
   const muteGate = { current: false };
+  /** Dedupes repeated identical auth-error stderr lines into one block. */
+  let lastAuthLine: string | undefined;
 
   handlers.onNotification = (method, params) => {
     if (muteGate.current) return;
@@ -393,7 +397,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     },
     (line) => {
       console.debug("[monocode] devin stderr", line);
-      if (isDevinAuthMessage(line)) {
+      if (isDevinAuthMessage(line) && line !== lastAuthLine) {
+        lastAuthLine = line;
         emit({
           type: "session.error",
           message: `${line.trim()}\n\n${AUTH_HELP}`,
@@ -458,7 +463,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
           SESSION_TIMEOUT_MS,
         );
       } catch (error) {
-        throw devinAuthError(error);
+        throw devinAuthError(error, "create a session");
       }
       acpSessionId = sessionIdFromResult(setup);
     }
@@ -646,18 +651,28 @@ function handleNotification(live: Live, method: string, params: unknown) {
 
   if (kind === "config_option_update") {
     const previous = devinCurrentModelId(live.configOptions);
-    const next = devinConfigOptions(
+    const incoming = devinConfigOptions(
       update?.configOptions ?? update?.config_options,
     );
-    if (next.length) {
-      live.configOptions = next;
-      const current = devinCurrentModelId(next);
+    if (incoming.length) {
+      // Merge by option id — Devin may send only the changed options rather
+      // than the whole array, and dropping `model` here would loop writes.
+      const merged = [...live.configOptions];
+      for (const option of incoming) {
+        const at = merged.findIndex((entry) => entry.id === option.id);
+        if (at >= 0) merged[at] = option;
+        else merged.push(option);
+      }
+      live.configOptions = merged;
+      const current = devinCurrentModelId(merged);
       if (current && current !== previous) {
-        const selection = devinModelSelectionForUid(next, current);
+        const selection = devinModelSelectionForUid(merged, current, live.cwd);
         live.onEvent({
           type: "session.configChanged",
           model: selection.id,
-          modelSettings: { reasoning: selection.reasoning ?? "" },
+          ...(selection.reasoning
+            ? { modelSettings: { reasoning: selection.reasoning } }
+            : {}),
         });
       }
     }

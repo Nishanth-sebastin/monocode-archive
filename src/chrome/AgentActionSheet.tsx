@@ -1,11 +1,14 @@
 import {
+  useId,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 import {
   ACTION_CONTEXT_LABEL,
   ACTION_CONTEXTS,
+  MAX_ACTION_INSTRUCTIONS,
   actionContextSources,
   agentActionsSnapshot,
   composeActionPrompt,
@@ -49,15 +52,6 @@ const inputClass =
 const labelClass =
   "mb-1 block text-[11px] font-medium uppercase tracking-wide text-content/45";
 
-export type ActionDestination =
-  | { kind: "session"; sessionId: string }
-  | {
-      kind: "new";
-      cwd: string;
-      harness: HarnessId;
-      model: string;
-    };
-
 export type ActionRun = {
   text: string;
   action: ActionRunRef;
@@ -95,10 +89,10 @@ export function AgentActionSheet({
     () =>
       actionContextSources({
         task,
-        session,
         ticket: task?.ticket ?? session.linkedWorkItem,
+        cwd: workCwd,
       }),
-    [task, session],
+    [task, session, workCwd],
   );
   const [selected, setSelected] = useState<Set<AgentActionContext>>(
     () =>
@@ -115,10 +109,20 @@ export function AgentActionSheet({
   }>({ harness: session.harness, model: session.model });
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
+  const destinationName = useId();
+  /** Set when the sheet closes mid-gather so a late resolve can't submit. */
+  const closedRef = useRef(false);
+  const close = () => {
+    closedRef.current = true;
+    onClose();
+  };
 
-  const queued = session.queuedMessages?.some(
-    (message) => message.action?.actionId === action.id,
-  );
+  // Only "This conversation" can double-queue; a new session starts empty.
+  const queued =
+    destination === "session" &&
+    session.queuedMessages?.some(
+      (message) => message.action?.actionId === action.id,
+    );
   const live = isLiveHarness(session.harness);
   const busy = session.busy;
   const valid = instructions.trim().length > 0;
@@ -144,6 +148,8 @@ export function AgentActionSheet({
         ticket: task?.ticket ?? session.linkedWorkItem,
         cwd: workCwd,
       });
+      // The sheet may have been closed while context was still gathering.
+      if (closedRef.current) return;
       const composed = composeActionPrompt({
         name: action.name,
         instructions,
@@ -160,10 +166,12 @@ export function AgentActionSheet({
       } else {
         onRun(runData);
       }
-      onClose();
+      close();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      setRunning(false);
+      if (!closedRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        setRunning(false);
+      }
     }
   };
 
@@ -178,9 +186,13 @@ export function AgentActionSheet({
   return (
     <Modal
       title={action.name}
-      description={`Runs in ${sessionDisplayTitle(session.title, session.harness)}`}
+      description={
+        destination === "new"
+          ? `Starts a new conversation in ${prettyCwd(workCwd)}`
+          : `Runs in ${sessionDisplayTitle(session.title, session.harness)}`
+      }
       size="md"
-      onClose={onClose}
+      onClose={close}
     >
       <div className="flex flex-col gap-4 px-4 pb-4 pt-1">
         <div>
@@ -192,6 +204,7 @@ export function AgentActionSheet({
             autoFocus
             rows={5}
             value={instructions}
+            maxLength={MAX_ACTION_INSTRUCTIONS}
             onChange={(event) => setInstructions(event.target.value)}
             className={`${inputClass} resize-y`}
             placeholder="What should the agent do?"
@@ -240,7 +253,7 @@ export function AgentActionSheet({
             <label className="flex items-center gap-2 text-[13px] text-content">
               <input
                 type="radio"
-                name="action-destination"
+                name={destinationName}
                 checked={destination === "session"}
                 onChange={() => setDestination("session")}
                 className="accent-accent"
@@ -257,7 +270,7 @@ export function AgentActionSheet({
                 <label className="flex min-w-0 flex-1 items-center gap-2">
                   <input
                     type="radio"
-                    name="action-destination"
+                    name={destinationName}
                     checked={destination === "new"}
                     onChange={() => setDestination("new")}
                     className="accent-accent"
@@ -300,7 +313,7 @@ export function AgentActionSheet({
         <div className="flex items-center justify-end gap-2">
           <button
             type="button"
-            onClick={onClose}
+            onClick={close}
             className="h-7 rounded-md px-2.5 text-[13px] text-content/70 hover:bg-content/10 hover:text-content"
           >
             Cancel
@@ -476,10 +489,20 @@ export function AgentActionsSheet({
                 <span className={labelClass}>Scope</span>
                 <Select
                   label="Action scope"
-                  value={editing.draft.projectId ? "project" : "all"}
+                  value={
+                    editing.draft.projectId
+                      ? editing.draft.projectId === project.id
+                        ? "project"
+                        : "other"
+                      : "all"
+                  }
                   options={[
                     { value: "project", label: `This project` },
                     { value: "all", label: "All projects" },
+                    ...(editing.draft.projectId &&
+                    editing.draft.projectId !== project.id
+                      ? [{ value: "other", label: "Another project" }]
+                      : []),
                   ]}
                   onChange={(value) =>
                     setEditing({
@@ -487,7 +510,11 @@ export function AgentActionsSheet({
                       draft: {
                         ...editing.draft,
                         projectId:
-                          value === "project" ? project.id : undefined,
+                          value === "project"
+                            ? project.id
+                            : value === "other"
+                              ? editing.draft.projectId
+                              : undefined,
                       },
                     })
                   }

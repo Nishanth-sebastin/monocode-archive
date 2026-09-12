@@ -356,12 +356,60 @@ describe("saved commands", () => {
     expect(
       saveProjectCommand(project.id, { name: "x", command: " " }).error,
     ).toBeTruthy();
-    saveProjectCommand(project.id, {
-      name: "Foreign",
-      command: "x",
-      repositoryId: "not-a-member",
-    });
+    // A binding to a repository outside the project is an error, not a
+    // silent no-op.
+    expect(
+      saveProjectCommand(project.id, {
+        name: "Foreign",
+        command: "x",
+        repositoryId: "not-a-member",
+      }).error,
+    ).toBeTruthy();
     expect(loadProjects()[0].commands).toEqual([]);
+    // Missing ids and unknown projects report errors too.
+    expect(
+      saveProjectCommand(project.id, { name: "x", command: "y" }, "gone")
+        .error,
+    ).toBeTruthy();
+    expect(
+      saveProjectCommand("no-such-project", { name: "x", command: "y" })
+        .error,
+    ).toBeTruthy();
+  });
+
+  it("removing a repository drops its bound commands and empties groups", () => {
+    const project = ensureProjectForPath(
+      "/tmp/app",
+      family("/tmp/app/.git", "/tmp/app"),
+    );
+    addRepositoryToProject(project.id, {
+      commonDir: "/tmp/lib/.git",
+      anchor: "/tmp/lib",
+    });
+    const [app, lib] = loadProjects()[0].repositories;
+    saveProjectCommand(project.id, {
+      name: "Lib dev",
+      command: "npm run dev",
+      repositoryId: lib.id,
+    });
+    saveProjectCommand(project.id, { name: "App dev", command: "npm start" });
+    const [libCommand, appCommand] = loadProjects()[0].commands;
+    saveProjectCommandGroup(project.id, {
+      name: "Both",
+      commandIds: [libCommand.id, appCommand.id],
+    });
+    saveProjectCommandGroup(project.id, {
+      name: "Lib only",
+      commandIds: [libCommand.id],
+    });
+    removeRepositoryFromProject(project.id, lib.id);
+    const after = loadProjects()[0];
+    expect(after.commands.map((item) => item.id)).toEqual([appCommand.id]);
+    // "Lib only" had no surviving members; "Both" keeps the unbound command.
+    expect(after.commandGroups.map((group) => group.name)).toEqual(["Both"]);
+    expect(after.commandGroups[0].commandIds).toEqual([appCommand.id]);
+    // Repositories the command never referenced are untouched.
+    expect(after.repositories.map((r) => r.id)).toEqual([app.id]);
   });
 
   it("prunes deleted commands from groups", () => {

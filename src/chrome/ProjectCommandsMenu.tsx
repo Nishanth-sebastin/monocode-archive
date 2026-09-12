@@ -30,6 +30,7 @@ export function ProjectCommandsMenu({
   project,
   task,
   dock,
+  fallbackCwd,
   onRun,
   onStop,
   onManage,
@@ -39,7 +40,10 @@ export function ProjectCommandsMenu({
   project?: ProjectRecord;
   task?: TaskWorkspace | null;
   dock?: ProjectTerminalDock;
-  onRun: (command: CommandLike) => void;
+  /** Folder reusable commands fall back to when no stored project resolves. */
+  fallbackCwd?: string;
+  /** Resolves to an error string when the command could not be launched. */
+  onRun: (command: CommandLike) => void | string | Promise<string | void>;
   onStop: (fileId: string) => void;
   onManage: () => void;
   onClose: () => void;
@@ -57,8 +61,11 @@ export function ProjectCommandsMenu({
     dock?.pane.files.find((file) => file.command?.presetId === presetId);
 
   const run = (command: CommandLike) => {
-    onRun(command);
-    onClose();
+    void Promise.resolve(onRun(command)).then((error) => {
+      if (typeof error === "string" && error)
+        setFailures([{ name: command.name, error }]);
+      else onClose();
+    });
   };
 
   const runGroup = (groupId: string) => {
@@ -71,16 +78,35 @@ export function ProjectCommandsMenu({
       commands: members,
       project,
       task,
+      fallbackCwd,
     });
-    setFailures(
-      failed.map((entry) => ({ name: entry.command.name, error: entry.error })),
-    );
-    for (const entry of runs) onRun(entry.command);
-    if (!failed.length) onClose();
+    // Resolution failures are known now; launch failures come back from the
+    // runner — both kinds keep the menu open and are reported by name.
+    void Promise.all(
+      runs.map((entry) =>
+        Promise.resolve(onRun(entry.command)).then((error) =>
+          typeof error === "string" && error
+            ? { name: entry.command.name, error }
+            : null,
+        ),
+      ),
+    ).then((launchFailures) => {
+      const all = [
+        ...failed.map((entry) => ({
+          name: entry.command.name,
+          error: entry.error,
+        })),
+        ...launchFailures.filter(
+          (entry): entry is { name: string; error: string } => !!entry,
+        ),
+      ];
+      setFailures(all);
+      if (!all.length) onClose();
+    });
   };
 
   const row = (command: CommandLike) => {
-    const target = resolveCommandTarget({ command, project, task });
+    const target = resolveCommandTarget({ command, project, task, fallbackCwd });
     const file = bound(command.id);
     const running = !!file?.foreground;
     return (
@@ -101,6 +127,7 @@ export function ProjectCommandsMenu({
         {running && file ? (
           <button
             type="button"
+            role="menuitem"
             title={`Stop ${command.name}`}
             aria-label={`Stop ${command.name}`}
             onClick={() => onStop(file.id)}
@@ -111,6 +138,7 @@ export function ProjectCommandsMenu({
         ) : (
           <button
             type="button"
+            role="menuitem"
             title={
               "error" in target ? target.error : `Run ${command.name}`
             }
@@ -165,6 +193,7 @@ export function ProjectCommandsMenu({
                 </div>
                 <button
                   type="button"
+                  role="menuitem"
                   title={`Run all commands in ${group.name}`}
                   aria-label={`Run all commands in ${group.name}`}
                   onClick={() => runGroup(group.id)}

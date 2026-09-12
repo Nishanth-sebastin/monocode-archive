@@ -215,6 +215,27 @@ describe("ProjectCommandsMenu", () => {
     }
   });
 
+  it("keeps the menu open and shows the error when a launch fails", async () => {
+    const onRun = vi.fn().mockResolvedValue("Directory not found: /gone");
+    const { host, root, handlers, run } = render({
+      project: project({
+        commands: [{ id: "cmd1", name: "Dev server", command: "npm run dev" }],
+      }),
+      task: task(),
+      onRun,
+    });
+    try {
+      await act(async () => run());
+      await act(async () => byLabel("Run Dev server")!.click());
+      expect(onRun).toHaveBeenCalledOnce();
+      expect(handlers.onClose).not.toHaveBeenCalled();
+      expect(menu()!.textContent).toContain("Directory not found: /gone");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("opens the manage sheet entry point", async () => {
     const { host, root, handlers, run } = render({ project: project() });
     try {

@@ -1,14 +1,16 @@
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   deleteProjectCommand,
   deleteProjectCommandGroup,
+  loadProjects,
   moveProjectCommand,
   moveProjectCommandGroup,
+  projectsSnapshot,
   repositoryDisplayName,
   saveProjectCommand,
   saveProjectCommandGroup,
+  subscribeProjects,
   type ProjectCommand,
-  type ProjectRecord,
 } from "../lib/projects";
 import {
   deleteReusableCommand,
@@ -58,10 +60,10 @@ type EditState =
  * whatever task or project folder they are launched from.
  */
 export function ProjectCommandsSheet({
-  project,
+  projectId,
   onClose,
 }: {
-  project: ProjectRecord;
+  projectId: string;
   onClose: () => void;
 }) {
   const raw = useSyncExternalStore(
@@ -69,11 +71,25 @@ export function ProjectCommandsSheet({
     reusableCommandsSnapshot,
   );
   const reusable = useMemo(() => loadReusableCommands(), [raw]);
+  // Re-derive the record on every store write so saves/deletes/moves are
+  // visible immediately — a snapshot prop would stay stale.
+  const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
+  const project = useMemo(
+    () => loadProjects().find((entry) => entry.id === projectId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectsRaw, projectId],
+  );
   const [editing, setEditing] = useState<EditState | null>(null);
   const [error, setError] = useState("");
 
-  const commands = project.commands;
-  const groups = project.commandGroups;
+  useEffect(() => {
+    if (!project) onClose();
+  }, [project, onClose]);
+
+  const commands = project?.commands ?? [];
+  const groups = project?.commandGroups ?? [];
+
+  if (!project) return null;
 
   const save = () => {
     if (!editing) return;
