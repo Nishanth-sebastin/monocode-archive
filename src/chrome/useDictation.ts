@@ -48,6 +48,9 @@ type SessionTrack = {
   range: DictationRange;
   /** The dictated text currently occupying `range` (includes pads). */
   text: string;
+  /** Text that occupied the anchor before dictation — a replaced selection.
+   *  Cancel restores it rather than deleting text dictation never wrote. */
+  original: string;
   /** Trailing chars of `text` still provisional (dimmed in the highlight). */
   partialLen: number;
   /** Separators inserted once at the anchor so dictation doesn't jam onto
@@ -143,20 +146,38 @@ export function useDictation({
         session.range,
         session.text,
       );
+      if (
+        session.padBefore !== undefined &&
+        !(
+          session.text.startsWith(session.padBefore) &&
+          session.text.endsWith(session.padAfter ?? "")
+        )
+      ) {
+        // An external edit ate a pad — recompute against live neighbours.
+        session.padBefore = undefined;
+      }
       if (session.padBefore === undefined) {
         const before = range.start > 0 ? el.value[range.start - 1] : undefined;
         const after = range.end < el.value.length ? el.value[range.end] : undefined;
         session.padBefore = before != null && !/\s/.test(before) ? " " : "";
         session.padAfter = after != null && !/\s/.test(after) ? " " : "";
       }
-      const insert = session.padBefore + text + session.padAfter;
+      const padBefore = session.padBefore ?? "";
+      const padAfter = session.padAfter ?? "";
+      const padAfterLen = padAfter.length;
+      // An empty transcript writes nothing — no stray separator spaces.
+      const insert = text === "" ? "" : padBefore + text + padAfter;
       const selStart = el.selectionStart ?? 0;
       const selEnd = el.selectionEnd ?? selStart;
-      const following = selStart === range.end && selEnd === range.end;
+      // The parked "following" caret sits just before padAfter — treat that
+      // position as following too, or the caret oscillates one char per
+      // partial.
+      const following =
+        selStart === selEnd &&
+        (selStart === range.end || selStart === range.end - padAfterLen);
       const next = spliceDictationText(el.value, range, insert);
       el.value = next.value;
       resizeComposer(el);
-      const padAfterLen = session.padAfter?.length ?? 0;
       const caret = following
         ? next.range.end - padAfterLen
         : caretAfterSplice(selStart, range, insert.length);
@@ -176,7 +197,8 @@ export function useDictation({
     [textareaRef],
   );
 
-  /** Drop the dictated span — cancel discards the transcript entirely. */
+  /** Drop the dictated span — cancel discards the transcript and restores
+   * whatever the session anchored over (a replaced selection). */
   const eraseDictated = useCallback(() => {
     const el = textareaRef.current;
     const session = sessionRef.current;
@@ -187,10 +209,10 @@ export function useDictation({
         session.text,
       );
       const selStart = el.selectionStart ?? 0;
-      const next = spliceDictationText(el.value, range, "");
+      const next = spliceDictationText(el.value, range, session.original);
       el.value = next.value;
       resizeComposer(el);
-      const caret = caretAfterSplice(selStart, range, 0);
+      const caret = caretAfterSplice(selStart, range, session.original.length);
       el.setSelectionRange(caret, caret);
       valueRef.current = next.value;
       commitRef.current(next.value);
@@ -394,10 +416,12 @@ export function useDictation({
       return;
     }
     startedAtRef.current = Date.now();
+    const original = el?.value.slice(anchorStart, anchorEnd) ?? "";
     sessionRef.current = {
       id: started.sessionId,
       range: { start: anchorStart, end: anchorEnd },
-      text: el?.value.slice(anchorStart, anchorEnd) ?? "",
+      text: original,
+      original,
       partialLen: 0,
     };
     setSessionActive(true);
@@ -473,7 +497,9 @@ export function useDictation({
       setError(
         "Microphone access is off — allow it in System Settings to dictate.",
       );
-    } else {
+    } else if (errorMessage(failure) !== "cancelled") {
+      // "cancelled" means a takeover aborted our in-flight start — nothing
+      // to show.
       setError(errorMessage(failure));
     }
     setPhase("idle");
@@ -518,7 +544,12 @@ export function useDictation({
 
   const cancel = useCallback(() => {
     const session = sessionRef.current;
-    if (!session) return;
+    if (!session) {
+      // Still starting (no session yet) — flag it so begin() cancels the
+      // session the moment dictation_start resolves, same as a hold release.
+      if (phaseRef.current === "starting") releaseRequestedRef.current = true;
+      return;
+    }
     eraseDictated();
     void dictationCancel(session.id).catch(() => undefined);
   }, [eraseDictated]);

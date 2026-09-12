@@ -2,9 +2,8 @@
 //!
 //! All audio and transcripts stay on the machine. Models are pinned,
 //! checksummed whisper.cpp GGML files downloaded on demand to app data.
-//! Capture (cpal) and inference (whisper-rs) run on dedicated threads; the
-//! composer seam is a later slice — `dictation_transcribe_file` is the test
-//! entry point until then.
+//! Capture (cpal) and inference (whisper-rs) run on dedicated threads.
+//! `dictation_transcribe_file` is the headless diagnostics entry point.
 
 pub mod audio_file;
 pub mod capture;
@@ -36,6 +35,9 @@ const PARTIAL_WINDOW_S: usize = 8;
 const COMMIT_MARGIN_MS: i64 = 400;
 /// Worker poll cadence; cheap relative to an inference pass.
 const TICK: std::time::Duration = std::time::Duration::from_millis(60);
+/// How long dictation_start waits for the capture thread to report — a hung
+/// device stack must not wedge the host state machine.
+const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 const PARTIAL_WINDOW: usize = PARTIAL_WINDOW_S * WHISPER_RATE as usize;
 /// ~1.5 s of new audio between partial passes.
@@ -134,6 +136,10 @@ struct SessionEvent {
 #[derive(Clone, Default)]
 pub struct DictationHost {
     inner: Arc<Mutex<HostState>>,
+    /// Serializes dictation_transcribe_file — each call loads a model
+    /// (up to ~1.6 GB plus GPU buffers), so concurrent diagnostics must not
+    /// pile up.
+    diag: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -142,9 +148,10 @@ struct HostState {
     /// (including winding down after cancel).
     downloads: HashMap<String, Download>,
     session: Option<Session>,
-    /// Set while a worker starts up so two concurrent starts cannot both
-    /// spawn — `session` only exists once the join handle does.
-    starting: bool,
+    /// The starting worker's cancel flag, set before spawn — lets shutdown
+    /// and takeover-cancel reach a session that does not exist yet and
+    /// keeps two concurrent starts from both spawning.
+    starting: Option<Arc<AtomicBool>>,
     /// The session's id and cancel flag while stop/cancel joins the worker —
     /// keeps the final pass abortable and blocks an overlapping start.
     finishing: Option<(u64, Arc<AtomicBool>)>,
@@ -177,6 +184,12 @@ impl DictationHost {
         let mut state = self.inner.lock().unwrap();
         if let Some(session) = state.session.take() {
             session.cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(cancel) = state.starting.take() {
+            // A worker blocked in capture start: dictation_start re-checks
+            // the flag after the channel resolves and refuses to register
+            // the session, so the mic is released instead of orphaned.
+            cancel.store(true, Ordering::Relaxed);
         }
         if let Some((_, cancel)) = state.finishing.take() {
             cancel.store(true, Ordering::Relaxed);
@@ -287,33 +300,24 @@ pub fn dictation_model_install(
 ) -> Result<(), String> {
     let spec = catalog::find(&model_id).ok_or("Unknown dictation model")?;
     let dir = models_dir(&app)?;
-    loop {
-        let winding_down = {
-            let mut state = host.inner.lock().unwrap();
-            match state.downloads.get(spec.id) {
-                Some(d) if !d.cancel.load(Ordering::Relaxed) => {
-                    return Ok(()); // already running
-                }
-                // Cancelled but the thread is still inside its read loop —
-                // join it before spawning a new writer for the same .part.
-                Some(_) => state.downloads.remove(spec.id),
-                None => {
-                    if installed_path(&dir, spec).is_some() {
-                        return Ok(());
-                    }
-                    None
-                }
-            }
-        };
-        let Some(download) = winding_down else { break };
-        let _ = download.join.join();
-    }
-
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut state = host.inner.lock().unwrap();
-        if state.downloads.contains_key(spec.id) || installed_path(&dir, spec).is_some() {
-            return Ok(()); // another caller finished or restarted meanwhile
+        if let Some(download) = state.downloads.get(spec.id) {
+            if download.join.is_finished() {
+                // Finished but not yet self-removed — the worker is done
+                // writing, so dropping the stale entry is safe.
+                state.downloads.remove(spec.id);
+            } else if download.cancel.load(Ordering::Relaxed) {
+                // Cancelled but still inside its read loop — a second
+                // writer must not open the same .part until it exits.
+                return Err("The previous download is still stopping — try again".into());
+            } else {
+                return Ok(()); // already running
+            }
+        }
+        if installed_path(&dir, spec).is_some() {
+            return Ok(());
         }
         let thread_app = app.clone();
         let thread_host = host.inner.clone();
@@ -378,7 +382,7 @@ pub fn dictation_model_remove(
         if state.downloads.contains_key(spec.id) {
             return Err("Cancel the download before removing this model".into());
         }
-        if state.starting || state.finishing.is_some() {
+        if state.starting.is_some() || state.finishing.is_some() {
             return Err("A dictation session is starting or finishing".into());
         }
         if state.session.as_ref().map(|s| s.model_id.as_str()) == Some(spec.id) {
@@ -407,7 +411,7 @@ pub fn dictation_status(app: AppHandle, host: State<'_, DictationHost>) -> Dicta
         .is_some_and(|s| !s.join.is_finished());
     let phase = if active {
         "recording"
-    } else if state.starting {
+    } else if state.starting.is_some() {
         "starting"
     } else if state.finishing.is_some() {
         "finishing"
@@ -465,18 +469,20 @@ pub fn dictation_start(
         }
         _ => {}
     }
-    {
-        let mut state = host.inner.lock().unwrap();
-        reap_finished_session(&mut state, &app);
-        if state.session.is_some() || state.starting || state.finishing.is_some() {
-            return Err("A dictation session is already running".into());
-        }
-        state.starting = true;
-    }
-
     let id = SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut state = host.inner.lock().unwrap();
+        reap_finished_session(&mut state, &app);
+        if state.session.is_some() || state.starting.is_some() || state.finishing.is_some() {
+            return Err("A dictation session is already running".into());
+        }
+        // Expose the flag before spawning so shutdown/cancel can reach the
+        // worker while it is still starting the stream.
+        state.starting = Some(Arc::clone(&cancel));
+    }
+
     let buffer = AudioBuffer::shared();
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
 
@@ -504,22 +510,34 @@ pub fn dictation_start(
                 stop: &stop,
                 cancel: &cancel,
             };
-            run_session(&io, id, &model_path, language, translate, capture)
+            // Emit the error event from here — a panic discovered only via
+            // join() would otherwise wait for an unrelated command to reap.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_session(&io, id, &model_path, language, translate, capture)
+            })) {
+                Ok(result) => result,
+                Err(_) => {
+                    emit_session(&app, id, "error", Some("Dictation worker panicked".into()));
+                    Err("Dictation worker panicked".into())
+                }
+            }
         })
     }));
     let join = match spawn {
         Ok(join) => join,
         Err(_) => {
-            host.inner.lock().unwrap().starting = false;
+            host.inner.lock().unwrap().starting = None;
             return Err("Cannot start the dictation worker".into());
         }
     };
 
-    let outcome = rx.recv();
+    // A hung device enumeration would otherwise wedge the host forever —
+    // every start "already running", cancel and shutdown unable to reach it.
+    let outcome = rx.recv_timeout(START_TIMEOUT);
     let mut state = host.inner.lock().unwrap();
-    state.starting = false;
+    state.starting = None;
     match outcome {
-        Ok(Ok(device_name)) => {
+        Ok(Ok(device_name)) if !cancel.load(Ordering::Relaxed) => {
             state.session = Some(Session {
                 id,
                 model_id: model_id.clone(),
@@ -533,11 +551,25 @@ pub fn dictation_start(
                 model_id,
             })
         }
+        Ok(Ok(_)) => {
+            // Shutdown/takeover cancelled mid-start — drop the handle; the
+            // worker exits at its loop-top cancel check and drops capture.
+            drop(join);
+            Err("cancelled".into())
+        }
         Ok(Err(error)) => {
             let _ = join.join();
             Err(error)
         }
-        Err(_) => {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // The worker never reported in: stop it from registering later
+            // and detach — if capture::start is truly hung nothing can join
+            // it anyway.
+            cancel.store(true, Ordering::Relaxed);
+            drop(join);
+            Err("Microphone did not respond — check the input device".into())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             let _ = join.join();
             Err("Dictation worker exited before starting".into())
         }
@@ -609,8 +641,19 @@ pub fn dictation_cancel(
                         Ok(())
                     }
                     Some(_) => Err("No dictation in progress".into()),
-                    None if state.starting => Err("Dictation is starting — try again".into()),
-                    None => Err("No dictation in progress".into()),
+                    // An id-less cancel is an explicit takeover — a session
+                    // still starting has no id yet, so only None can abort it.
+                    None => match state.starting.take() {
+                        Some(cancel) if session_id.is_none() => {
+                            cancel.store(true, Ordering::Relaxed);
+                            Ok(())
+                        }
+                        Some(cancel) => {
+                            state.starting = Some(cancel);
+                            Err("No dictation in progress".into())
+                        }
+                        None => Err("No dictation in progress".into()),
+                    },
                 };
             }
         }
@@ -814,12 +857,16 @@ fn run_session(
 #[tauri::command(async)]
 pub fn dictation_transcribe_file(
     app: AppHandle,
+    host: State<'_, DictationHost>,
     path: String,
     model_id: String,
     language: Option<String>,
     translate: bool,
 ) -> Result<FileTranscript, String> {
     let model_path = resolve_model(&app, &model_id, &language, translate)?;
+    // Each call loads the model fresh — serialize so parallel diagnostics
+    // can't multiply that memory spike.
+    let _diag = host.diag.lock().unwrap();
     let samples = audio_file::read_wav_mono(std::path::Path::new(&path))?;
     let audio_ms = samples.len() as u64 * 1000 / WHISPER_RATE as u64;
     let (engine, load_ms) = Engine::load(&model_path)?;

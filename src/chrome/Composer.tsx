@@ -753,6 +753,8 @@ export function Composer({
     const el = ref.current;
     if (!el || !initialDraft) return;
     if (el.value !== initialDraft) el.value = initialDraft;
+    // Keep draft state in step — dictation's range tracking diffs against it.
+    setDraft(initialDraft);
     resizeComposer(el);
   }, [initialDraft]);
 

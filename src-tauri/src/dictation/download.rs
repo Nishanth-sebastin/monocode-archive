@@ -140,7 +140,10 @@ fn download_from(
         .timeout_write(HTTP_OP_TIMEOUT)
         .build()
         .get(url)
-        .set("User-Agent", USER_AGENT);
+        .set("User-Agent", USER_AGENT)
+        // A transparent gzip decode would make `downloaded`/`Content-Length`
+        // count decompressed bytes while size_bytes counts wire bytes.
+        .set("Accept-Encoding", "identity");
     if downloaded > 0 {
         request = request.set("Range", &format!("bytes={downloaded}-"));
     }
@@ -212,10 +215,12 @@ fn download_from(
             }
         }
     }
-    file.flush().ok();
     // fsync before rename: a power loss must not leave a size-correct but
-    // corrupt file that then passes the size-only installed check forever.
-    file.sync_all().ok();
+    // corrupt file that then passes the size-only installed check forever —
+    // and a failed sync must fail the install, not rename anyway.
+    file.flush()
+        .and_then(|()| file.sync_all())
+        .map_err(|e| DownloadError::new(format!("Cannot write model file: {e}"), downloaded))?;
     drop(file);
 
     if downloaded != spec.size_bytes {

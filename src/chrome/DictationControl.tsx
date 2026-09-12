@@ -25,9 +25,13 @@ import {
   type DictationModelProgress,
 } from "../lib/dictation";
 import type { Dictation } from "./useDictation";
+import { hotkeyBlockedByTarget } from "../lib/hotkeyTarget";
 
 const TOOL_BUTTON =
   "grid size-6.5 shrink-0 place-items-center rounded-md bg-content/10 text-content/50 hover:bg-content/15 hover:text-content disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-content/50";
+
+const ROW_ICON_BUTTON =
+  "grid size-6 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/10 hover:text-content";
 
 const SECTION_LABEL =
   "px-2 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-content/40";
@@ -43,10 +47,10 @@ function ModelRow({
   progress: DictationModelProgress | undefined;
   dictation: Dictation;
 }) {
-  const downloading =
-    model.downloading ||
-    progress?.phase === "downloading" ||
-    progress?.phase === "verifying";
+  // The catalog flag is authoritative — progress events only flow while
+  // the menu is open, so a stale "downloading" entry must not light up a
+  // finished row.
+  const downloading = model.downloading;
   const status = model.installed
     ? "installed"
     : progress?.phase === "failed"
@@ -90,7 +94,7 @@ function ModelRow({
             title="Cancel download"
             aria-label={`Cancel ${model.label} download`}
             onClick={() => dictation.cancelDownload(model.id)}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/10 hover:text-content"
+            className={ROW_ICON_BUTTON}
           >
             <X className="size-3" />
           </button>
@@ -101,7 +105,7 @@ function ModelRow({
           title={`Remove ${model.label}`}
           aria-label={`Remove ${model.label}`}
           onClick={() => dictation.removeModel(model.id)}
-          className="grid size-6 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/10 hover:text-content"
+          className={ROW_ICON_BUTTON}
         >
           <Trash2 className="size-3.5" />
         </button>
@@ -136,30 +140,6 @@ function ModelRow({
  * layout-independent. */
 const DICTATION_HOTKEY_CODE = "KeyM";
 
-/** Mirrors the archive-shortcut rule: terminals and editors swallow keys,
- * inputs other than the composer own their typing, and any open overlay
- * (popover, dialog, menu) wins over global hotkeys. */
-function inBlockingUi(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  if (target.closest(".cm-editor, .monocode-terminal")) return true;
-  if (
-    target.closest('input, textarea, select, [contenteditable="true"]') &&
-    !target.closest("[data-composer]")
-  ) {
-    return true;
-  }
-  return Array.from(
-    document.querySelectorAll(
-      '[data-popover-side], [role="dialog"], [role="alertdialog"], [role="menu"], [data-skill-picker], [data-mention-picker]',
-    ),
-  ).some(
-    (element) =>
-      element.getClientRects().length > 0 &&
-      getComputedStyle(element).visibility !== "hidden" &&
-      !element.closest('[hidden], [inert], [aria-hidden="true"]'),
-  );
-}
-
 /** Ticks the chip's elapsed label between partial events — kept here so the
  * 500 ms cadence re-renders only the control, not the whole composer. */
 function useElapsedMs(phase: string, audioMs: number, startedAt: number) {
@@ -170,9 +150,10 @@ function useElapsedMs(phase: string, audioMs: number, startedAt: number) {
     const timer = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(timer);
   }, [phase]);
-  if (audioMs > 0) return audioMs;
+  // audioMs only advances on partial events (~1.5 s apart) — max() with the
+  // wall clock keeps the chip ticking between them.
   return phase === "starting" || phase === "recording"
-    ? Math.max(0, now - startedAt)
+    ? Math.max(audioMs, now - startedAt)
     : 0;
 }
 
@@ -289,6 +270,9 @@ export function DictationControl({
   // chord is held. Window-level so it works wherever focus sits in the pane.
   const dictationRef = useRef(dictation);
   dictationRef.current = dictation;
+  /** True while a hotkey-started hold is down — a stray KeyM keyup (typing
+   * "m" during a pointer hold) must not end it. */
+  const hotkeyHoldRef = useRef(false);
   useEffect(() => {
     if (!hotkeys) return;
     const isHotkey = (event: KeyboardEvent) =>
@@ -299,9 +283,13 @@ export function DictationControl({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing) return;
       if (event.key === "Escape") {
-        // Cancel an active session — unless an overlay owns this Escape.
+        // Cancel an active (or still-starting) session — unless an overlay
+        // owns this Escape.
         const current = dictationRef.current;
-        if (current.sessionActive && !inBlockingUi(event.target)) {
+        if (
+          (current.sessionActive || current.phase === "starting") &&
+          !hotkeyBlockedByTarget(event.target)
+        ) {
           event.preventDefault();
           event.stopPropagation();
           current.cancel();
@@ -310,23 +298,48 @@ export function DictationControl({
       }
       if (!isHotkey(event) || event.repeat) return;
       const current = dictationRef.current;
-      if (current.phase === "idle" && inBlockingUi(event.target)) return;
+      if (current.phase === "idle" && hotkeyBlockedByTarget(event.target))
+        return;
       event.preventDefault();
       event.stopPropagation();
-      if (hold) current.press();
-      else current.toggle();
+      if (hold) {
+        hotkeyHoldRef.current = true;
+        current.press();
+      } else {
+        current.toggle();
+      }
     };
     const onKeyUp = (event: KeyboardEvent) => {
-      if (!hold || event.code !== DICTATION_HOTKEY_CODE) return;
+      // Only a hold the hotkey itself started ends here — a stray "m" keyup
+      // (or a chord modifier coming up) must not stop a pointer hold. Any
+      // chord key releasing ends the hold.
+      if (!hotkeyHoldRef.current) return;
+      if (
+        event.code !== DICTATION_HOTKEY_CODE &&
+        event.key !== "Meta" &&
+        event.key !== "Shift" &&
+        event.key !== "Control"
+      )
+        return;
+      hotkeyHoldRef.current = false;
       dictationRef.current.release();
+    };
+    // Releasing outside the window (or an app switch mid-hold) fires no
+    // keyup/pointerup here — treat blur as the release.
+    const onBlur = () => {
+      hotkeyHoldRef.current = false;
+      if (hold) dictationRef.current.release();
     };
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onBlur);
       // Pane focus changed mid-hold — treat as a release so the mic doesn't
       // keep recording while the keyup goes to another pane.
+      hotkeyHoldRef.current = false;
       if (hold) dictationRef.current.release();
     };
   }, [hotkeys, hold]);

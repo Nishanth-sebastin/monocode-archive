@@ -176,8 +176,16 @@ where
             move |error: cpal::Error| {
                 use cpal::ErrorKind;
                 match error.kind() {
-                    // Reroute/overrun/latency notices — the stream stays alive.
-                    ErrorKind::DeviceChanged | ErrorKind::Xrun | ErrorKind::RealtimeDenied => {}
+                    // Overrun/latency notices — the stream stays alive.
+                    ErrorKind::Xrun | ErrorKind::RealtimeDenied => {}
+                    // The device went away or was rerouted — some backends
+                    // then just stop delivering buffers, which would look
+                    // like silence. Fail the session instead.
+                    ErrorKind::DeviceChanged => {
+                        if let Ok(mut buffer) = sink_err.lock() {
+                            buffer.fail(format!("Microphone changed or disconnected: {error}"));
+                        }
+                    }
                     _ => {
                         if let Ok(mut buffer) = sink_err.lock() {
                             buffer.fail(format!("Microphone stream failed: {error}"));
