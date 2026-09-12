@@ -38,7 +38,7 @@ import {
   type AzurePrTarget,
 } from "../lib/azureRepos";
 import {
-  repositoryProvider,
+  resolvePrProviders,
   type DeliveryProvider,
 } from "../lib/deliveryProviders";
 import { generatePrContent } from "../lib/harness";
@@ -100,6 +100,11 @@ type RowRuntime = {
   remotes?: { name: string; url: string }[];
   azureTarget?: Omit<AzurePrTarget, "accountId" | "number">;
   existing?: ExistingPr;
+  /** Provider `existing` was looked up under — stale hints must not render
+   * under a different effective provider while a re-probe is in flight. */
+  existingProvider?: DeliveryProvider;
+  /** Auto's source of truth: the provider detected from the remotes, never
+   * the explicit override. Effective provider = `draft.provider ?? this`. */
   provider?: DeliveryProvider;
   step?: "checking" | "drafting" | "pushing" | "creating" | "linking";
   error?: string;
@@ -277,11 +282,22 @@ export function TaskPrSheet({
         const ctx = await ciContext(cwd).catch(() => null);
         if (!fresh()) return;
         const remotes = ctx?.remotes ?? [];
-        const upstreamRemote =
-          check.upstream?.split("/")[0] ?? check.remote ?? undefined;
         const draft = loadTaskPrDraft(taskId, id);
-        const provider =
-          draft?.provider ?? repositoryProvider(remotes, upstreamRemote);
+        // `detected` is what "Auto" resolves to — kept in runtime even when
+        // an explicit provider overrides it, so the Auto label shows the
+        // real detection instead of echoing the pick.
+        const { detected, effective: provider } = resolvePrProviders({
+          remotes,
+          upstream: check.upstream,
+          remote: check.remote,
+          override: draft?.provider,
+        });
+        // A local upstream names no remote — use the default remote when
+        // locating the Azure project/repository pair.
+        const upstreamRemote =
+          check.upstream && check.upstream.includes("/")
+            ? check.upstream.split("/")[0]
+            : (check.remote ?? undefined);
         let azureTarget: RowRuntime["azureTarget"];
         let existing: ExistingPr | undefined;
         if (provider === "azure") {
@@ -330,7 +346,8 @@ export function TaskPrSheet({
           remotes,
           azureTarget,
           existing,
-          provider,
+          existingProvider: provider,
+          provider: detected,
         });
         // No explicit choice yet: aim the row at the repo's default branch.
         if (
@@ -429,8 +446,8 @@ export function TaskPrSheet({
             writable: true,
           };
         }
-        if (rt?.existing?.url) {
-          const provider = draft?.provider ?? rt.provider;
+        const provider = draft?.provider ?? rt?.provider;
+        if (rt?.existing?.url && rt.existingProvider === provider) {
           return {
             row,
             target: rt.existing.base || effectiveTarget(row),
@@ -657,8 +674,13 @@ export function TaskPrSheet({
       if (!provider) return false;
       const target = effectiveTarget(row);
       // Azure allows a single active PR per source branch — any existing one
-      // blocks. GitHub blocks only a same-target duplicate.
-      if (rt.existing && (provider === "azure" || rt.existing.base === target))
+      // blocks. GitHub blocks only a same-target duplicate. Only an `existing`
+      // probed under this provider counts.
+      if (
+        rt.existing &&
+        rt.existingProvider === provider &&
+        (provider === "azure" || rt.existing.base === target)
+      )
         return false;
       return prRowBlocker(rt.check, target) === null;
     },
@@ -831,18 +853,21 @@ function TaskPrRow({
   const error = rowError(runtime);
   const result = draft?.result;
   const effectiveProvider = draft?.provider ?? runtime?.provider;
-  const existingSameTarget =
-    runtime?.existing && runtime.existing.base === target
+  // Only trust `existing` probed under the current effective provider — a
+  // GitHub PR found earlier is not evidence while Azure is selected.
+  const existing =
+    runtime?.existing && runtime.existingProvider === effectiveProvider
       ? runtime.existing
       : undefined;
+  const existingSameTarget =
+    existing && existing.base === target ? existing : undefined;
   // Azure allows a single active PR per source branch — any open PR blocks.
   const existingBlocks = Boolean(
-    runtime?.existing &&
-      (effectiveProvider === "azure" || runtime.existing.base === target),
+    existing && (effectiveProvider === "azure" || existing.base === target),
   );
   const existingBlocker =
-    runtime?.existing && !existingSameTarget && effectiveProvider === "azure"
-      ? `PR ${runtime.existing.number ? `#${runtime.existing.number} ` : ""}already open — Azure allows one per branch`
+    existing && !existingSameTarget && effectiveProvider === "azure"
+      ? `PR ${existing.number ? `#${existing.number} ` : ""}already open — Azure allows one per branch`
       : undefined;
   const branchOptions = useMemo(() => {
     const names = new Map<string, string>();
@@ -1000,9 +1025,7 @@ function TaskPrRow({
               ) : existingBlocker ? (
                 <button
                   type="button"
-                  onClick={() =>
-                    void openUrl(runtime?.existing?.url ?? "")
-                  }
+                  onClick={() => void openUrl(existing?.url ?? "")}
                   className="flex items-center gap-1 text-amber-300/80 hover:underline"
                   title={existingBlocker}
                 >
@@ -1024,8 +1047,8 @@ function TaskPrRow({
                 <span className="text-content/45">
                   {check.ahead} ahead · {check.behind} behind
                   {!check.published ? " · not pushed" : ""}
-                  {runtime?.existing
-                    ? ` · open PR to ${runtime.existing.base ?? "another target"}`
+                  {existing
+                    ? ` · open PR to ${existing.base ?? "another target"}`
                     : ""}
                 </span>
               ) : null}
