@@ -50,7 +50,10 @@ export function applyHarnessEvent(
         status: event.status,
         detail: event.detail,
         preview: event.preview,
-        streaming: event.status !== "completed" && event.status !== "failed",
+        streaming:
+          event.status !== "completed" &&
+          event.status !== "failed" &&
+          event.status !== "cancelled",
       });
     case "approval.requested":
       return attachApproval(session, event);
