@@ -1,4 +1,4 @@
-import { openGitHubDelivery, saveDeliveryProvider } from "./lib/deliveryProviders";
+import { githubDeliveryTarget, saveDeliveryProvider } from "./lib/deliveryProviders";
 import {
   ciContext,
   ciLookup,
@@ -338,6 +338,7 @@ import {
   loadRecents,
   looksLikeProject,
   normalizeProjectPath,
+  OPEN_PROJECT_PATH,
   projectRailItems,
   rememberProject,
   sameProjectPath,
@@ -4088,6 +4089,14 @@ export default function App({
   }, [selectProject]);
 
   const [wslPickerOpen, setWslPickerOpen] = useState(false);
+  useEffect(() => {
+    const open = (event: Event) => {
+      const path = (event as CustomEvent<string>).detail;
+      if (typeof path === "string" && path) onSelectProject(path);
+    };
+    window.addEventListener(OPEN_PROJECT_PATH, open);
+    return () => window.removeEventListener(OPEN_PROJECT_PATH, open);
+  }, [onSelectProject]);
   const pickProject = useCallback(async () => {
     if (IS_WIN) { setWslPickerOpen(true); return; }
     const path = await pickFolder();
@@ -6731,13 +6740,14 @@ export default function App({
     if (sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
       throw new Error("The conversation checkout changed. Open its review again.");
     saveDeliveryProvider(cwd, checkout.branch, sessionId, kind, provider);
-    if (provider === "github") {
-      await openGitHubDelivery(cwd, kind, () => current() && sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) === cwd, prUrl);
-      return;
-    }
+    const target = provider === "github"
+      ? await githubDeliveryTarget(cwd, prUrl)
+      : undefined;
+    if (!current() || sessionWorkCwd(sessionsRef.current.find(value => value.id === sessionId) ?? session) !== cwd)
+      throw new Error("The conversation checkout changed. Open its review again.");
     const existing = tabsRef.current.find(tab => leafIds(tab.layout).includes(sessionId));
     const base = existing ?? newTab(sessionId);
-    const file = { id: crypto.randomUUID(), path: kind === "pr" ? "Pull requests" : "CI", cwd, delivery: { kind, branch: checkout.branch, sourceSessionId: sessionId } };
+    const file = { id: crypto.randomUUID(), path: kind === "pr" ? "Pull requests" : "CI", cwd, delivery: { kind, branch: checkout.branch, sourceSessionId: sessionId, ...(provider === "github" ? { provider: "github" as const, repo: target!.repo, number: target!.number } : { provider: "azure" as const }) } };
     if (existing) {
       setTabs(previous => previous.map(tab => tab.id === existing.id ? openEditorTab(tab, file) : tab));
       activateTab(existing.id);

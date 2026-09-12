@@ -1,5 +1,5 @@
 import { Select } from "./Select";
-import { deliveryProvider, saveDeliveryProvider, resolvePrProviders, openGitHubDelivery, DELIVERY_PROVIDERS_CHANGED, type DeliveryProvider } from "../lib/deliveryProviders";
+import { deliveryProvider, saveDeliveryProvider, resolvePrProviders, githubDeliveryTarget, DELIVERY_PROVIDERS_CHANGED, type DeliveryProvider } from "../lib/deliveryProviders";
 import { loadAzurePrAssociations, AZURE_PR_ASSOCIATIONS_CHANGED } from "../lib/azureRepos";
 import { loadCiSources, ciState, ciContext, AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
 import type { DeliveryTabSource } from "../lib/layout";
@@ -304,8 +304,11 @@ export function GitChangesPanel({
     const generation = deliveryGeneration.current;
     setDeliveryBusy(true); setDeliveryError("");
     try {
-      if (provider === "github") await openGitHubDelivery(viewCwd, kind, () => generation === deliveryGeneration.current);
-      else onOpenDelivery?.(viewCwd, {kind, branch: index?.branch ?? "", sourceSessionId});
+      if (provider === "github") {
+        const target = await githubDeliveryTarget(viewCwd);
+        if (generation !== deliveryGeneration.current) return;
+        onOpenDelivery?.(viewCwd, {kind, branch: index?.branch ?? "", sourceSessionId, provider: "github", repo: target.repo, number: target.number});
+      } else onOpenDelivery?.(viewCwd, {kind, branch: index?.branch ?? "", sourceSessionId, provider: "azure"});
     } catch (error) { if (generation === deliveryGeneration.current) setDeliveryError(String(error instanceof Error ? error.message : error)); }
     finally { if (generation === deliveryGeneration.current) { deliveryPending.current = false; setDeliveryBusy(false); } }
   };
@@ -380,7 +383,7 @@ export function GitChangesPanel({
             key={kind}
             type="button"
             aria-label={label}
-            disabled={!enabled || !index || deliveryBusy || (provider === "azure" && !onOpenDelivery)}
+            disabled={!enabled || !index || deliveryBusy || (!!provider && !onOpenDelivery)}
             className="group flex min-h-9 w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-content/70 hover:bg-content/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent disabled:opacity-40"
             onClick={() => void openDelivery(kind)}
           >

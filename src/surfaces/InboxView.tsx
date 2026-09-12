@@ -63,7 +63,6 @@ import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
 import {
   githubStatus,
-  githubPrDiff,
   githubReviewDecisionLabel,
   githubWorkItem,
   githubWorkItemComment,
@@ -75,7 +74,6 @@ import {
   inboxListIsFresh,
   inboxProjectsForRail,
   listInboxItems,
-  peekGithubPrDiff,
   peekGithubWorkItemDetails,
   peekGithubWorkItemThread,
   peekInboxList,
@@ -173,6 +171,7 @@ import {
   type InboxReplyTarget,
 } from "./InboxComments";
 import { InboxPrDiff } from "./InboxPrDiff";
+import { GithubPrReview } from "../chrome/GithubPrReview";
 import {
   InboxDiscussionPanel,
   type InboxSessionPortal,
@@ -1570,10 +1569,8 @@ export function InboxDetail({
       : githubKind
         ? peekGithubWorkItemDetails(item.projectPath, githubKind, item.number)
         : null;
-  const cachedDiff = isPr
-    ? gitlab
-      ? peekGitlabMrDiff(item.projectPath, item.number)
-      : peekGithubPrDiff(item.projectPath, item.number)
+  const cachedDiff = isPr && gitlab
+    ? peekGitlabMrDiff(item.projectPath, item.number)
     : null;
   const cachedThread = azure ? peekAzureThread(item) : jira ? peekJiraThread(item) : linear
     ? peekLinearIssueThread(item.id ?? "")
@@ -1806,11 +1803,10 @@ export function InboxDetail({
   ]);
 
   useEffect(() => {
-    if (!isPr || tab !== "code") return;
+    // GitHub PRs render the dedicated review surface, which loads its own diff.
+    if (!gitlab || !isPr || tab !== "code") return;
     let cancelled = false;
-    const cachedDiff = gitlab
-      ? peekGitlabMrDiff(item.projectPath, item.number)
-      : peekGithubPrDiff(item.projectPath, item.number);
+    const cachedDiff = peekGitlabMrDiff(item.projectPath, item.number);
     if (cachedDiff) {
       setPrDiff(cachedDiff);
       setDiffLoading(false);
@@ -1820,9 +1816,7 @@ export function InboxDetail({
       setDiffError(null);
       setPrDiff(null);
     }
-    const pending = gitlab
-      ? gitlabMrDiff(item.projectPath, item.number)
-      : githubPrDiff(item.projectPath, item.number);
+    const pending = gitlabMrDiff(item.projectPath, item.number);
     void pending
       .then((next) => {
         if (cancelled) return;
@@ -2162,7 +2156,17 @@ export function InboxDetail({
           </div>
         ) : null}
       {isPr && tab === "code" ? (
-        diffLoading ? (
+        item.provider === "github" ? (
+          <GithubPrReview
+            key={`${item.projectPath}:${item.repo}:${item.number}:${revision}`}
+            embedded
+            cwd={item.projectPath}
+            repo={item.repo}
+            number={item.number}
+            enabled
+            onClose={() => undefined}
+          />
+        ) : diffLoading ? (
           <div className="flex justify-center py-10 text-content/40">
             <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
           </div>
