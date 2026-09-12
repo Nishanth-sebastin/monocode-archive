@@ -163,6 +163,14 @@ describe("confluenceSections", () => {
     const { text } = confluenceMarkdown("<p>before\uE000after\uE001</p>");
     expect(text).toBe("beforeafter");
   });
+
+  it("does not let a self-closing ri:url swallow following siblings", () => {
+    const { text } = confluenceMarkdown(
+      '<p><ri:url ri:value="https://docs.test/guide"/><ac:emoticon ac:name="tick"/></p><p>tail</p>',
+    );
+    expect(text).toContain("[docs.test](https://docs.test/guide)");
+    expect(text).toContain("tail");
+  });
 });
 
 describe("confluencePageContext", () => {

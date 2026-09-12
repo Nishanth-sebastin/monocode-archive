@@ -247,6 +247,12 @@ pub async fn gitlab_issue_relations(
     number: i64,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        // Validate before resolving the repo — an MR or bad number should not
+        // pay for a `git config` subprocess just to return empty.
+        validate_item(&kind, number)?;
+        if kind == "pr" {
+            return Ok(serde_json::json!({ "edges": [], "truncated": false }));
+        }
         let config = require_config(&app)?;
         let repo = gitlab_repo_for(&expand_home(&cwd), &config.url)?;
         gitlab_issue_relations_for(&config, &repo, &kind, number)

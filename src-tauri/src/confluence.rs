@@ -118,6 +118,13 @@ fn require_confluence(config: &JiraConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// The shared Jira config's errors say "Jira"; reword them for Confluence UI.
+fn confluence_config(app: &AppHandle, site: &str) -> Result<JiraConfig, String> {
+    let config = require_config(app, site).map_err(|error| error.replace("Jira", "Atlassian"))?;
+    require_confluence(&config)?;
+    Ok(config)
+}
+
 fn cql_string(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() || value.len() > 200 {
@@ -133,10 +140,11 @@ fn search_cql(query: &str, space: &str) -> Result<String, String> {
     let mut parts = vec!["type = page AND status = current".to_string()];
     let space = space.trim();
     if !space.is_empty() {
+        // Personal space keys are `~<accountId>` and contain a colon.
         if space.len() > 64
             || !space
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '~'))
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '~' | ':'))
         {
             return Err("Choose a valid Confluence space".into());
         }
@@ -161,22 +169,24 @@ fn next_cursor(page: &Value) -> Option<(&'static str, String)> {
     let next = page["_links"]["next"].as_str().unwrap_or_default();
     let base = tauri::Url::parse("https://confluence.invalid").ok()?;
     let url = base.join(next).ok()?;
+    let (mut cursor, mut start) = (None, None);
     for (key, value) in url.query_pairs() {
         if key == "cursor" {
-            return Some(("cursor", value.into_owned()));
-        }
-        if key == "start" {
-            return Some(("start", value.into_owned()));
+            cursor = Some(value.into_owned());
+        } else if key == "start" {
+            start = Some(value.into_owned());
         }
     }
-    None
+    // CQL search paginates with `cursor`; `start` is the older fallback.
+    cursor
+        .map(|value| ("cursor", value))
+        .or_else(|| start.map(|value| ("start", value)))
 }
 
 #[tauri::command]
 pub async fn confluence_spaces(app: AppHandle, site: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let config = require_config(&app, &site)?;
-        require_confluence(&config)?;
+        let config = confluence_config(&app, &site)?;
         // No `type` filter: personal (`~`-keyed) spaces hold pages too.
         let page = wiki_request(
             &config,
@@ -212,8 +222,7 @@ pub async fn confluence_search(
     cursor_param: String,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let config = require_config(&app, &site)?;
-        require_confluence(&config)?;
+        let config = confluence_config(&app, &site)?;
         let cql = search_cql(&query, &space)?;
         let cursor = cursor.trim();
         if cursor.len() > 2048 || cursor.chars().any(char::is_control) {
@@ -252,8 +261,7 @@ pub async fn confluence_search(
 #[tauri::command]
 pub async fn confluence_page(app: AppHandle, site: String, id: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let config = require_config(&app, &site)?;
-        require_confluence(&config)?;
+        let config = confluence_config(&app, &site)?;
         if id.is_empty() || id.len() > 30 || !id.bytes().all(|b| b.is_ascii_digit()) {
             return Err("Invalid Confluence page identity".into());
         }

@@ -25,6 +25,7 @@ export function InboxRelated({ item }: { item: InboxItem }) {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<readonly string[]>([]);
   const [sendError, setSendError] = useState("");
+  const [sending, setSending] = useState(false);
   const generation = useRef(0);
   useEffect(
     () => () => {
@@ -72,6 +73,8 @@ export function InboxRelated({ item }: { item: InboxItem }) {
   };
 
   const send = () => {
+    if (sending) return;
+    setSending(true);
     setSendError("");
     try {
       const items = [item, ...selectedItems()];
@@ -82,14 +85,13 @@ export function InboxRelated({ item }: { item: InboxItem }) {
       });
     } catch (reason) {
       setSendError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSending(false);
     }
   };
 
-  // PRs and CI items have no provider-native work-item relations.
-  if (
-    (item.provider === "github" || item.provider === "gitlab") &&
-    item.kind !== "issue"
-  ) {
+  // PRs, CI items and delivery rows have no work-item relations.
+  if (item.delivery || item.kind === "pr" || item.kind === "ci") {
     return null;
   }
 
@@ -226,7 +228,8 @@ export function InboxRelated({ item }: { item: InboxItem }) {
           <div className="flex items-center gap-2 border-t border-content/10 pt-2">
             <button
               type="button"
-              className="rounded-md bg-content/10 px-2.5 py-1.5 hover:bg-content/15"
+              disabled={sending}
+              className="rounded-md bg-content/10 px-2.5 py-1.5 hover:bg-content/15 disabled:opacity-40"
               onClick={send}
             >
               Send ticket + {selected.length} related to agent…

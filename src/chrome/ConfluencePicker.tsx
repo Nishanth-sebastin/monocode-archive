@@ -113,7 +113,7 @@ export function ConfluencePicker({
                 ...page.results.filter(
                   (row) => !existing.some((seen) => seen.id === row.id),
                 ),
-              ]
+              ].slice(0, 150)
             : page.results,
         );
         setNext({ value: page.next, param: page.nextParam });
@@ -134,6 +134,9 @@ export function ConfluencePicker({
   useEffect(() => {
     if (!site) return;
     setExpanded(null);
+    setPreviewError(null);
+    // A stale cursor would pair the new query with the old query's page.
+    setNext({ value: "", param: "" });
     const timer = window.setTimeout(() => search(), 300);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -242,6 +245,16 @@ export function ConfluencePicker({
         ];
       });
       if (!chosen.length) throw new Error("Selected pages are unavailable.");
+      if (chosen.length < wanted.length) {
+        const skipped = wanted
+          .filter((id) => !fetched.has(id))
+          .map(
+            (id) => results.find((row) => row.id === id)?.title ?? `page ${id}`,
+          );
+        throw new Error(
+          `${skipped.length} selected ${skipped.length === 1 ? "page was" : "pages were"} unavailable: ${skipped.join(", ")}. Uncheck them or retry.`,
+        );
+      }
       const context = confluencePageContext(site, chosen);
       requestAgentContext({
         context,
@@ -323,7 +336,10 @@ export function ConfluencePicker({
                         className=""
                         label={`Select ${page.title}`}
                         checked={!!chosen}
-                        disabled={!chosen && selected.size >= MAX_CONTEXT_ITEMS}
+                        disabled={
+                          sending ||
+                          (!chosen && selected.size >= MAX_CONTEXT_ITEMS)
+                        }
                         onChange={() => togglePage(page)}
                       />
                       <button
@@ -394,8 +410,9 @@ export function ConfluencePicker({
                                           ?.sections?.has(section.id) ?? false
                                       }
                                       disabled={
-                                        !selected.has(page.id) &&
-                                        selected.size >= MAX_CONTEXT_ITEMS
+                                        sending ||
+                                        (!selected.has(page.id) &&
+                                          selected.size >= MAX_CONTEXT_ITEMS)
                                       }
                                       onChange={() =>
                                         toggleSection(expandedPage, section.id)

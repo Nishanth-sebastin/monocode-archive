@@ -126,11 +126,17 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;")}\uE001`,
+    )
+    // HTML ignores `/` on non-void tags — expand self-closing ac:/ri:
+    // elements so they cannot swallow following siblings as children.
+    .replace(
+      /<(ac|ri):([A-Za-z-]+)((?:"[^"]*"|'[^']*'|[^>"'])*)\/>/g,
+      "<$1:$2$3></$1:$2>",
     );
   let nodes = 0;
   let truncated = storage.length > MAX_STORAGE;
   const escape = (value: string) =>
-    value.replace(/[\\`*_{}\[\]<>#|~]/g, "\\$&");
+    value.replace(/[\\`*_{}\[\]<>#|~+-]/g, "\\$&");
   const stripMarkers = (value: string) => value.replace(/[\uE000\uE001]/g, "");
   const attr = (node: Element, name: string) =>
     node.getAttribute(name) ??
@@ -345,7 +351,7 @@ export function confluenceSections(markdown: string): ConfluenceSection[] {
     if (heading) {
       flush();
       current = {
-        title: heading[2].replace(/\\([\\`*_{}\[\]<>#|~])/g, "$1").trim(),
+        title: heading[2].replace(/\\([\\`*_{}\[\]<>#|~+\-])/g, "$1").trim(),
         level: heading[1].length,
         body: [],
       };

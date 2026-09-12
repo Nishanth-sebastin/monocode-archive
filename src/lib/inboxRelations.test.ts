@@ -157,4 +157,60 @@ describe("loadInboxRelations", () => {
         ?.identifier,
     ).toBe("ENG-2");
   });
+
+  it("normalizes GitHub edges and keeps foreign rows display-only", async () => {
+    call.mockResolvedValue({
+      edges: [
+        {
+          key: "children",
+          label: "Sub-issue",
+          ref: "#9",
+          foreign: false,
+          item: {
+            number: 9,
+            title: "Sub",
+            url: "https://github.com/acme/web/issues/9",
+            state: "open",
+            updatedAt: "",
+            repo: "acme/web",
+            foreign: false,
+          },
+        },
+        {
+          key: "children",
+          label: "Sub-issue",
+          ref: "#4",
+          foreign: true,
+          item: {
+            number: 4,
+            title: "Other repo",
+            url: "https://github.com/acme/api/issues/4",
+            state: "open",
+            updatedAt: "",
+            repo: "acme/api",
+            foreign: true,
+          },
+        },
+      ],
+      truncated: false,
+    });
+    const source = item(1, {
+      provider: "github",
+      kind: "issue",
+      repo: "acme/web",
+      projectPath: "/repo",
+      account: "acme",
+    });
+    const relations = await loadInboxRelations(source);
+    expect(call).toHaveBeenCalledWith("git_github_issue_relations", {
+      cwd: "/repo",
+      kind: "issue",
+      number: 1,
+    });
+    const children = relations.groups.find((group) => group.key === "children");
+    expect(children?.edges).toHaveLength(2);
+    expect(children?.edges[0].foreign).toBe(false);
+    expect(children?.edges[0].item?.account).toBe("acme");
+    expect(children?.edges[1].foreign).toBe(true);
+  });
 });

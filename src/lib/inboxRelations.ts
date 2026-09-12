@@ -58,7 +58,7 @@ type RawEdge = {
 
 function edgeIdentity(source: InboxItem, edge: InboxRelationEdge): string {
   if (edge.item) return contextTicketKey(edge.item);
-  return `${source.provider}:${edge.ref}`;
+  return `${source.provider}:${edge.ref.toLowerCase()}`;
 }
 
 /** Group, dedupe and order edges. Self-links and duplicates never render. */
@@ -69,14 +69,14 @@ export function groupInboxRelations(
   const self = contextTicketKey(source);
   // Ref-only edges can still point back at the source — match its known refs.
   const selfRefs = new Set<string>();
-  if (source.identifier) selfRefs.add(source.identifier);
+  if (source.identifier) selfRefs.add(source.identifier.toLowerCase());
   if (source.number) selfRefs.add(`#${source.number}`);
   const seen = new Set<string>();
   const groups = new Map<string, InboxRelationGroup>();
   for (const edge of edges) {
     if (!edge.ref.trim() && !edge.item) continue;
     const identity = edgeIdentity(source, edge);
-    if (identity === self || (!edge.item && selfRefs.has(edge.ref))) continue;
+    if (identity === self || (!edge.item && selfRefs.has(edge.ref.toLowerCase()))) continue;
     const key = edge.key.trim().toLowerCase() || "related";
     const dedupe = `${key}:${identity}`;
     if (seen.has(dedupe)) continue;
@@ -180,7 +180,10 @@ export async function loadInboxRelations(
     truncated = raw.truncated === true;
     edges = normalizeEdges(raw.edges ?? [], (node) =>
       node && typeof node === "object" && (node as { id?: string }).id
-        ? jiraIssue(item.site ?? "", node as Parameters<typeof jiraIssue>[1])
+        ? {
+            ...jiraIssue(item.site ?? "", node as Parameters<typeof jiraIssue>[1]),
+            account: item.account,
+          }
         : null,
     );
   } else if (item.provider === "azure") {
@@ -191,7 +194,10 @@ export async function loadInboxRelations(
     truncated = raw.truncated === true;
     edges = normalizeEdges(raw.edges ?? [], (node) =>
       node && typeof node === "object" && (node as { id?: number }).id
-        ? azureItem(item.site ?? "", node as Parameters<typeof azureItem>[1])
+        ? {
+            ...azureItem(item.site ?? "", node as Parameters<typeof azureItem>[1]),
+            account: item.account,
+          }
         : null,
     );
   } else if (item.provider === "linear") {
@@ -205,7 +211,12 @@ export async function loadInboxRelations(
         return null;
       }
       const issue = node as LinearIssue;
-      return { ...issue, provider: "linear" as const, kind: "linear" as const };
+      return {
+        ...issue,
+        provider: "linear" as const,
+        kind: "linear" as const,
+        account: item.account,
+      };
     });
   } else if (item.provider === "github" || item.provider === "gitlab") {
     const command =
