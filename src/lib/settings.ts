@@ -453,6 +453,16 @@ export const KEYBINDINGS: KeybindingRow[] = [
   { command: "Terminal: Toggle Dock", keys: `${MOD}J`, when: "Always" },
   { command: "Editor: Find", keys: `${MOD}F`, when: "editorFocus" },
   { command: "Editor: Replace", keys: `${MOD}${ALT}F`, when: "editorFocus" },
+  {
+    command: "Composer: Dictate",
+    keys: `${MOD}${SHIFT}M`,
+    when: "paneFocus && !blockingOverlay",
+  },
+  {
+    command: "Composer: Hold to dictate",
+    keys: `Hold ${MOD}${SHIFT}M`,
+    when: "dictationMode=hold",
+  },
 ];
 
 export function filterKeybindings(

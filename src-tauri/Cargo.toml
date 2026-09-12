@@ -7,6 +7,7 @@ authors = ["Nick"]
 repository = "https://github.com/hardbeat920/monocode"
 homepage = "https://usemono.dev"
 license.workspace = true
+default-run = "monocode"
 
 [lib]
 name = "monocode_lib"
@@ -25,6 +26,10 @@ tauri-plugin-dialog = "2"
 rusqlite = { version = "0.40.2", features = ["bundled"], default-features = false }
 ureq = { version = "2.12.1", default-features = false, features = ["tls", "gzip"] }
 tauri-plugin-process = "2"
+cpal = "0.18.2"
+hound = "3.5.1"
+sha2 = "0.10"
+whisper-rs = "0.16"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -34,6 +39,8 @@ portable-pty = { version = "0.9", path = "../vendor/portable-pty" }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", features = ["metal"] }
+mach2 = "0.6"
 block2 = "0.6.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSButton", "NSColor", "NSControl", "NSDockTile", "NSImage", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSResponder", "NSView", "NSWindow", "objc2-core-foundation"] }

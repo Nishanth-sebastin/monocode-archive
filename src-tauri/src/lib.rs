@@ -10,6 +10,7 @@ mod chat_background;
 mod checkpoint;
 mod confluence;
 mod cursor_store;
+pub mod dictation;
 mod fs;
 mod gitlab;
 mod harness;
@@ -186,6 +187,7 @@ pub fn run() {
         .manage(power::PowerHost::new())
         .manage(pty::PtyHost::new())
         .manage(window_transfer::WindowTransferState::new())
+        .manage(dictation::DictationHost::new())
         .setup(|app| {
             harness::reap_orphaned_harness_processes();
             session_store::init(app.handle())?;
@@ -423,6 +425,17 @@ pub fn run() {
             project_logo::save_project_logo,
             project_logo::remove_project_logo,
             project_logo::forget_logo_file,
+            dictation::dictation_catalog,
+            dictation::dictation_model_install,
+            dictation::dictation_model_cancel_download,
+            dictation::dictation_model_remove,
+            dictation::dictation_status,
+            dictation::dictation_request_mic_permission,
+            dictation::dictation_open_mic_settings,
+            dictation::dictation_start,
+            dictation::dictation_stop,
+            dictation::dictation_cancel,
+            dictation::dictation_transcribe_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building MonoCode");
@@ -489,6 +502,9 @@ fn reap_harness_children(handle: &tauri::AppHandle) {
     }
     if let Some(host) = handle.try_state::<pty::PtyHost>() {
         host.kill_all();
+    }
+    if let Some(host) = handle.try_state::<dictation::DictationHost>() {
+        host.shutdown();
     }
 }
 
