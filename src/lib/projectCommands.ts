@@ -8,7 +8,11 @@ import {
   type ProjectCommand,
   type ProjectRecord,
 } from "./projects";
-import type { TaskWorkspace } from "./taskWorkspaces";
+import {
+  childForRepository,
+  preferredTaskChild,
+  type TaskWorkspace,
+} from "./taskWorkspaces";
 
 /**
  * A command saved outside a project — the reusable counterpart to
@@ -196,7 +200,7 @@ function taskPrimaryChild(task: TaskWorkspace) {
     task.children.find(
       (child) => child.id === task.lastActiveChildId && child.workingCopy,
     ) ??
-    task.children.find((child) => child.workingCopy) ??
+    preferredTaskChild(task, (child) => Boolean(child.workingCopy)) ??
     task.children[0]
   );
 }
@@ -228,9 +232,7 @@ export function resolveCommandTarget(input: {
     }
     label = repositoryDisplayName(repo);
     if (task) {
-      const child = task.children.find(
-        (entry) => entry.repositoryId === command.repositoryId,
-      );
+      const child = childForRepository(task, command.repositoryId);
       if (!child) {
         return {
           error: `${label} is not part of task “${task.name}”.`,

@@ -37,6 +37,7 @@ const child = (
 ): TaskWorkspace["children"][number] => ({
   id,
   repositoryId,
+  attemptId: "primary",
   ...(workingCopy ? { workingCopy } : {}),
   sessionIds: [],
   launch: { state: "ready" },
@@ -49,6 +50,7 @@ const task = (
   id: "t1",
   projectId: "p1",
   name: "Task",
+  attempts: [{ id: "primary", createdAt: 0 }],
   children,
   createdAt: 0,
   ...overrides,

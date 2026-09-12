@@ -245,6 +245,7 @@ import {
   linkTicketToTask,
   loadTaskWorkspaces,
   markTaskChildLaunching,
+  preferredTaskChild,
   projectForTask,
   pruneTaskSession,
   recordTaskActiveChild,
@@ -5293,7 +5294,8 @@ export default function App({
         return taskSessionId;
       }
       // The session only exists once a child is verifiably ready — never
-      // rooted at a failed or not-yet-created working copy.
+      // rooted at a failed or not-yet-created working copy. The primary
+      // attempt's ready children win over a later attempt's.
       const host =
         fresh.children.find(
           (entry) =>
@@ -5301,8 +5303,9 @@ export default function App({
             entry.launch.state === "ready" &&
             entry.workingCopy,
         ) ??
-        fresh.children.find(
-          (entry) => entry.launch.state === "ready" && entry.workingCopy,
+        preferredTaskChild(
+          fresh,
+          (entry) => entry.launch.state === "ready" && Boolean(entry.workingCopy),
         );
       if (!host?.workingCopy) return undefined;
       const session = {
@@ -5424,8 +5427,8 @@ export default function App({
           (entry) =>
             entry.id === task.lastActiveChildId && entry.sessionIds.length,
         ) ??
-        task.children.find((entry) => entry.sessionIds.length) ??
-        task.children.find((entry) => entry.workingCopy) ??
+        preferredTaskChild(task, (entry) => entry.sessionIds.length > 0) ??
+        preferredTaskChild(task, (entry) => Boolean(entry.workingCopy)) ??
         task.children[0];
       if (child) void onOpenTaskChild(taskId, child.id);
     },

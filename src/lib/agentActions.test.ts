@@ -21,10 +21,12 @@ const task = (overrides: Partial<TaskWorkspace> = {}): TaskWorkspace => ({
   id: "t1",
   projectId: "p1",
   name: "Ship it",
+  attempts: [{ id: "primary", createdAt: 0 }],
   children: [
     {
       id: "c1",
       repositoryId: "r1",
+      attemptId: "primary",
       workingCopy: "/tmp/worktrees/t1-app",
       sessionIds: [],
       launch: { state: "ready" },

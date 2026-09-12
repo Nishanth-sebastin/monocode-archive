@@ -12,6 +12,7 @@ function child(over: Partial<TaskChild> = {}): TaskChild {
   return {
     id: "c1",
     repositoryId: "r1",
+    attemptId: "primary",
     workingCopy: "/repo/a",
     branch: "feat/x",
     sessionIds: [],
@@ -28,6 +29,7 @@ function task(
     id: "t1",
     projectId: "p1",
     name: "Task",
+    attempts: [{ id: "primary", createdAt: 1 }],
     children,
     sessionIds: ["s1"],
     createdAt: 1,

@@ -48,6 +48,7 @@ function seedTask() {
       {
         id: "child-2",
         repositoryId: repo.id,
+        attemptId: "primary",
         workingCopy: "/tmp/lib-wt",
         sessionIds: [],
         launch: { state: "pending" as const },

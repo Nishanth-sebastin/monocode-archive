@@ -9,6 +9,7 @@ import type { LinkedWorkItem } from "./session";
 const KEY = "monocode.taskWorkspaces.v1";
 const EVENT = "monocode:task-workspaces-changed";
 const MAX_TASKS = 100;
+const MAX_ATTEMPTS = 20;
 const MAX_CHILDREN = 50;
 
 /**
@@ -20,7 +21,25 @@ const MAX_CHILDREN = 50;
 export type TaskChildLaunchState = "pending" | "working" | "ready" | "failed";
 
 /**
- * Exact routing identity for one repository's share of a task. Provider,
+ * One candidate solution set for a task. Every task has at least its primary
+ * attempt (`PRIMARY_ATTEMPT_ID`); additional attempts are parallel solution
+ * sets whose children each materialize their own worktree and branch — Git
+ * never checks one branch out in two worktrees of the same repository.
+ */
+export type TaskAttempt = {
+  id: string;
+  label?: string;
+  createdAt: number;
+  /** User verdict; absent while the attempt is still in play. */
+  status?: "chosen" | "discarded";
+};
+
+/** Stable id of every task's first attempt. Fresh tasks and the legacy
+ * backfill share it, so a stored child never needs a generated fallback. */
+export const PRIMARY_ATTEMPT_ID = "primary";
+
+/**
+ * Exact routing identity for one repository's share of one attempt. Provider,
  * account and remote mappings are not copied here — they resolve through the
  * existing per-repository stores keyed by this identity.
  */
@@ -28,6 +47,9 @@ export type TaskChild = {
   id: string;
   /** `ProjectRepository.id` — never a name or path. */
   repositoryId: string;
+  /** Owning attempt — always set after sanitize; `PRIMARY_ATTEMPT_ID` for
+   * tasks that never grew a second attempt. */
+  attemptId: string;
   /** Chosen working copy (host-qualified); absent while prepared later. */
   workingCopy?: string;
   /** New-worktree creation inputs recorded at review time. */
@@ -51,6 +73,9 @@ export type TaskWorkspace = {
   /** Optional linked provider ticket; local tasks have none. */
   ticket?: LinkedWorkItem;
   brief?: string;
+  /** Candidate solution sets; always ≥1 after sanitize — `attempts[0]` is the
+   * primary attempt every child defaults to. */
+  attempts: TaskAttempt[];
   children: TaskChild[];
   /** The task's session — one conversation roots at the primary child's
    * working copy and can work every child. Legacy tasks may instead carry
@@ -67,6 +92,8 @@ export type TaskWorkspace = {
 /** Creation-time per-repository draft collected by the task sheet. */
 export type TaskChildDraft = {
   repositoryId: string;
+  /** Target attempt; absent → the task's primary attempt. */
+  attemptId?: string;
   mode: "worktree" | "existing" | "main" | "later";
   /** For `worktree`: reviewed base + new branch + target path. */
   baseRef?: string;
@@ -128,16 +155,42 @@ function cleanStrings(value: unknown, max: number): string[] {
   return out;
 }
 
-function sanitizeChild(value: unknown, taskId: string): TaskChild | null {
+function sanitizeAttempt(value: unknown): TaskAttempt | null {
+  if (!isRecord(value)) return null;
+  const id = cleanString(value.id);
+  if (!id) return null;
+  const status = cleanString(value.status);
+  return {
+    id,
+    ...(cleanString(value.label) ? { label: cleanString(value.label) } : {}),
+    createdAt:
+      typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+        ? value.createdAt
+        : Date.now(),
+    ...(status === "chosen" || status === "discarded" ? { status } : {}),
+  };
+}
+
+function sanitizeChild(
+  value: unknown,
+  taskId: string,
+  attemptIds: ReadonlySet<string>,
+  primaryAttemptId: string,
+): TaskChild | null {
   if (!isRecord(value)) return null;
   const id = cleanString(value.id);
   const repositoryId = cleanString(value.repositoryId);
   if (!id || !repositoryId) return null;
+  const attemptId = cleanString(value.attemptId);
   const launch = isRecord(value.launch) ? value.launch : {};
   const state = cleanString(launch.state);
   return {
     id,
     repositoryId,
+    // A child pointing at a gone attempt falls back to the primary one —
+    // dangling attempt ids never strand a checkout row.
+    attemptId:
+      attemptId && attemptIds.has(attemptId) ? attemptId : primaryAttemptId,
     ...(cleanString(value.workingCopy)
       ? { workingCopy: cleanString(value.workingCopy) }
       : {}),
@@ -175,9 +228,25 @@ function sanitizeTask(value: unknown): TaskWorkspace | null {
   const projectId = cleanString(value.projectId);
   const name = cleanString(value.name);
   if (!id || !projectId || !name) return null;
+  const createdAt =
+    typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+      ? value.createdAt
+      : Date.now();
+  const attempts: TaskAttempt[] = [];
+  for (const raw of Array.isArray(value.attempts) ? value.attempts : []) {
+    const attempt = sanitizeAttempt(raw);
+    if (!attempt || attempts.some((entry) => entry.id === attempt.id)) continue;
+    attempts.push(attempt);
+    if (attempts.length >= MAX_ATTEMPTS) break;
+  }
+  // Tasks written before attempts existed get the shared primary id — no
+  // generated value, so an unsaved reload stays identical.
+  if (!attempts.length)
+    attempts.push({ id: PRIMARY_ATTEMPT_ID, createdAt });
+  const attemptIds = new Set(attempts.map((attempt) => attempt.id));
   const children = Array.isArray(value.children)
     ? value.children
-        .map((child) => sanitizeChild(child, id))
+        .map((child) => sanitizeChild(child, id, attemptIds, attempts[0].id))
         .filter((child): child is TaskChild => child !== null)
         .slice(0, MAX_CHILDREN)
     : [];
@@ -191,6 +260,7 @@ function sanitizeTask(value: unknown): TaskWorkspace | null {
       ? { ticket: value.ticket as LinkedWorkItem }
       : {}),
     ...(cleanString(value.brief) ? { brief: cleanString(value.brief) } : {}),
+    attempts,
     children,
     sessionIds: cleanStrings(value.sessionIds, 20),
     ...(cleanString(value.briefSentFor)
@@ -199,10 +269,7 @@ function sanitizeTask(value: unknown): TaskWorkspace | null {
     ...(children.some((child) => child.id === lastActiveChildId)
       ? { lastActiveChildId }
       : {}),
-    createdAt:
-      typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
-        ? value.createdAt
-        : Date.now(),
+    createdAt,
     ...(value.archived === true ? { archived: true } : {}),
   };
 }
@@ -306,15 +373,32 @@ function repositoryOf(
  * repository ids or a mixed-host working-copy set. Draft inputs are copied
  * verbatim — nothing is inferred from names or tickets.
  */
+/** One child per (attempt, repository) — a repository can repeat across
+ * attempts but never twice inside the same attempt. */
+function assertUniqueRepositoryAttempts(children: readonly TaskChild[]) {
+  const seen = new Set<string>();
+  for (const child of children) {
+    const key = `${child.attemptId}${child.repositoryId}`;
+    if (seen.has(key))
+      throw new Error("A selected repository is already in this task");
+    seen.add(key);
+  }
+}
+
 /** Validates child drafts against a project and builds child records. */
 function buildTaskChildren(
   project: ProjectRecord,
   drafts: readonly TaskChildDraft[],
+  attempts: readonly TaskAttempt[],
 ): TaskChild[] {
   return drafts.map((draft) => {
     const repository = repositoryOf(project, draft.repositoryId);
     if (!repository)
       throw new Error("A selected repository is no longer in this project");
+    const requested = cleanString(draft.attemptId);
+    const attemptId = requested ?? attempts[0]?.id ?? PRIMARY_ATTEMPT_ID;
+    if (requested && !attempts.some((attempt) => attempt.id === requested))
+      throw new Error("A selected attempt is no longer in this task");
     const workingCopy =
       draft.mode === "later"
         ? undefined
@@ -333,6 +417,7 @@ function buildTaskChildren(
     return {
       id: crypto.randomUUID(),
       repositoryId: draft.repositoryId,
+      attemptId,
       ...(workingCopy ? { workingCopy } : {}),
       ...(createsWorktree
         ? {
@@ -372,7 +457,9 @@ export function createTask(input: {
   if (!drafts.length) throw new Error("Select at least one repository");
   if (drafts.length > MAX_CHILDREN)
     throw new Error(`A task supports up to ${MAX_CHILDREN} repositories`);
-  const children = buildTaskChildren(project, drafts);
+  const primary: TaskAttempt = { id: PRIMARY_ATTEMPT_ID, createdAt: Date.now() };
+  const children = buildTaskChildren(project, drafts, [primary]);
+  assertUniqueRepositoryAttempts(children);
   const conflict = taskHostConflict(
     children.map((child) => child.workingCopy),
   );
@@ -387,6 +474,7 @@ export function createTask(input: {
     name,
     ...(input.ticket ? { ticket: input.ticket } : {}),
     ...(cleanString(input.brief) ? { brief: cleanString(input.brief) } : {}),
+    attempts: [primary],
     children,
     sessionIds: [],
     createdAt: Date.now(),
@@ -463,15 +551,12 @@ export function reviseTask(
     const drafts = revision.additions.filter(
       (child) => child && child.repositoryId,
     );
-    const owned = new Set(kept.map((child) => child.repositoryId));
-    for (const draft of drafts)
-      if (owned.has(draft.repositoryId))
-        throw new Error("A selected repository is already in this task");
     if (!kept.length && !drafts.length)
       throw new Error("Select at least one repository");
     if (kept.length + drafts.length > MAX_CHILDREN)
       throw new Error(`A task supports up to ${MAX_CHILDREN} repositories`);
-    const added = buildTaskChildren(project, drafts);
+    const added = buildTaskChildren(project, drafts, current.attempts);
+    assertUniqueRepositoryAttempts([...kept, ...added]);
     const conflict = taskHostConflict(
       [...kept, ...added].map((child) => child.workingCopy),
     );
@@ -522,13 +607,10 @@ export function addTaskChildren(
   if (!project) throw new Error("Project no longer exists");
   const valid = drafts.filter((child) => child && child.repositoryId);
   if (!valid.length) return [];
-  const owned = new Set(task.children.map((child) => child.repositoryId));
-  for (const draft of valid)
-    if (owned.has(draft.repositoryId))
-      throw new Error("A selected repository is already in this task");
   if (task.children.length + valid.length > MAX_CHILDREN)
     throw new Error(`A task supports up to ${MAX_CHILDREN} repositories`);
-  const added = buildTaskChildren(project, valid);
+  const added = buildTaskChildren(project, valid, task.attempts);
+  assertUniqueRepositoryAttempts([...task.children, ...added]);
   const conflict = taskHostConflict(
     [...task.children, ...added].map((child) => child.workingCopy),
   );
@@ -538,6 +620,120 @@ export function addTaskChildren(
     children: [...current.children, ...added],
   }));
   return added;
+}
+
+/**
+ * Adds a parallel solution attempt. Children join it through
+ * `addTaskChildren`/`reviseTask` drafts carrying `attemptId`; each child then
+ * materializes its own worktree and branch — Git never checks one branch out
+ * in two worktrees of the same repository.
+ */
+export function addTaskAttempt(taskId: string, label?: string): TaskAttempt {
+  const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+  if (!task) throw new Error("Task no longer exists");
+  if (task.attempts.length >= MAX_ATTEMPTS)
+    throw new Error(`A task supports up to ${MAX_ATTEMPTS} attempts`);
+  const attempt: TaskAttempt = {
+    id: crypto.randomUUID(),
+    ...(cleanString(label) ? { label: cleanString(label) } : {}),
+    createdAt: Date.now(),
+  };
+  updateTask(taskId, (current) => ({
+    ...current,
+    attempts: [...current.attempts, attempt],
+  }));
+  return attempt;
+}
+
+/** Drops an attempt and its children — sessions, working copies and branches
+ * stay. The primary attempt cannot be removed; mark it discarded instead. */
+export function removeTaskAttempt(taskId: string, attemptId: string) {
+  const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+  if (!task) throw new Error("Task no longer exists");
+  if (attemptId === task.attempts[0]?.id)
+    throw new Error(
+      "The primary attempt cannot be removed — mark it discarded instead.",
+    );
+  if (!task.attempts.some((attempt) => attempt.id === attemptId))
+    throw new Error("Attempt no longer exists");
+  updateTask(taskId, (current) => {
+    const removed = new Set(
+      current.children
+        .filter((child) => child.attemptId === attemptId)
+        .map((child) => child.id),
+    );
+    return {
+      ...current,
+      attempts: current.attempts.filter(
+        (attempt) => attempt.id !== attemptId,
+      ),
+      children: current.children.filter(
+        (child) => child.attemptId !== attemptId,
+      ),
+      ...(current.lastActiveChildId && removed.has(current.lastActiveChildId)
+        ? { lastActiveChildId: undefined }
+        : {}),
+    };
+  });
+}
+
+/** The attempt a child belongs to — falls back to the primary attempt. */
+export function attemptForChild(
+  task: TaskWorkspace,
+  child: TaskChild,
+): TaskAttempt | undefined {
+  return (
+    task.attempts.find((attempt) => attempt.id === child.attemptId) ??
+    task.attempts[0]
+  );
+}
+
+/** Display label for an attempt — its name, or "Attempt N" by position. */
+export function taskAttemptLabel(
+  task: TaskWorkspace,
+  attemptId: string,
+): string {
+  const index = task.attempts.findIndex((attempt) => attempt.id === attemptId);
+  const label = index >= 0 ? task.attempts[index].label?.trim() : undefined;
+  return label || `Attempt ${index >= 0 ? index + 1 : 1}`;
+}
+
+/** One repository's child for an attempt — defaults to the primary attempt so
+ * repository-bound lookups stay deterministic once several attempts exist. */
+export function childForRepository(
+  task: TaskWorkspace,
+  repositoryId: string,
+  attemptId?: string,
+): TaskChild | undefined {
+  const matches = task.children.filter(
+    (child) => child.repositoryId === repositoryId,
+  );
+  if (!matches.length) return undefined;
+  const wanted = attemptId ?? task.attempts[0]?.id;
+  return (
+    matches.find((child) => child.attemptId === wanted) ?? matches[0]
+  );
+}
+
+/** Deterministic representative pick: prefer the primary attempt's matching
+ * child, then any match. For "the task's copy of repo X" style lookups. */
+export function preferredTaskChild(
+  task: TaskWorkspace,
+  match: (child: TaskChild) => boolean,
+): TaskChild | undefined {
+  const primary = task.attempts[0]?.id;
+  return (
+    task.children.find(
+      (child) => child.attemptId === primary && match(child),
+    ) ?? task.children.find(match)
+  );
+}
+
+/** True when the task created this checkout rather than borrowing an
+ * existing/main copy — `branch`+`base` are only recorded for worktree-mode
+ * children. Cleanup offers must use this, never path heuristics. */
+export function taskOwnsCheckout(child: TaskChild): boolean {
+  return Boolean(child.branch && child.baseRef);
 }
 
 export function recordTaskActiveChild(taskId: string, childId: string) {
@@ -622,7 +818,7 @@ export function taskForSession(
             )
           : undefined) ??
         task.children.find((entry) => entry.id === task.lastActiveChildId) ??
-        task.children.find((entry) => entry.workingCopy) ??
+        preferredTaskChild(task, (entry) => Boolean(entry.workingCopy)) ??
         task.children[0];
       return { task, child: host };
     }
@@ -678,7 +874,11 @@ export function taskChildRepoLabel(
           .filter(Boolean)
           .pop() ?? child.workingCopy)
       : "Repository";
-  return child.branch ? `${repoName}/${child.branch}` : repoName;
+  const base = child.branch ? `${repoName}/${child.branch}` : repoName;
+  // Once attempts exist the same repository can appear twice — disambiguate.
+  return task.attempts.length > 1
+    ? `${base} · ${taskAttemptLabel(task, child.attemptId)}`
+    : base;
 }
 
 function repositoryDisplay(repository: ProjectRepository): string {
@@ -728,6 +928,8 @@ export function composeTaskSessionPrompt(
       parts.push(`branch: ${child.branch}${base}`);
       if (child.mergeTarget) parts.push(`merge target: ${child.mergeTarget}`);
     }
+    if (task.attempts.length > 1)
+      parts.push(`attempt: ${taskAttemptLabel(task, child.attemptId)}`);
     lines.push(parts.join(" — "));
     if (child.responsibility?.trim())
       lines.push(`  Responsibility: ${child.responsibility.trim()}`);

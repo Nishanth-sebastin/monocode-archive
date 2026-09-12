@@ -7,23 +7,31 @@ import {
 } from "./projects";
 import type { RepositoryFamily } from "./repositoryFamilies";
 import {
+  addTaskAttempt,
   addTaskChildren,
   archiveTask,
+  attemptForChild,
+  childForRepository,
   composeTaskPrompt,
   composeTaskSessionPrompt,
   createTask,
   isTaskChildLaunching,
   loadTaskWorkspaces,
   markTaskChildLaunching,
+  PRIMARY_ATTEMPT_ID,
   pruneTaskSession,
   recordTaskActiveChild,
   removeTask,
+  removeTaskAttempt,
   removeTaskChild,
   reviseTask,
   suggestTaskBranch,
+  taskAttemptLabel,
+  taskChildRepoLabel,
   taskChildrenForWorkingCopy,
   taskForSession,
   taskHostConflict,
+  taskOwnsCheckout,
   tasksForProject,
   unmarkTaskChildLaunching,
   updateTask,
@@ -264,8 +272,8 @@ describe("createTask", () => {
   });
 
   it("rejects mixed execution hosts", () => {
-    const project = projectWith("/tmp/app");
-    const [repo] = project.repositories;
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo, lib] = project.repositories;
     expect(() =>
       createTask({
         projectId: project.id,
@@ -277,13 +285,25 @@ describe("createTask", () => {
             workingCopy: "/tmp/app-copy",
           },
           {
-            repositoryId: repo.id,
+            repositoryId: lib.id,
             mode: "existing",
-            workingCopy: "//wsl.localhost/Ubuntu/home/me/app",
+            workingCopy: "//wsl.localhost/Ubuntu/home/me/lib",
           },
         ],
       }),
     ).toThrow(/different execution hosts/);
+  });
+
+  it("rejects the same repository twice in one attempt", () => {
+    const project = projectWith("/tmp/app");
+    const [repo] = project.repositories;
+    expect(() =>
+      createTask({
+        projectId: project.id,
+        name: "X",
+        children: [later(repo.id), later(repo.id)],
+      }),
+    ).toThrow("already in this task");
   });
 });
 
@@ -402,6 +422,157 @@ describe("addTaskChildren", () => {
       loadTaskWorkspaces().find((entry) => entry.id === task.id)?.children,
     ).toHaveLength(1);
     expect(addTaskChildren(task.id, [])).toEqual([]);
+  });
+});
+
+describe("attempts", () => {
+  it("stamps children into the primary attempt and stores its record", () => {
+    const project = projectWith("/tmp/app");
+    const [repo] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id)],
+    });
+    expect(task.attempts).toHaveLength(1);
+    expect(task.attempts[0].id).toBe(PRIMARY_ATTEMPT_ID);
+    expect(task.children[0].attemptId).toBe(PRIMARY_ATTEMPT_ID);
+  });
+
+  it("backfills a primary attempt for tasks written before it existed", () => {
+    localStorage.setItem(
+      "monocode.taskWorkspaces.v1",
+      JSON.stringify([
+        {
+          id: "t1",
+          projectId: "p1",
+          name: "Legacy",
+          children: [
+            {
+              id: "c1",
+              repositoryId: "r1",
+              attemptId: "gone",
+              sessionIds: [],
+              launch: { state: "ready" },
+            },
+          ],
+        },
+      ]),
+    );
+    const [task] = loadTaskWorkspaces();
+    expect(task.attempts[0].id).toBe(PRIMARY_ATTEMPT_ID);
+    // A dangling attempt id remaps to the primary instead of stranding the row.
+    expect(task.children[0].attemptId).toBe(PRIMARY_ATTEMPT_ID);
+    expect(attemptForChild(task, task.children[0])?.id).toBe(
+      PRIMARY_ATTEMPT_ID,
+    );
+  });
+
+  it("adds attempts, targets children at them and protects the primary", () => {
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo, lib] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id), later(lib.id)],
+    });
+    const second = addTaskAttempt(task.id, "Minimal diff");
+    expect(second.label).toBe("Minimal diff");
+    // The same repository is allowed in another attempt…
+    const added = addTaskChildren(task.id, [
+      {
+        repositoryId: repo.id,
+        attemptId: second.id,
+        mode: "worktree",
+        baseRef: "refs/heads/main",
+        baseCommit: "def456",
+        branch: "x-minimal",
+        path: "/tmp/app-minimal",
+      },
+    ]);
+    expect(added[0].attemptId).toBe(second.id);
+    // …but never twice inside one attempt, and unknown attempts refuse.
+    expect(() =>
+      addTaskChildren(task.id, [later(repo.id)]),
+    ).toThrow("already in this task");
+    expect(() =>
+      addTaskChildren(task.id, [
+        { ...later(lib.id), attemptId: "nope" },
+      ]),
+    ).toThrow("no longer in this task");
+    expect(() => removeTaskAttempt(task.id, PRIMARY_ATTEMPT_ID)).toThrow(
+      /primary attempt/i,
+    );
+    removeTaskAttempt(task.id, second.id);
+    const [stored] = loadTaskWorkspaces();
+    expect(stored.attempts).toHaveLength(1);
+    expect(stored.children.every((c) => c.attemptId === PRIMARY_ATTEMPT_ID)).toBe(
+      true,
+    );
+  });
+
+  it("routes repository lookups to the primary attempt by default", () => {
+    const project = projectWith("/tmp/app");
+    const [repo] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id)],
+    });
+    const second = addTaskAttempt(task.id);
+    const added = addTaskChildren(task.id, [
+      { ...later(repo.id), attemptId: second.id },
+    ]);
+    const [stored] = loadTaskWorkspaces();
+    expect(childForRepository(stored, repo.id)?.attemptId).toBe(
+      PRIMARY_ATTEMPT_ID,
+    );
+    expect(childForRepository(stored, repo.id, second.id)?.id).toBe(
+      added[0].id,
+    );
+  });
+
+  it("disambiguates repo labels once several attempts exist", () => {
+    const project = projectWith("/tmp/app");
+    const [repo] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id)],
+    });
+    const [stored] = loadTaskWorkspaces();
+    expect(taskChildRepoLabel(stored, stored.children[0])).toBe("app");
+    const second = addTaskAttempt(task.id, "Variant B");
+    addTaskChildren(task.id, [
+      { ...later(repo.id), attemptId: second.id },
+    ]);
+    const [multi] = loadTaskWorkspaces();
+    expect(taskAttemptLabel(multi, second.id)).toBe("Variant B");
+    expect(taskChildRepoLabel(multi, multi.children[1])).toContain(
+      "Variant B",
+    );
+  });
+
+  it("marks task-created checkouts without mistaking borrowed copies", () => {
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo, lib] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [
+        {
+          repositoryId: repo.id,
+          mode: "worktree",
+          baseRef: "refs/heads/main",
+          baseCommit: "abc123",
+          branch: "x",
+          path: "/tmp/app-x",
+        },
+        { repositoryId: lib.id, mode: "existing", workingCopy: "/tmp/lib" },
+      ],
+    });
+    expect(taskOwnsCheckout(task.children[0])).toBe(true);
+    expect(taskOwnsCheckout(task.children[1])).toBe(false);
   });
 });
 
