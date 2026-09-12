@@ -10,10 +10,13 @@ import {
   adjustDictationRange,
   applyModelProgress,
   caretAfterSplice,
+  DICTATION_LANGUAGES,
   dictationDraftText,
+  dictationLanguageLabel,
   downloadPercent,
   draftEditSpan,
   effectiveTranslate,
+  filterDictationLanguages,
   formatElapsed,
   formatModelSize,
   isMicAccessError,
@@ -419,6 +422,32 @@ describe("dictation prefs", () => {
       JSON.stringify({ mode: "double-tap" }),
     );
     expect(loadDictationPrefs().mode).toBe("toggle");
+  });
+});
+
+describe("dictation languages", () => {
+  it("pins auto-detect, English and Polish ahead of the full list", () => {
+    expect(DICTATION_LANGUAGES[0].id).toBeNull();
+    expect(DICTATION_LANGUAGES[1].id).toBe("en");
+    expect(DICTATION_LANGUAGES[2].id).toBe("pl");
+    expect(DICTATION_LANGUAGES.length).toBeGreaterThanOrEqual(99);
+  });
+
+  it("filters languages case-insensitively by label", () => {
+    expect(filterDictationLanguages("pol").map((l) => l.id)).toEqual(["pl"]);
+    expect(filterDictationLanguages("GERMAN").map((l) => l.id)).toEqual([
+      "de",
+    ]);
+    expect(filterDictationLanguages("").length).toBe(
+      DICTATION_LANGUAGES.length,
+    );
+    expect(filterDictationLanguages("zzz")).toEqual([]);
+  });
+
+  it("labels the selected language", () => {
+    expect(dictationLanguageLabel(null)).toBe("Auto-detect");
+    expect(dictationLanguageLabel("pl")).toBe("Polish");
+    expect(dictationLanguageLabel("xx")).toBe("Auto-detect");
   });
 });
 

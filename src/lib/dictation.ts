@@ -158,12 +158,66 @@ export function listenDictationModelProgress(
 
 const PREFS_KEY = "monocode.dictation";
 
-/** Fixed small list; `null` lets whisper auto-detect the spoken language. */
+/** Whisper's full multilingual set; `null` auto-detects the spoken language.
+ * Auto, English and Polish are pinned ahead of the alphabetical rest. */
 export const DICTATION_LANGUAGES: { id: string | null; label: string }[] = [
-  { id: null, label: "Auto" },
-  { id: "pl", label: "Polski" },
+  { id: null, label: "Auto-detect" },
   { id: "en", label: "English" },
+  { id: "pl", label: "Polish" },
+  ...[
+    ["af", "Afrikaans"], ["am", "Amharic"], ["ar", "Arabic"],
+    ["as", "Assamese"], ["az", "Azerbaijani"], ["ba", "Bashkir"],
+    ["be", "Belarusian"], ["bg", "Bulgarian"], ["bn", "Bengali"],
+    ["bo", "Tibetan"], ["br", "Breton"], ["bs", "Bosnian"],
+    ["ca", "Catalan"], ["cs", "Czech"], ["cy", "Welsh"],
+    ["da", "Danish"], ["de", "German"], ["el", "Greek"],
+    ["es", "Spanish"], ["et", "Estonian"], ["eu", "Basque"],
+    ["fa", "Persian"], ["fi", "Finnish"], ["fo", "Faroese"],
+    ["fr", "French"], ["gl", "Galician"], ["gu", "Gujarati"],
+    ["ha", "Hausa"], ["haw", "Hawaiian"], ["he", "Hebrew"],
+    ["hi", "Hindi"], ["hr", "Croatian"], ["ht", "Haitian Creole"],
+    ["hu", "Hungarian"], ["hy", "Armenian"], ["id", "Indonesian"],
+    ["is", "Icelandic"], ["it", "Italian"], ["ja", "Japanese"],
+    ["jw", "Javanese"], ["ka", "Georgian"], ["kk", "Kazakh"],
+    ["km", "Khmer"], ["kn", "Kannada"], ["ko", "Korean"],
+    ["la", "Latin"], ["lb", "Luxembourgish"], ["ln", "Lingala"],
+    ["lo", "Lao"], ["lt", "Lithuanian"], ["lv", "Latvian"],
+    ["mg", "Malagasy"], ["mi", "Māori"], ["mk", "Macedonian"],
+    ["ml", "Malayalam"], ["mn", "Mongolian"], ["mr", "Marathi"],
+    ["ms", "Malay"], ["mt", "Maltese"], ["my", "Burmese"],
+    ["ne", "Nepali"], ["nl", "Dutch"], ["nn", "Norwegian Nynorsk"],
+    ["no", "Norwegian"], ["oc", "Occitan"], ["pa", "Punjabi"],
+    ["ps", "Pashto"], ["pt", "Portuguese"], ["ro", "Romanian"],
+    ["ru", "Russian"], ["sa", "Sanskrit"], ["sd", "Sindhi"],
+    ["si", "Sinhala"], ["sk", "Slovak"], ["sl", "Slovenian"],
+    ["sn", "Shona"], ["so", "Somali"], ["sq", "Albanian"],
+    ["sr", "Serbian"], ["su", "Sundanese"], ["sv", "Swedish"],
+    ["sw", "Swahili"], ["ta", "Tamil"], ["te", "Telugu"],
+    ["tg", "Tajik"], ["th", "Thai"], ["tk", "Turkmen"],
+    ["tl", "Tagalog"], ["tr", "Turkish"], ["tt", "Tatar"],
+    ["uk", "Ukrainian"], ["ur", "Urdu"], ["uz", "Uzbek"],
+    ["vi", "Vietnamese"], ["yi", "Yiddish"], ["yo", "Yoruba"],
+    ["yue", "Cantonese"], ["zh", "Chinese"],
+  ].map(([id, label]) => ({ id, label })),
 ];
+
+/** Case-insensitive label filter for the language list. */
+export function filterDictationLanguages(
+  query: string,
+): { id: string | null; label: string }[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return DICTATION_LANGUAGES;
+  return DICTATION_LANGUAGES.filter((language) =>
+    language.label.toLowerCase().includes(needle),
+  );
+}
+
+export function dictationLanguageLabel(id: string | null): string {
+  return (
+    DICTATION_LANGUAGES.find((language) => language.id === id)?.label ??
+    "Auto-detect"
+  );
+}
 
 /** How dictation engages: `hold` runs while the mic/shortcut is held down,
  * `toggle` starts on press and stops on the next. */

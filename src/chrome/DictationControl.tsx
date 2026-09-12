@@ -2,19 +2,22 @@ import { useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
+  ChevronRight,
   Download,
   Languages,
   Loader,
   Mic,
   MicOff,
+  Search,
   Square,
   Trash2,
   X,
 } from "./icons";
 import { Popover } from "./Popover";
 import {
-  DICTATION_LANGUAGES,
+  dictationLanguageLabel,
   downloadPercent,
+  filterDictationLanguages,
   formatElapsed,
   formatModelSize,
   resolveDictationModel,
@@ -157,6 +160,87 @@ function useElapsedMs(phase: string, audioMs: number, startedAt: number) {
   return phase === "starting" || phase === "recording"
     ? Math.max(0, now - startedAt)
     : 0;
+}
+
+/** Spoken-language picker: a compact row that expands into a filterable
+ * list of whisper's multilingual set. Translate stays a separate toggle —
+ * whisper.cpp can only translate *into* English regardless of source. */
+function LanguageSection({ dictation }: { dictation: Dictation }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const languages = filterDictationLanguages(query);
+  return (
+    <>
+      <button
+        type="button"
+        role="menuitem"
+        aria-expanded={open}
+        onClick={() => {
+          setOpen(!open);
+          setQuery("");
+        }}
+        className="mx-0.5 flex w-[calc(100%-4px)] items-center gap-2 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/10"
+      >
+        <Languages className="size-3.5 shrink-0 text-content/45" />
+        <span className="min-w-0 flex-1 text-[13px]">Spoken language</span>
+        <span className="shrink-0 text-[11px] text-content/45">
+          {dictationLanguageLabel(dictation.prefs.language)}
+        </span>
+        <ChevronRight
+          className={`size-3 shrink-0 text-content/40 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+      </button>
+      {open ? (
+        <div className="mx-0.5 mb-1 mt-0.5 overflow-hidden rounded-lg border border-content/10">
+          <label className="flex h-7 items-center gap-2 border-b border-content/10 px-2 text-content/45">
+            <Search className="size-3 shrink-0" strokeWidth={1.75} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Filter"
+              aria-label="Filter languages"
+              spellCheck={false}
+              autoComplete="off"
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/35"
+            />
+          </label>
+          <div role="listbox" className="max-h-40 overflow-y-auto py-0.5">
+            {languages.length === 0 ? (
+              <p className="px-2 py-1.5 text-[12px] text-content/45">
+                No matching language
+              </p>
+            ) : (
+              languages.map((language) => {
+                const active = dictation.prefs.language === language.id;
+                return (
+                  <button
+                    key={language.id ?? "auto"}
+                    type="button"
+                    role="option"
+                    aria-selected={active}
+                    onClick={() => {
+                      dictation.selectLanguage(language.id);
+                      setOpen(false);
+                    }}
+                    className="flex w-full items-center gap-2 px-2 py-1 text-left text-[12.5px] text-content hover:bg-content/10"
+                  >
+                    <span className="grid size-3.5 shrink-0 place-items-center">
+                      {active ? (
+                        <Check className="size-3 text-accent" />
+                      ) : null}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {language.label}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 /**
@@ -368,28 +452,7 @@ export function DictationControl({
               />
             ))
           )}
-          <p className={SECTION_LABEL}>Language</p>
-          <div className="flex gap-1 px-0.5 pb-0.5">
-            {DICTATION_LANGUAGES.map((language) => {
-              const active = dictation.prefs.language === language.id;
-              return (
-                <button
-                  key={language.id ?? "auto"}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={active}
-                  onClick={() => dictation.selectLanguage(language.id)}
-                  className={`flex-1 rounded-md px-2 py-1 text-[11px] ${
-                    active
-                      ? "bg-content/15 text-content"
-                      : "text-content/55 hover:bg-content/10 hover:text-content"
-                  }`}
-                >
-                  {language.label}
-                </button>
-              );
-            })}
-          </div>
+          <LanguageSection dictation={dictation} />
           <p className={SECTION_LABEL}>Trigger · ⌘⇧M</p>
           <div className="flex gap-1 px-0.5 pb-0.5">
             {(
@@ -426,7 +489,7 @@ export function DictationControl({
               title={
                 translateDisabled
                   ? `${selected?.label ?? "This model"} cannot translate — pick a translate-capable model`
-                  : "Translate speech to English"
+                  : "Translate speech to English — whisper only translates into English"
               }
               onClick={() => dictation.setTranslate(!dictation.prefs.translate)}
               className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] text-content hover:bg-content/10 disabled:opacity-40 disabled:hover:bg-transparent"
