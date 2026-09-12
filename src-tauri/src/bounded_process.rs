@@ -145,7 +145,7 @@ mod tests {
         #[cfg(unix)]
         let script = "sleep 10 & wait";
         #[cfg(windows)]
-        let script = "ping -n 10 127.0.0.1 > nul";
+        let script = "powershell -NoProfile -Command \"Start-Sleep -Seconds 10\"";
         let start = Instant::now();
         assert!(
             output(&mut command(script), Duration::from_millis(100), 1024)
