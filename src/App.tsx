@@ -5266,15 +5266,34 @@ export default function App({
         }
       }
       // One session per task — rooted at the host child's working copy.
-      const fresh = loadTaskWorkspaces().find((entry) => entry.id === taskId);
+      let fresh = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       if (!fresh) return undefined;
-      const recorded =
-        fresh.sessionIds?.[0] ??
-        fresh.children.find((entry) => entry.sessionIds.length)
+      const recordedTaskSession = (entry: TaskWorkspace) =>
+        entry.sessionIds?.[0] ??
+        entry.children.find((child) => child.sessionIds.length)
           ?.sessionIds[0];
+      const recorded = recordedTaskSession(fresh);
       // A deleted conversation is pruned and replaced, not reused.
-      const taskSessionId =
+      let taskSessionId =
         recorded && (await taskSessionAlive(recorded)) ? recorded : undefined;
+      // A child retry can overlap a full launch — the probe above awaits,
+      // so a concurrent run may have committed the session while this one
+      // saw the recorded id dead. Re-read before creating a duplicate.
+      if (!taskSessionId) {
+        const again = loadTaskWorkspaces().find(
+          (entry) => entry.id === taskId,
+        );
+        // The task itself may have been removed while the probe awaited.
+        if (!again) return undefined;
+        fresh = again;
+        const concurrent = recordedTaskSession(again);
+        if (
+          concurrent &&
+          concurrent !== recorded &&
+          (await taskSessionAlive(concurrent))
+        )
+          taskSessionId = concurrent;
+      }
       if (taskSessionId) {
         // Redeliver the shared brief when it never landed on this session —
         // e.g. the first submit failed, or this session replaced a deleted

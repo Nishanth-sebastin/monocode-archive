@@ -679,6 +679,35 @@ describe("attempts", () => {
     );
   });
 
+  it("prefers a prepared checkout over an unprepared primary child", () => {
+    const project = projectWith("/tmp/app");
+    const [repo] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id)],
+    });
+    const second = addTaskAttempt(task.id);
+    const added = addTaskChildren(task.id, [
+      {
+        repositoryId: repo.id,
+        attemptId: second.id,
+        mode: "existing",
+        workingCopy: "/tmp/app-wt",
+      },
+    ]);
+    const [stored] = loadTaskWorkspaces();
+    // The primary child is unprepared — the attempt-2 copy is usable.
+    expect(childForRepository(stored, repo.id)?.id).toBe(added[0].id);
+    // An explicit attempt still resolves its own row.
+    expect(childForRepository(stored, repo.id, second.id)?.id).toBe(
+      added[0].id,
+    );
+    expect(
+      childForRepository(stored, repo.id, PRIMARY_ATTEMPT_ID)?.id,
+    ).toBe(stored.children[0].id);
+  });
+
   it("disambiguates labels only for repositories that span attempts", () => {
     const project = projectWith("/tmp/app", "/tmp/lib");
     const [repo, lib] = project.repositories;

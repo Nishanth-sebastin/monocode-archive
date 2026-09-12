@@ -406,7 +406,9 @@ function assertUniqueChildBindings(children: readonly TaskChild[]) {
       throw new Error("A selected repository is already in this task");
     seen.add(key);
     if (child.branch) {
-      const branchKey = `${child.repositoryId}${child.branch}`;
+      // `refs/heads/x` and `x` are the same branch to Git.
+      const normalized = child.branch.replace(/^refs\/heads\//, "");
+      const branchKey = `${child.repositoryId} ${normalized}`;
       if (seenBranches.has(branchKey))
         throw new Error(
           `Branch ${child.branch} is already used for this repository in another attempt`,
@@ -753,8 +755,10 @@ export function taskAttemptLabel(
   return label || `Attempt ${index >= 0 ? index + 1 : 1}`;
 }
 
-/** One repository's child for an attempt — defaults to the primary attempt so
- * repository-bound lookups stay deterministic once several attempts exist. */
+/** One repository's child for an attempt. An explicit `attemptId` asks for
+ * that attempt's row (falling back to any match); without one the lookup
+ * prefers a usable copy — the primary attempt's prepared checkout, then
+ * any prepared checkout, then the primary row itself. */
 export function childForRepository(
   task: TaskWorkspace,
   repositoryId: string,
@@ -764,9 +768,18 @@ export function childForRepository(
     (child) => child.repositoryId === repositoryId,
   );
   if (!matches.length) return undefined;
-  const wanted = attemptId ?? task.attempts[0]?.id;
+  if (attemptId)
+    return (
+      matches.find((child) => child.attemptId === attemptId) ?? matches[0]
+    );
+  const primary = task.attempts[0]?.id;
   return (
-    matches.find((child) => child.attemptId === wanted) ?? matches[0]
+    matches.find(
+      (child) => child.attemptId === primary && child.workingCopy,
+    ) ??
+    matches.find((child) => child.workingCopy) ??
+    matches.find((child) => child.attemptId === primary) ??
+    matches[0]
   );
 }
 
@@ -1054,6 +1067,8 @@ export function composeTaskPrompt(
     if (child.mergeTarget)
       lines.push(`Merge target: ${child.mergeTarget}`);
   }
+  if (repoAcrossAttempts(task, child.repositoryId))
+    lines.push(`Attempt: ${taskAttemptLabel(task, child.attemptId)}`);
   if (child.responsibility?.trim())
     lines.push("", `Your responsibility: ${child.responsibility.trim()}`);
   lines.push(

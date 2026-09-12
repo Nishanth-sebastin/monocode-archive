@@ -83,12 +83,22 @@ that touch disjoint repositories, keep today's output.
 
 - Delivery attribution (Azure PR associations, CI sources, PR drafts keyed
   `taskId:childId`) keys on the checkout's `cwd`+`branch`+session — attempts
-  need no schema change there because their checkouts have distinct paths
-  and branches by construction.
+  need no schema change there: recorded branches are enforced distinct per
+  repository and task-created worktrees get distinct paths. Two attempts can
+  still bind the *same borrowed* `existing` copy (same path); session ids
+  remain the disambiguator and `taskChildrenForWorkingCopy` reports both.
 - "Add a repo mid-task" (`addTaskChildren`, `reviseTask`) targets a chosen
   attempt via the draft's `attemptId` (default primary); whether a new repo
   should materialize into every attempt is a product decision, not a model
   constraint.
+- `reviseTask`'s `keepRepositoryIds` is repository-granular: deselecting a
+  repository removes its checkout from *every* attempt. Dropping just one
+  attempt's checkout is `removeTaskChild` — which the edit sheet does not
+  expose while the sheet only shows the primary attempt's checkout per repo.
+- An in-flight `git_worktree_create` can outlive child/attempt removal —
+  the copy is created on disk and the final `updateTaskChild` no-ops. The
+  copy stays discoverable through repository family inventory; nothing
+  records it back onto the task.
 - Task records are frontend-localStorage today. Durable execution (#21) and
   schedules (#24) will need the backend to resolve task → checkout bindings;
   keep new fields flat and id-keyed so that move stays a row mapping.

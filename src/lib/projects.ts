@@ -284,10 +284,17 @@ export function projectsSnapshot(): string {
   }
 }
 
+/** Cache on the raw storage string like loadTaskWorkspaces — callers hit
+ * this on render paths (task child labels, repository lookups) and the
+ * parse is the same every call until something saves. */
+let projectsCacheRaw: string | null | undefined;
+let projectsCache: ProjectRecord[] = [];
+
 export function loadProjects(): ProjectRecord[] {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return [];
+    if (raw === projectsCacheRaw) return projectsCache;
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     const out: ProjectRecord[] = [];
@@ -306,7 +313,9 @@ export function loadProjects(): ProjectRecord[] {
       seenIds.add(project.id);
       out.push({ ...project, repositories });
     }
-    return out.slice(0, MAX_PROJECTS);
+    projectsCache = out.slice(0, MAX_PROJECTS);
+    projectsCacheRaw = raw;
+    return projectsCache;
   } catch {
     return [];
   }
