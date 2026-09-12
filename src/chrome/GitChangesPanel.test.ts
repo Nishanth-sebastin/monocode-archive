@@ -349,7 +349,17 @@ it("lets a task session switch the panel between child working copies", async ()
         branch: cwd === "/repo-b" ? "feat/b" : "feat/a",
         ahead: 0,
         behind: 0,
-        files: [],
+        files: [
+          {
+            path: `${cwd}/only.ts`,
+            relative: cwd === "/repo-b" ? "b-only.ts" : "a-only.ts",
+            status: "modified",
+            staged: false,
+            unstaged: true,
+            additions: 1,
+            deletions: 0,
+          },
+        ],
       };
     }
     return original(command, args);
@@ -378,10 +388,18 @@ it("lets a task session switch the panel between child working copies", async ()
     expect(chip("repo-a")).toBeTruthy();
     expect(chip("repo-b")).toBeTruthy();
     expect(host.querySelector("header")?.textContent).toContain("feat/a");
-    // Switching the chip refetches the index for that child's exact copy.
-    await act(async () => chip("repo-b")!.click());
+    // The sibling child's index is prefetched while the strip is open, so
+    // switching swaps to cached content instead of blanking the list.
     expect(indexed).toContain("/repo-b");
+    await act(async () => chip("repo-b")!.click());
     expect(host.querySelector("header")?.textContent).toContain("feat/b");
+    // The file list shows the selected child's files — never repo A's rows
+    // under repo B's chip.
+    expect(host.querySelector('button[title="b-only.ts"]')).not.toBeNull();
+    expect(host.querySelector('button[title="a-only.ts"]')).toBeNull();
+    // Switching back is served from the warm cache too.
+    await act(async () => chip("repo-a")!.click());
+    expect(host.querySelector("header")?.textContent).toContain("feat/a");
   } finally {
     await act(async () => root.unmount());
     host.remove();

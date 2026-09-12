@@ -188,6 +188,31 @@ export function GitChangesPanel({
     }
   }, [cwd, task, viewCwd]);
 
+  // Warm every prepared child's index once so switching chips swaps to
+  // cached content instead of flashing an empty list. Writes go to the
+  // shared cache only — the live hook picks them up on selection.
+  useEffect(() => {
+    if (!enabled || !task) return;
+    for (const entry of task.children) {
+      const copy = entry.workingCopy;
+      if (!copy || copy === "~") continue;
+      if (indexByCwd.has(copy) || pathKey(copy) === pathKey(viewCwd)) continue;
+      void gitDiffIndex(copy)
+        .then((next) => {
+          indexByCwd.set(copy, next);
+          applyProjectDiffStats(copy, {
+            files: next.files.length,
+            additions: next.additions,
+            deletions: next.deletions,
+            branch: next.branch,
+          });
+        })
+        .catch(() => {
+          /* The live hook reports its own errors on selection. */
+        });
+    }
+  }, [enabled, task, viewCwd]);
+
   const { index, patch } = useDiffIndex(viewCwd, enabled);
   const files = index?.files ?? EMPTY_FILES;
   const [deliveryTick, refreshDelivery] = useState(0);
@@ -1971,7 +1996,11 @@ function useDiffIndex(
     };
   }, [cwd, enabled]);
 
-  return { index, patch };
+  // Between a cwd-change render and the effect above, `index` still holds the
+  // previous repo's data — show the new cwd's cached index instead of the old
+  // repo's files (warmed by the task-child prefetch, so this is instant).
+  const shown = indexCwd.current === cwd ? index : cachedIndex(cwd);
+  return { index: shown, patch };
 }
 
 function cachedIndex(cwd: string | undefined): GitDiffIndex | null {
