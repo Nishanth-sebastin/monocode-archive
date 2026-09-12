@@ -4,7 +4,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
 #[cfg(not(windows))]
@@ -351,6 +351,18 @@ pub fn harness_resolve_devin() -> Result<CursorBinary, String> {
         })
         .ok_or_else(|| {
             "Devin CLI not found. Install it from https://devin.ai and run `devin auth login`, then retry.".into()
+        })
+}
+
+/// Resolve the GitHub Copilot CLI (`copilot`).
+#[tauri::command(async)]
+pub fn harness_resolve_copilot() -> Result<CursorBinary, String> {
+    resolve_copilot()
+        .map(|path| CursorBinary {
+            path: path.to_string_lossy().into_owned(),
+        })
+        .ok_or_else(|| {
+            "GitHub Copilot CLI not found. Install it with `npm i -g @github/copilot` and run `copilot login`, then retry.".into()
         })
 }
 
@@ -806,6 +818,7 @@ fn is_resolved_harness_binary(command: &str) -> bool {
         resolve_fx(),
         resolve_grok(),
         resolve_devin(),
+        resolve_copilot(),
     ]
     .into_iter()
     .flatten()
@@ -1161,6 +1174,7 @@ fn is_harness_argv_token(part: &str) -> bool {
             | "omp"
             | "fx"
             | "devin"
+            | "copilot"
             | "pi"
             | "worker-server"
             | "app-server"
@@ -1602,6 +1616,118 @@ fn resolve_devin() -> Option<PathBuf> {
     first_binary_matching(candidates, is_devin_agent)
 }
 
+fn resolve_copilot() -> Option<PathBuf> {
+    let home = dirs_home().map(PathBuf::from);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // npm global installs first; the package is `@github/copilot`.
+    if let Some(home) = &home {
+        candidates.push(home.join(".local/bin/copilot"));
+        candidates.push(home.join(".npm-global/bin/copilot"));
+        candidates.push(home.join(".volta/bin/copilot"));
+        candidates.push(home.join(".asdf/shims/copilot"));
+        candidates.push(home.join(".local/share/mise/shims/copilot"));
+        candidates.push(home.join(".bun/bin/copilot"));
+        candidates.push(home.join("n/bin/copilot"));
+    }
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/opt/homebrew/bin/copilot"));
+    candidates.push(PathBuf::from("/usr/local/bin/copilot"));
+    candidates.push(PathBuf::from("/usr/bin/copilot"));
+    candidates.push(PathBuf::from("/snap/bin/copilot"));
+    if let Some(from_shell) = which_via_login_shell("copilot") {
+        candidates.push(from_shell);
+    }
+
+    first_binary_matching(candidates, is_copilot_agent)
+}
+
+/// `is_*_agent` verdicts are stable for the life of the process and the
+/// marker scan / `--help` probe behind them is expensive, so memoize per
+/// (agent, path): the resolvers populate the cache and `prepare_child`
+/// reuses it instead of re-probing on every spawn.
+static AGENT_VERDICTS: LazyLock<Mutex<HashMap<(String, PathBuf), bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn agent_verdict(agent: &str, path: &Path, check: impl FnOnce(&Path) -> bool) -> bool {
+    let key = (agent.to_string(), path.to_path_buf());
+    if let Some(hit) = AGENT_VERDICTS.lock().unwrap().get(&key) {
+        return *hit;
+    }
+    let verdict = check(path);
+    AGENT_VERDICTS.lock().unwrap().insert(key, verdict);
+    verdict
+}
+
+fn is_copilot_agent(path: &Path) -> bool {
+    agent_verdict("copilot", path, detect_copilot_agent)
+}
+
+fn detect_copilot_agent(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    if !binary_name_eq(path, "copilot") {
+        return false;
+    }
+    file_mentions_copilot_agent(path) || copilot_help_mentions_acp(path)
+}
+
+fn file_mentions_copilot_agent(path: &Path) -> bool {
+    // "github/copilot-cli" does not match AWS's "github.com/aws/copilot-cli";
+    // the backslash needle covers Windows npm shims (node_modules\@github\…).
+    file_contains_markers(
+        path,
+        &[
+            "@github/copilot",
+            "@github\\copilot",
+            "github/copilot-cli",
+            "GitHub Copilot CLI",
+            "copilot --acp",
+        ],
+    )
+}
+
+fn copilot_help_mentions_acp(path: &Path) -> bool {
+    let mut cmd = Command::new(path);
+    cmd.arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // npm-installed harnesses are `#!/usr/bin/env node` scripts, so this probe
+    // fails outright without a PATH that has node on it.
+    apply_gui_env(&mut cmd);
+    isolate_child(&mut cmd);
+    let Ok(child) = spawn_managed(&mut cmd) else {
+        return false;
+    };
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(output)) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .to_ascii_lowercase();
+            // AWS's `copilot` CLI also exists, so a bare "acp" trigram is not
+            // enough; GitHub Copilot documents `--acp` verbatim.
+            text.contains("copilot")
+                && (text.contains("--acp")
+                    || text.contains("agent client protocol")
+                    || text.contains("github copilot"))
+        }
+        _ => {
+            terminate(pid);
+            false
+        }
+    }
+}
+
 fn is_pi_coding_agent(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -1666,6 +1792,10 @@ fn help_mentions_rpc_mode(path: &Path) -> bool {
 }
 
 fn is_fx_agent(path: &Path) -> bool {
+    agent_verdict("fx", path, detect_fx_agent)
+}
+
+fn detect_fx_agent(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -1676,6 +1806,10 @@ fn is_fx_agent(path: &Path) -> bool {
 }
 
 fn is_grok_agent(path: &Path) -> bool {
+    agent_verdict("grok", path, detect_grok_agent)
+}
+
+fn detect_grok_agent(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -1770,6 +1904,10 @@ fn file_mentions_grok_agent(path: &Path) -> bool {
 }
 
 fn is_devin_agent(path: &Path) -> bool {
+    agent_verdict("devin", path, detect_devin_agent)
+}
+
+fn detect_devin_agent(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -2088,14 +2226,24 @@ pub(crate) fn apply_gui_env(cmd: &mut Command) {
 
 fn prepare_child(cmd: &mut Command, command: &str) {
     apply_gui_env(cmd);
-    if command_basename(command) == "fx" {
+    // Basename alone is not enough — other tools share these binary names
+    // (AWS Copilot ships `copilot`, the fx JSON viewer ships `fx`) — and the
+    // credentials below must never leak into a different program. The
+    // verdicts are memoized: resolvers already identified resolved binaries,
+    // so this adds no per-spawn probe.
+    let basename = command_basename(command);
+    let path = Path::new(command);
+    if basename == "fx" && is_fx_agent(path) {
         apply_fx_env(cmd);
     }
-    if command_basename(command) == "grok" {
+    if basename == "grok" && is_grok_agent(path) {
         apply_grok_env(cmd);
     }
-    if command_basename(command) == "devin" {
+    if basename == "devin" && is_devin_agent(path) {
         apply_devin_env(cmd);
+    }
+    if basename == "copilot" && is_copilot_agent(path) {
+        apply_copilot_env(cmd);
     }
     isolate_child(cmd);
 }
@@ -2145,11 +2293,33 @@ fn apply_devin_env(cmd: &mut Command) {
     }
 }
 
+/// COPILOT_GITHUB_TOKEN (or gh's GH_TOKEN/GITHUB_TOKEN) is the documented
+/// headless sign-in; a bundled app never sees it without the login shell.
+/// COPILOT_GH_HOST/GH_HOST keep Enterprise logins pointed at the right host,
+/// COPILOT_HOME at a non-default config dir.
+fn apply_copilot_env(cmd: &mut Command) {
+    for key in [
+        "COPILOT_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "COPILOT_GH_HOST",
+        "GH_HOST",
+        "COPILOT_HOME",
+    ] {
+        if std::env::var_os(key).is_some() {
+            continue;
+        }
+        if let Some(value) = login_shell_env(key) {
+            cmd.env(key, value);
+        }
+    }
+}
+
 static LOGIN_SHELL_ENV: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
-/// Keys worth keeping out of `printenv`. PATH is the important one: a
-/// Finder-launched app inherits only launchd's bare PATH.
-const LOGIN_SHELL_KEYS: [&str; 8] = [
+/// Keys worth extracting from the login shell's `printenv`. PATH is the
+/// important one: a Finder-launched app inherits only launchd's bare PATH.
+const LOGIN_SHELL_KEYS: [&str; 14] = [
     "PATH",
     "AI_GATEWAY_API_KEY",
     "FX_AI_GATEWAY_API_KEY",
@@ -2158,6 +2328,12 @@ const LOGIN_SHELL_KEYS: [&str; 8] = [
     "GROK_CODE_XAI_API_KEY",
     "DEVIN_API_KEY",
     "WINDSURF_API_KEY",
+    "COPILOT_GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "COPILOT_GH_HOST",
+    "GH_HOST",
+    "COPILOT_HOME",
 ];
 
 fn login_shell_path() -> Option<String> {
@@ -2710,7 +2886,10 @@ mod tests {
         std::fs::write(&viewer, b"#!/bin/sh\necho Terminal JSON viewer\n").unwrap();
         assert!(!is_fx_agent(&viewer));
 
-        let other = dir.join("fx");
+        // A distinct path: verdicts are memoized per path.
+        let other_dir = dir.join("other");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let other = other_dir.join("fx");
         std::fs::write(&other, b"#!/bin/sh\necho json viewer\n").unwrap();
         assert!(!file_mentions_fx_agent(&other));
         assert!(!is_fx_agent(&other));
@@ -2763,6 +2942,32 @@ mod tests {
         assert!(!is_grok_agent(&other));
 
         assert!(!is_grok_agent(&dir.join("missing")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copilot_accepts_github_markers_and_rejects_aws_copilot() {
+        let dir = std::env::temp_dir().join(format!("monocode-copilot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let agent = dir.join("copilot");
+        std::fs::write(&agent, b"#!/bin/sh\n# @github/copilot shim\n").unwrap();
+        assert!(is_copilot_agent(&agent));
+
+        // AWS Copilot shares the binary name but none of the markers; its
+        // --help output mentions neither --acp nor GitHub Copilot.
+        let aws_dir = dir.join("aws");
+        std::fs::create_dir_all(&aws_dir).unwrap();
+        let aws = aws_dir.join("copilot");
+        std::fs::write(
+            &aws,
+            b"#!/bin/sh\n# github.com/aws/copilot-cli\n# AWS Copilot CLI\n",
+        )
+        .unwrap();
+        assert!(!file_mentions_copilot_agent(&aws));
+        assert!(!is_copilot_agent(&aws));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

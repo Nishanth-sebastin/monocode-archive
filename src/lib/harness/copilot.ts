@@ -1,42 +1,53 @@
-import { nativeModelId } from "../models";
+import {
+  hasLiveCatalog,
+  modelsFor,
+  nativeModelId,
+  setHarnessModels,
+} from "../models";
 import { pathKey } from "../paths";
 import type { RuntimeMode } from "../session";
 import type { UserQuestionReply } from "../userQuestion";
 import { questionPromptTitle } from "../userQuestion";
-import { AcpClient, type AcpHandlers } from "./acp";
+import {
+  acpAuthError,
+  acpAutoOption,
+  acpCommandsFromUpdate,
+  acpConfigOptions,
+  acpCurrentModelId,
+  acpElicitation,
+  acpElicitationResult,
+  acpEventsFromUpdate,
+  acpModeId,
+  acpModeIdsFromConfig,
+  acpModesFromSetup,
+  acpModelConfigId,
+  acpPermissionOptionId,
+  acpPermissionRequest,
+  acpPromptBlocks,
+  asRecord,
+  sessionIdFromResult,
+  stringField,
+  AcpClient,
+  type AcpConfigOption,
+  type AcpHandlers,
+} from "./acp";
 import type { JsonRpcId } from "./jsonRpc";
 import {
   killChild,
-  resolveDevinBinary,
+  resolveCopilotBinary,
   spawnChild,
   unwatchChild,
   watchChild,
 } from "./child";
 import {
   AUTH_HELP,
-  DEVIN_CLIENT_CAPABILITIES,
-  asRecord,
-  devinAuthError,
-  devinAutoOption,
-  devinCommandsFromUpdate,
-  devinConfigOptions,
-  devinCurrentModelId,
-  devinElicitation,
-  devinElicitationResult,
-  devinEventsFromUpdate,
-  devinModeId,
-  devinModeIdsFromConfig,
-  devinModesFromSetup,
-  devinModelConfigId,
-  devinPermissionOptionId,
-  devinPermissionRequest,
-  devinPromptBlocks,
-  devinSpawnArgs,
-  devinStopReasonMessage,
-  sessionIdFromResult,
-  stringField,
-  type DevinConfigOption,
-} from "./devinProtocol";
+  COPILOT_CLIENT_CAPABILITIES,
+  copilotCurrentModelId,
+  copilotEffortFromSettings,
+  copilotModelsFromSetup,
+  copilotSpawnArgs,
+  copilotStopReasonMessage,
+} from "./copilotProtocol";
 import {
   type CommandContext,
   type NativeCommand,
@@ -56,14 +67,28 @@ type Live = {
   acp: AcpClient;
   acpSessionId: string;
   cwd: string;
-  modelConfigId: string;
-  configOptions: DevinConfigOption[];
+  /** Reasoning effort this child was launched with (`--effort` is fixed). */
+  launchEffort?: string;
+  /** Last model the session reported or we set via `session/set_model`. */
+  currentModelId?: string;
+  /**
+   * Set once `session/set_model` succeeds: currentModelId is authoritative
+   * because the model config option can keep reporting a stale value.
+   */
+  modelPinned: boolean;
+  /**
+   * The model config option's value at pin time. Only that exact stale echo
+   * is ignored while pinned; a third value means the server really moved.
+   */
+  pinnedConfigValue?: string;
   /** Synthetic requestId source for ACP requests with non-numeric ids. */
   nextRequestId: number;
+  modelConfigId: string;
+  configOptions: AcpConfigOption[];
   modeIds: string[];
   currentModeId?: string;
   commands: NativeCommand[];
-  /** `session/prompt` calls Devin is still answering (main turn plus steers). */
+  /** `session/prompt` calls Copilot is still answering (main turn plus steers). */
   promptInFlight: number;
   muteUpdates: boolean;
   cancelled: boolean;
@@ -88,21 +113,26 @@ const PROMPT_TIMEOUT_MS = 30 * 60_000;
 const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
 const cancelledThreads = new Set<string>();
+/**
+ * Threads whose Copilot build rejected the `--effort` launch flag; their
+ * sessions run at the CLI's default effort until forgotten.
+ */
+const effortUnsupportedThreads = new Set<string>();
 const commandListeners = new Map<
   string,
   Set<(commands: NativeCommand[]) => void>
 >();
 
 /**
- * Live Devin CLI adapter. Spawns `devin acp` and talks Agent Client Protocol.
- * Devin absorbs a `session/prompt` sent mid-turn as a steer/follow-up, so the
- * steer path writes directly instead of joining the serialized turn queue.
+ * Live GitHub Copilot CLI adapter. Spawns `copilot --acp --stdio` and talks
+ * Agent Client Protocol. Reasoning effort is a server-launch flag, so an
+ * effort change recycles this session's child and reloads its ACP session.
  *
  * The session lifecycle, cancel/stop, approval, elicitation, and command
- * plumbing deliberately mirror copilot.ts — keep fixes to those shared
+ * plumbing deliberately mirror devin.ts — keep fixes to those shared
  * mechanics in sync between the two files.
  */
-export async function sendDevinTurn(input: SendTurnInput): Promise<void> {
+export async function sendCopilotTurn(input: SendTurnInput): Promise<void> {
   let live: Live;
   try {
     live = await ensureLive(input);
@@ -138,16 +168,16 @@ export async function sendDevinTurn(input: SendTurnInput): Promise<void> {
   try {
     await live.turns;
   } catch (error) {
-    // A failed turn leaves Devin's transport state unknowable. Keep the
+    // A failed turn leaves Copilot's transport state unknowable. Keep the
     // provider session id but recycle the child so the next turn resumes.
     if (liveByThread.get(input.sessionId) === live) {
-      await stopDevinSession(input.sessionId);
+      await stopCopilotSession(input.sessionId);
     }
     throw error;
   }
 }
 
-export async function compactDevinContext(
+export async function compactCopilotContext(
   input: CompactContextInput,
 ): Promise<void> {
   let live = liveByThread.get(input.sessionId);
@@ -194,23 +224,23 @@ export async function compactDevinContext(
     await live.turns;
   } catch (error) {
     if (liveByThread.get(input.sessionId) === live) {
-      await stopDevinSession(input.sessionId);
+      await stopCopilotSession(input.sessionId);
     }
     throw error;
   }
 }
 
 /**
- * Devin accepts `session/prompt` while a turn is running and folds it into
+ * Copilot accepts `session/prompt` while a turn is running and folds it into
  * the same turn as a steer. Only reachable from the busy path; without a live
  * child there is nothing to steer.
  */
-export async function steerDevinTurn(input: SteerTurnInput): Promise<void> {
+export async function steerCopilotTurn(input: SteerTurnInput): Promise<void> {
   const live = liveByThread.get(input.sessionId);
   if (!live || pathKey(live.cwd) !== pathKey(input.cwd)) {
-    throw new Error("No active Devin session to steer");
+    throw new Error("No active Copilot session to steer");
   }
-  const blocks = devinPromptBlocks(input.text, input.attachments);
+  const blocks = acpPromptBlocks(input.text, input.attachments);
   if (blocks.length === 0) return;
   live.promptInFlight += 1;
   let finished = false;
@@ -232,7 +262,7 @@ export async function steerDevinTurn(input: SteerTurnInput): Promise<void> {
   }
 }
 
-export function respondDevinApproval(
+export function respondCopilotApproval(
   sessionId: string,
   requestId: number,
   decision: ApprovalDecision,
@@ -240,7 +270,7 @@ export function respondDevinApproval(
   liveByThread.get(sessionId)?.approvals.get(String(requestId))?.(decision);
 }
 
-export function respondDevinQuestion(
+export function respondCopilotQuestion(
   sessionId: string,
   requestId: number,
   reply: UserQuestionReply,
@@ -265,7 +295,7 @@ function clearCommands(live: Live) {
   for (const listener of listeners ?? []) listener(live.commands);
 }
 
-export async function cancelDevinTurn(sessionId: string): Promise<void> {
+export async function cancelCopilotTurn(sessionId: string): Promise<void> {
   const live = liveByThread.get(sessionId);
   if (!live) {
     cancelledThreads.add(sessionId);
@@ -280,13 +310,13 @@ export async function cancelDevinTurn(sessionId: string): Promise<void> {
   live.acp.rejectPending(new Error("cancelled"));
 }
 
-export async function stopDevinSession(sessionId: string): Promise<void> {
+export async function stopCopilotSession(sessionId: string): Promise<void> {
   cancelledThreads.delete(sessionId);
   const live = liveByThread.get(sessionId);
   liveByThread.delete(sessionId);
   if (live) {
     // Mark the in-flight turn cancelled so an intentional stop does not
-    // surface "Devin exited" as a session error.
+    // surface "Copilot exited" as a session error.
     live.cancelled = true;
     live.muteUpdates = true;
     clearCommands(live);
@@ -297,12 +327,13 @@ export async function stopDevinSession(sessionId: string): Promise<void> {
   await killChild(sessionId).catch(() => undefined);
 }
 
-export async function forgetDevinSession(sessionId: string): Promise<void> {
+export async function forgetCopilotSession(sessionId: string): Promise<void> {
   resumeByThread.delete(sessionId);
-  await stopDevinSession(sessionId);
+  effortUnsupportedThreads.delete(sessionId);
+  await stopCopilotSession(sessionId);
 }
 
-export function bindDevinSession(
+export function bindCopilotSession(
   threadId: string,
   acpSessionId: string,
   cwd: string,
@@ -312,8 +343,8 @@ export function bindDevinSession(
   resumeByThread.set(threadId, { acpSessionId: sessionId, cwd });
 }
 
-/** Provider commands exist only inside a live Devin session. */
-export const devinCommandProvider: NativeCommandProvider = {
+/** Provider commands exist only inside a live Copilot session. */
+export const copilotCommandProvider: NativeCommandProvider = {
   rawSlashCommands: true,
   async discover(context) {
     const live = context.sessionId
@@ -353,14 +384,25 @@ function commandContextKey(context: CommandContext): string {
 }
 
 async function ensureLive(input: HarnessSessionInput): Promise<Live> {
+  // `--effort` is fixed when the server starts, so a reasoning change is the
+  // one selection that must recycle this session's child (the ACP session is
+  // reloaded afterwards when the server supports it). A build that rejected
+  // the flag once keeps launching without it.
+  const effort = effortUnsupportedThreads.has(input.sessionId)
+    ? undefined
+    : copilotEffortFromSettings(input.modelSettings);
   const existing = liveByThread.get(input.sessionId);
-  if (existing && pathKey(existing.cwd) === pathKey(input.cwd)) {
+  if (
+    existing &&
+    pathKey(existing.cwd) === pathKey(input.cwd) &&
+    existing.launchEffort === effort
+  ) {
     existing.onEvent = input.onEvent;
     existing.runtimeMode = input.runtimeMode;
     return existing;
   }
   if (existing) {
-    await stopDevinSession(input.sessionId);
+    await stopCopilotSession(input.sessionId);
   }
 
   const resume = resumeByThread.get(input.sessionId);
@@ -369,7 +411,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     resumeByThread.delete(input.sessionId);
   }
 
-  const { path } = await resolveDevinBinary(input.cwd);
+  const { path } = await resolveCopilotBinary(input.cwd);
   const handlers: AcpHandlers = {};
   const acp = new AcpClient(input.sessionId, handlers);
   const liveRef: { current: Live | null } = { current: null };
@@ -378,6 +420,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   // everything and replay it once installed — live.muteUpdates then decides
   // which of the replayed events reach the UI.
   const earlyNotifications: { method: string; params: unknown }[] = [];
+  let childExited = false;
 
   handlers.onNotification = (method, params) => {
     const live = liveRef.current;
@@ -399,7 +442,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       return;
     }
     void handleRequest(live, id, method, params).catch((err) => {
-      console.debug("[monocode] devin request handler failed", err);
+      console.debug("[monocode] copilot request handler failed", err);
       void acp
         .respondError(id, { code: -32603, message: "Internal error" })
         .catch(() => undefined);
@@ -416,7 +459,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     input.sessionId,
     (line) => acp.pushLine(line),
     (code) => {
-      acp.close(new Error("Devin exited"));
+      childExited = true;
+      acp.close(new Error("Copilot exited"));
       const live = liveByThread.get(input.sessionId);
       liveByThread.delete(input.sessionId);
       if (live) {
@@ -427,7 +471,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       emit({ type: "session.ended", code });
     },
     (line) => {
-      console.debug("[monocode] devin stderr", line);
+      console.debug("[monocode] copilot stderr", line);
       if (/log ?in|sign ?in|not authenticated|unauthori/i.test(line)) {
         emit({
           type: "session.error",
@@ -438,7 +482,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   );
 
   try {
-    await spawnChild(input.sessionId, path, devinSpawnArgs(), input.cwd);
+    await spawnChild(input.sessionId, path, copilotSpawnArgs(effort), input.cwd);
   } catch (error) {
     unwatchChild(input.sessionId);
     throw error;
@@ -451,13 +495,13 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
         "initialize",
         {
           protocolVersion: 1,
-          clientCapabilities: DEVIN_CLIENT_CAPABILITIES,
+          clientCapabilities: COPILOT_CLIENT_CAPABILITIES,
           clientInfo: { name: "monocode", version: "0.1.0" },
         },
         INIT_TIMEOUT_MS,
       );
     } catch (error) {
-      throw devinAuthError(error);
+      throw copilotAuthError(error);
     }
     const agentCaps = asRecord(asRecord(initResult)?.agentCapabilities);
     const supportsLoad = agentCaps?.loadSession === true;
@@ -480,7 +524,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
         acpSessionId = sessionIdFromResult(setup) ?? resume.acpSessionId;
         didLoad = true;
       } catch (loadError) {
-        console.debug("[monocode] devin session/load failed", loadError);
+        console.debug("[monocode] copilot session/load failed", loadError);
         // The failed load may have replayed the old session's transcript;
         // drop it so it is not echoed unmuted into the fresh session.
         earlyNotifications.length = 0;
@@ -498,25 +542,36 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
           SESSION_TIMEOUT_MS,
         );
       } catch (error) {
-        throw devinAuthError(error);
+        throw copilotAuthError(error);
       }
       acpSessionId = sessionIdFromResult(setup);
     }
-    if (!acpSessionId) throw new Error("Devin did not return a session id");
+    if (!acpSessionId) throw new Error("Copilot did not return a session id");
 
-    const configOptions = devinConfigOptions(asRecord(setup)?.configOptions);
-    const modes = devinModesFromSetup(setup);
+    const configOptions = acpConfigOptions(asRecord(setup)?.configOptions);
+    const modes = acpModesFromSetup(setup);
+    // The setup response carries the same model data as the catalog probe;
+    // publishing it keeps the picker fresh without an extra ACP session.
+    // copilotModelsFromSetup always returns the Default entry, so a
+    // length-1 result means the server advertised nothing real.
+    const discovered = copilotModelsFromSetup(setup);
+    if (discovered.length > 1) {
+      setHarnessModels("copilot", discovered, input.cwd);
+    }
     const live: Live = {
       threadId: input.sessionId,
       acp,
       acpSessionId,
       cwd: input.cwd,
-      modelConfigId: devinModelConfigId(configOptions),
-      configOptions,
+      launchEffort: effort,
+      currentModelId: copilotCurrentModelId(setup, configOptions),
+      modelPinned: false,
       nextRequestId: 1_000_000_000,
+      modelConfigId: acpModelConfigId(configOptions),
+      configOptions,
       modeIds: modes.availableModeIds.length
         ? modes.availableModeIds
-        : devinModeIdsFromConfig(configOptions),
+        : acpModeIdsFromConfig(configOptions),
       currentModeId: modes.currentModeId,
       commands: [],
       promptInFlight: 0,
@@ -545,30 +600,123 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     }
     return live;
   } catch (error) {
-    // Keep a mid-handshake cancel marker for the caller's consume-check.
+    // A cancel that landed mid-handshake must survive the cleanup below —
+    // stopCopilotSession clears cancelledThreads, so keep it for the caller's
+    // consume-check and never retry a turn the user already stopped.
     const wasCancelled = cancelledThreads.has(input.sessionId);
+    // `--effort` rejection looks like the child dying mid-handshake; an ACP
+    // error or timeout with the process still running is unrelated to it.
+    const flagSuspect = Boolean(effort) && childExited;
     acp.close(error instanceof Error ? error : new Error(String(error)));
-    await stopDevinSession(input.sessionId);
-    if (wasCancelled) cancelledThreads.add(input.sessionId);
+    await stopCopilotSession(input.sessionId);
+    // Re-check after the cleanup await — a cancel can land while stopping.
+    if (wasCancelled || cancelledThreads.has(input.sessionId)) {
+      cancelledThreads.add(input.sessionId);
+      throw error;
+    }
+    if (flagSuspect && !effortUnsupportedThreads.has(input.sessionId)) {
+      effortUnsupportedThreads.add(input.sessionId);
+      const live = await ensureLive(input);
+      live.onEvent({
+        type: "session.error",
+        message: `This Copilot CLI does not support --effort=${effort}; running at the default effort.`,
+      });
+      return live;
+    }
     throw error;
   }
 }
 
+/**
+ * `session/set_model` is the standard switch; older Copilot builds that lack
+ * it fall back to the advertised `model` config option.
+ */
 async function applyModelSelection(
   live: Live,
   input: HarnessSessionInput,
 ): Promise<void> {
   const base = nativeModelId(input.model, input.cwd).trim();
   if (!base) return;
-  const current = live.configOptions.find(
-    (option) => option.id === live.modelConfigId,
-  )?.currentValue;
-  if (current === base) return;
-  await setConfigOption(live, live.modelConfigId, base).catch(
-    (error: unknown) => {
-      ignoreUnsupportedControl("set_config_option", error);
-    },
-  );
+  // A probed catalog replaces the placeholder list, so an id that no longer
+  // resolves (removed, or disabled by plan/org policy) must not degrade into
+  // a `set_model` for the stale slug — require an explicit replacement.
+  if (
+    hasLiveCatalog("copilot", input.cwd) &&
+    !modelsFor("copilot", input.cwd).some(
+      (model) => model.id === input.model || model.nativeId === base,
+    )
+  ) {
+    const message = `Copilot does not offer ${base} on this account — it may be disabled by plan or organization policy. Pick another model before sending.`;
+    live.onEvent({ type: "session.error", message });
+    throw new Error(message);
+  }
+  const current =
+    live.currentModelId ?? acpCurrentModelId(live.configOptions);
+  // While pinned, the config option may still report a different model —
+  // a stale echo or a real out-of-band revert; the cases are indistinguishable,
+  // so re-assert the pinned choice (idempotent) rather than trust either.
+  const reported = acpCurrentModelId(live.configOptions);
+  const unconfirmed =
+    live.modelPinned && reported != null && reported !== base;
+  if (current === base && !unconfirmed) return;
+  // The config option may keep reporting this pre-write value after the
+  // switch; record it so config_option_update can tell a stale echo apart
+  // from the server genuinely moving to a third model.
+  const staleConfigValue = acpCurrentModelId(live.configOptions);
+  try {
+    await live.acp.request(
+      "session/set_model",
+      { sessionId: live.acpSessionId, modelId: base },
+      CONTROL_TIMEOUT_MS,
+    );
+    live.currentModelId = base;
+    live.modelPinned = true;
+    live.pinnedConfigValue = staleConfigValue;
+    return;
+  } catch (error) {
+    if (!isUnsupportedControl(error)) {
+      const message = modelApplyError(base, error);
+      live.onEvent({ type: "session.error", message });
+      throw error;
+    }
+  }
+  // Older servers only expose `model` as a config option.
+  let verified = false;
+  try {
+    verified = await setConfigOption(live, live.modelConfigId, base);
+  } catch (error) {
+    if (isUnsupportedControl(error)) {
+      // Neither control exists on this build — the explicit selection cannot
+      // be honored, so fail rather than run the turn on a different model.
+      const message = `Copilot cannot switch to ${base}: this build supports neither session/set_model nor the model config option.`;
+      live.onEvent({ type: "session.error", message });
+      throw new Error(message);
+    }
+    const message = modelApplyError(base, error);
+    live.onEvent({ type: "session.error", message });
+    throw error;
+  }
+  // A config write the server ignored (e.g. a disabled choice) reports
+  // success but returns configOptions with currentValue unchanged; only a
+  // refreshed option list can confirm or contradict the switch.
+  if (verified) {
+    const applied = acpCurrentModelId(live.configOptions);
+    if (applied && applied !== base) {
+      const message = `Copilot did not switch to ${base} (still on ${applied}). The model may be disabled for this account.`;
+      live.onEvent({ type: "session.error", message });
+      throw new Error(message);
+    }
+  }
+  live.currentModelId = base;
+  live.modelPinned = true;
+  live.pinnedConfigValue = staleConfigValue;
+}
+
+function modelApplyError(modelId: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  return /not available|disabled|denied|policy|entitle|authoriz/i.test(detail)
+    ? `${detail.trim()} The model ${modelId} may be disabled by your Copilot plan or organization policy.`
+    : detail;
 }
 
 async function applyRuntimeMode(
@@ -576,7 +724,7 @@ async function applyRuntimeMode(
   runtimeMode: RuntimeMode,
   planning = false,
 ): Promise<void> {
-  const wanted = devinModeId(runtimeMode, planning, live.modeIds);
+  const wanted = acpModeId(runtimeMode, planning, live.modeIds);
   if (!wanted || wanted === live.currentModeId) return;
   await live.acp
     .request(
@@ -592,23 +740,28 @@ async function applyRuntimeMode(
     });
 }
 
+/** Returns true when the response carried a refreshed config option list. */
 async function setConfigOption(
   live: Live,
   configId: string,
   value: string,
-): Promise<void> {
+): Promise<boolean> {
   const result = await live.acp.request(
     "session/set_config_option",
     { sessionId: live.acpSessionId, configId, value },
     CONTROL_TIMEOUT_MS,
   );
   const next = asRecord(result)?.configOptions;
-  if (next) live.configOptions = devinConfigOptions(next);
+  if (next) {
+    live.configOptions = acpConfigOptions(next);
+    return true;
+  }
+  return false;
 }
 
 async function prompt(live: Live, input: SendTurnInput): Promise<void> {
   try {
-    const blocks = devinPromptBlocks(input.text, input.attachments);
+    const blocks = acpPromptBlocks(input.text, input.attachments);
     if (blocks.length === 0) return;
     live.promptInFlight += 1;
     let result: unknown;
@@ -625,11 +778,11 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
       live.promptInFlight -= 1;
     }
     if (live.cancelled) return;
-    const stopMessage = devinStopReasonMessage(
+    const message = copilotStopReasonMessage(
       stringField(asRecord(result), "stopReason") ?? "",
     );
-    if (stopMessage) {
-      live.onEvent({ type: "session.error", message: stopMessage });
+    if (message) {
+      live.onEvent({ type: "session.error", message });
     }
     // A folded steer may still be streaming; whichever prompt resolves last
     // closes the blocks.
@@ -650,8 +803,14 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
   }
 }
 
+function isUnsupportedControl(error: unknown): boolean {
+  if ((error as { code?: number } | null)?.code === -32601) return true;
+  const detail = error instanceof Error ? error.message : String(error);
+  return /method not found|not implemented|unknown method/i.test(detail);
+}
+
 function ignoreUnsupportedControl(method: string, error: unknown): void {
-  console.debug(`[monocode] devin ${method} failed`, error);
+  console.debug(`[monocode] copilot ${method} failed`, error);
   const detail = error instanceof Error ? error.message : String(error);
   if (/timed out|not running|exited|closed|pipe/i.test(detail)) throw error;
 }
@@ -669,8 +828,10 @@ function handleNotification(live: Live, method: string, params: unknown) {
     update?.sessionUpdate ?? update?.session_update ?? update?.type ?? "",
   );
 
+  // Copilot re-sends the full command set whenever it changes; each update is
+  // a complete replacement, never a delta.
   if (kind === "available_commands_update") {
-    live.commands = devinCommandsFromUpdate(params);
+    live.commands = acpCommandsFromUpdate("copilot", params);
     const listeners = commandListeners.get(
       commandContextKey({ sessionId: live.threadId, cwd: live.cwd }),
     );
@@ -687,18 +848,49 @@ function handleNotification(live: Live, method: string, params: unknown) {
   }
 
   if (kind === "config_option_update") {
-    const previous = devinCurrentModelId(live.configOptions);
-    const next = devinConfigOptions(
+    const previous =
+      live.currentModelId ?? acpCurrentModelId(live.configOptions);
+    const next = acpConfigOptions(
       update?.configOptions ?? update?.config_options,
     );
     if (next.length) {
       live.configOptions = next;
-      const current = devinCurrentModelId(next);
-      if (current && current !== previous && !live.muteUpdates) {
-        live.onEvent({
-          type: "session.configChanged",
-          model: `devin:${current}`,
-        });
+      const current = acpCurrentModelId(next);
+      if (live.modelPinned) {
+        if (current && current === live.currentModelId) {
+          // The server confirms the pinned model.
+          live.modelPinned = false;
+          live.pinnedConfigValue = undefined;
+        } else if (current && current !== live.pinnedConfigValue) {
+          // Neither the pinned model nor the stale pre-write echo — the
+          // server moved on its own (CLI change, deprecation); trust it.
+          live.modelPinned = false;
+          live.pinnedConfigValue = undefined;
+          live.currentModelId = current;
+          if (!live.muteUpdates) {
+            live.onEvent({
+              type: "session.configChanged",
+              model: `copilot:${current}`,
+            });
+          }
+        }
+        // current === pinnedConfigValue: stale echo — ignore it. If the
+        // server really reverted, applyModelSelection re-asserts the pinned
+        // choice on the next turn.
+        if (current && current === live.pinnedConfigValue) {
+          console.debug(
+            "[monocode] copilot ignoring stale model echo",
+            current,
+          );
+        }
+      } else if (current && current !== previous) {
+        live.currentModelId = current;
+        if (!live.muteUpdates) {
+          live.onEvent({
+            type: "session.configChanged",
+            model: `copilot:${current}`,
+          });
+        }
       }
     }
     return;
@@ -707,7 +899,7 @@ function handleNotification(live: Live, method: string, params: unknown) {
   // Replays (session/load) and muted windows still update the state above;
   // only transcript events are suppressed.
   if (live.muteUpdates) return;
-  for (const event of devinEventsFromUpdate(params)) {
+  for (const event of acpEventsFromUpdate(params)) {
     live.onEvent(event);
   }
 }
@@ -735,7 +927,7 @@ async function handleRequest(
 }
 
 async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
-  const request = devinPermissionRequest(params);
+  const request = acpPermissionRequest(params);
   if (request.callId) {
     live.onEvent({
       type: "tool.updated",
@@ -748,7 +940,7 @@ async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
 
   if (live.planning) {
     const readOnly = request.kind === "read" || request.kind === "search";
-    const optionId = devinPermissionOptionId(
+    const optionId = acpPermissionOptionId(
       readOnly ? "allow" : "deny",
       request.optionIds,
     );
@@ -763,7 +955,7 @@ async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
     return;
   }
 
-  const auto = devinAutoOption(
+  const auto = acpAutoOption(
     live.runtimeMode,
     request.kind,
     request.optionIds,
@@ -796,7 +988,7 @@ async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
   live.approvals.delete(key);
   live.onEvent({ type: "approval.resolved", requestId, decision });
 
-  const optionId = devinPermissionOptionId(decision, request.optionIds);
+  const optionId = acpPermissionOptionId(decision, request.optionIds);
   await live.acp
     .respond(
       id,
@@ -808,7 +1000,7 @@ async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
 }
 
 async function handleElicitation(live: Live, id: JsonRpcId, params: unknown) {
-  const parsed = devinElicitation(params);
+  const parsed = acpElicitation(params);
   if (!parsed) {
     await live.acp
       .respond(id, { action: "cancel" })
@@ -835,6 +1027,10 @@ async function handleElicitation(live: Live, id: JsonRpcId, params: unknown) {
   });
 
   await live.acp
-    .respond(id, devinElicitationResult(reply, parsed.questions, parsed.fields))
+    .respond(id, acpElicitationResult(reply, parsed.questions, parsed.fields))
     .catch(() => undefined);
+}
+
+function copilotAuthError(error: unknown, verb = "start"): Error {
+  return acpAuthError("Copilot", AUTH_HELP, error, verb);
 }

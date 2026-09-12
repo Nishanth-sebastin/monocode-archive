@@ -356,6 +356,12 @@ export function resolveDevinBinary(cwd?: string): Promise<{ path: string }> {
     : invoke("harness_resolve_devin");
 }
 
+export function resolveCopilotBinary(cwd?: string): Promise<{ path: string }> {
+  return cwd && wslLocation(cwd)
+    ? invoke("wsl_resolve_harness", { cwd, provider: "copilot" })
+    : invoke("harness_resolve_copilot");
+}
+
 export function freeHarnessPort(): Promise<number> {
   return invoke("harness_free_port");
 }

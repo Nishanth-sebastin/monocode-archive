@@ -1,4 +1,5 @@
 import { AcpClient } from "./acp";
+import type { JsonRpcId } from "./jsonRpc";
 import {
   killChild,
   resolveGrokBinary,
@@ -218,7 +219,7 @@ async function dropLive(): Promise<void> {
 
 async function handleTextRequest(
   acp: AcpClient,
-  id: number,
+  id: JsonRpcId,
   method: string,
   params: unknown,
 ) {

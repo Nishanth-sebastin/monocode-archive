@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import claude from "../assets/providers/claude.svg";
 import codex from "../assets/providers/codex.svg";
+import copilot from "../assets/providers/copilot.svg";
 import cursor from "../assets/providers/cursor.svg";
 import devin from "../assets/providers/devin.svg";
 import fx from "../assets/providers/fx.svg";
@@ -20,6 +21,7 @@ export const HARNESS_ICONS: Record<HarnessId, string> = {
   omp,
   fx,
   devin,
+  copilot,
 };
 
 /** White marks that must follow `currentColor` so they stay visible in light mode. */

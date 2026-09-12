@@ -180,7 +180,7 @@ def bounded_tree(path):
                     pending.append(Path(entry.path))
 
 
-AGENT_PROVIDERS = ["claude", "codex", "cursor", "opencode", "pi", "omp", "fx", "grok", "devin"]
+AGENT_PROVIDERS = ["claude", "codex", "cursor", "opencode", "pi", "omp", "fx", "grok", "devin", "copilot"]
 AGENT_NAMES = {
     "claude": ["claude"],
     "codex": ["codex"],
@@ -191,6 +191,7 @@ AGENT_NAMES = {
     "fx": ["fx"],
     "grok": ["grok"],
     "devin": ["devin"],
+    "copilot": ["copilot"],
 }
 # Linux tool folders that are not always exported to the login PATH.
 AGENT_FOLDERS = [
@@ -230,6 +231,12 @@ AGENT_AUTH = {
         "env": ("WINDSURF_API_KEY", "DEVIN_API_KEY"),
         "files": (".local/share/devin/credentials.toml",),
         "strict": True,
+    },
+    # Copilot also accepts gh/GITHUB tokens. ~/.copilot/config.json is created
+    # on any CLI run — not auth evidence — and the credential itself lives in
+    # the system store, so env vars are the only signal; non-strict.
+    "copilot": {
+        "env": ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
     },
 }
 
@@ -285,6 +292,14 @@ def verify_agent(provider, name, candidate, resolved, home):
             return True
         code, text = agent_help(candidate, home)
         return code == 0 and "acp" in text and ("devin" in text or "agent client protocol" in text)
+    if provider == "copilot":
+        # AWS Copilot shares the binary name; "github/copilot-cli" does not
+        # match "github.com/aws/copilot-cli" and the help probe requires the
+        # literal --acp flag rather than any "acp" trigram.
+        if file_mentions(candidate, (b"@github/copilot", b"@github\\copilot", b"github/copilot-cli", b"github copilot cli", b"copilot --acp")):
+            return True
+        code, text = agent_help(candidate, home)
+        return code == 0 and "copilot" in text and ("--acp" in text or "agent client protocol" in text or "github copilot" in text)
     return True
 
 

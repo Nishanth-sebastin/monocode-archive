@@ -1,3 +1,4 @@
+import { copilotEffortSetting } from "./harness/copilotEffort";
 import { pathKey, wslLocation } from "./paths";
 import type { HarnessId } from "./session";
 import { HARNESSES } from "./session";
@@ -179,6 +180,16 @@ export const MODELS: AgentModel[] = [
     name: "Default",
     nativeId: "",
   },
+  // Copilot advertises its real catalog over ACP at session start; this entry
+  // is only the pre-probe placeholder that selects Copilot's own default model.
+  // Reasoning effort is a `copilot --acp` launch option, offered separately.
+  {
+    id: "copilot:default",
+    harness: "copilot",
+    name: "Default",
+    nativeId: "",
+    settings: [copilotEffortSetting()],
+  },
 ];
 
 export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
@@ -191,6 +202,7 @@ export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
   omp: "omp:default",
   fx: "fx:zai/glm-5.2-fast",
   devin: "devin:default",
+  copilot: "copilot:default",
 };
 
 const FAVORITES_KEY = "monocode.favoriteModels";
@@ -219,6 +231,7 @@ const HARNESS_ORDER: HarnessId[] = [
   "omp",
   "fx",
   "devin",
+  "copilot",
 ];
 
 const EMPTY_MODELS: AgentModel[] = [];

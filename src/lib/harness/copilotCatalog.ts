@@ -2,54 +2,34 @@ import { homeDir } from "../fs";
 import { refreshModelCatalog } from "../models";
 import { AcpClient } from "./acp";
 import {
-  execChild,
   killChild,
-  resolveDevinBinary,
+  resolveCopilotBinary,
   spawnChild,
   unwatchChild,
   watchChild,
 } from "./child";
 import {
-  DEVIN_CLIENT_CAPABILITIES,
-  asRecord,
-  devinConfigOptions,
-  devinModelsFromConfig,
-  devinModelsFromOutput,
-  devinSpawnArgs,
-} from "./devinProtocol";
+  COPILOT_CLIENT_CAPABILITIES,
+  copilotModelsFromSetup,
+  copilotSpawnArgs,
+} from "./copilotProtocol";
 
 const DISCOVERY_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 12_000;
 
-export function refreshDevinCatalog(cwd?: string): Promise<void> {
-  return refreshModelCatalog("devin", cwd, () => discoverDevinModels(cwd));
+export function refreshCopilotCatalog(cwd?: string): Promise<void> {
+  return refreshModelCatalog("copilot", cwd, () => discoverCopilotModels(cwd));
 }
 
 /**
- * `devin models list --format json` is the cheap account catalog and does not
- * create a session. The ACP `model` config option is the fallback for older
- * CLIs without the list command.
+ * Copilot has no machine-readable `models` command; a throwaway ACP session
+ * advertises the account's catalog in `session/new` (`models.availableModels`,
+ * falling back to the `model` config option).
  */
-async function discoverDevinModels(projectCwd?: string) {
-  const fromCli = await discoverViaCli(projectCwd).catch((error: unknown) => {
-    console.debug("[monocode] devin CLI catalog failed", error);
-    return [];
-  });
-  if (fromCli.length > 0) return fromCli;
-  return discoverViaAcp(projectCwd);
-}
-
-async function discoverViaCli(projectCwd?: string) {
-  const { path } = await resolveDevinBinary(projectCwd);
+async function discoverCopilotModels(projectCwd?: string) {
+  const { path } = await resolveCopilotBinary(projectCwd);
   const cwd = projectCwd ?? (await homeDir());
-  const stdout = await execChild(path, ["models", "list", "--format", "json"], cwd);
-  return devinModelsFromOutput(stdout);
-}
-
-async function discoverViaAcp(projectCwd?: string) {
-  const { path } = await resolveDevinBinary(projectCwd);
-  const cwd = projectCwd ?? (await homeDir());
-  const PROBE_ID = `monocode-devin-probe-${crypto.randomUUID()}`;
+  const PROBE_ID = `monocode-copilot-probe-${crypto.randomUUID()}`;
   const acp = new AcpClient(PROBE_ID, {
     onRequest: (id, method) => {
       const result =
@@ -71,11 +51,11 @@ async function discoverViaAcp(projectCwd?: string) {
   watchChild(
     PROBE_ID,
     (line) => acp.pushLine(line),
-    () => acp.close(new Error("Devin catalog probe exited")),
+    () => acp.close(new Error("Copilot catalog probe exited")),
   );
 
   try {
-    await spawnChild(PROBE_ID, path, devinSpawnArgs(), cwd);
+    await spawnChild(PROBE_ID, path, copilotSpawnArgs(), cwd);
     return await withTimeout(
       DISCOVERY_TIMEOUT_MS,
       async () => {
@@ -83,7 +63,7 @@ async function discoverViaAcp(projectCwd?: string) {
           "initialize",
           {
             protocolVersion: 1,
-            clientCapabilities: DEVIN_CLIENT_CAPABILITIES,
+            clientCapabilities: COPILOT_CLIENT_CAPABILITIES,
             clientInfo: { name: "monocode", version: "0.1.0" },
           },
           REQUEST_TIMEOUT_MS,
@@ -93,9 +73,7 @@ async function discoverViaAcp(projectCwd?: string) {
           { cwd, mcpServers: [] },
           REQUEST_TIMEOUT_MS,
         );
-        return devinModelsFromConfig(
-          devinConfigOptions(asRecord(created)?.configOptions),
-        );
+        return copilotModelsFromSetup(created);
       },
       () => {
         void stop();
@@ -114,7 +92,7 @@ function withTimeout<T>(
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       onTimeout();
-      reject(new Error("Devin catalog probe timed out"));
+      reject(new Error("Copilot catalog probe timed out"));
     }, ms);
     run()
       .then(resolve, reject)

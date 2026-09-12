@@ -173,11 +173,13 @@ export class JsonRpcClient {
       if (!pending) return;
       this.pending.delete(key);
       if (msg.error) {
-        pending.reject(
-          new Error(
-            msg.error.message || `${this.label} error ${msg.error.code ?? ""}`,
-          ),
+        const err = new Error(
+          msg.error.message || `${this.label} error ${msg.error.code ?? ""}`,
         );
+        // Keep the JSON-RPC code reachable for callers that branch on it
+        // (e.g. -32601 → method not supported → config-option fallback).
+        (err as { code?: number }).code = msg.error.code;
+        pending.reject(err);
         return;
       }
       pending.resolve(msg.result);

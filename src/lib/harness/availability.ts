@@ -5,6 +5,7 @@ import {
   resolveClaudeBinary,
   resolveCodexBinary,
   resolveCursorBinary,
+  resolveCopilotBinary,
   resolveDevinBinary,
   resolveFxBinary,
   resolveGrokBinary,
@@ -36,6 +37,10 @@ const CLI: Record<HarnessId, { name: string; install?: string }> = {
   omp: { name: "omp CLI", install: "curl -fsSL https://omp.sh/install | sh" },
   fx: { name: "fx CLI", install: "curl -fsSL https://fx.sh/setup.sh | bash" },
   devin: { name: "Devin CLI" },
+  copilot: {
+    name: "GitHub Copilot CLI",
+    install: "npm i -g @github/copilot",
+  },
 };
 
 const emptyAvailability: HarnessAvailability = {
@@ -48,6 +53,7 @@ const emptyAvailability: HarnessAvailability = {
   omp: false,
   fx: false,
   devin: false,
+  copilot: false,
 };
 const SIGN_IN: Partial<Record<HarnessId, string>> = {
   claude: "claude auth login",
@@ -56,6 +62,7 @@ const SIGN_IN: Partial<Record<HarnessId, string>> = {
   grok: "grok login",
   fx: "fx login",
   devin: "devin auth login",
+  copilot: "copilot login",
 };
 
 type Probe = {
@@ -222,6 +229,7 @@ export function probeHarnessAvailability(options?: {
     fx: resolveFxBinary,
     grok: resolveGrokBinary,
     devin: resolveDevinBinary,
+    copilot: resolveCopilotBinary,
   };
   current.inflight = Promise.all(
     HARNESSES.map(async (id) => {
