@@ -466,6 +466,9 @@ function TaskChildStrip({
       (entry) =>
         entry.workingCopy && pathKey(entry.workingCopy) === pathKey(viewCwd),
     ) ?? null;
+  // Beyond two children the chips never read well in the sidebar — go
+  // straight to the selector; at two, measured overflow still collapses.
+  const collapse = task.children.length > 2 || overflow;
 
   // Chip widths grow as branch and diff stats land, so the fit is re-measured
   // on every render; the observer catches sidebar resizes. In selector mode
@@ -485,33 +488,35 @@ function TaskChildStrip({
   }, []);
 
   return (
-    <div className="shrink-0 border-b border-content/10">
-      <div
-        ref={stripRef}
-        aria-hidden={overflow || undefined}
-        inert={overflow}
-        className={
-          overflow
-            ? "invisible flex h-0 items-center gap-1 overflow-hidden px-2"
-            : "flex items-center gap-1 overflow-x-auto px-2 py-1.5"
-        }
-      >
-        {task.children.map((entry) => (
-          <TaskChildChip
-            key={entry.id}
-            task={task}
-            entry={entry}
-            selected={
-              !!entry.workingCopy &&
-              pathKey(entry.workingCopy) === pathKey(viewCwd)
-            }
-            enabled={enabled}
-            stores={stores}
-            onSelect={onSelect}
-          />
-        ))}
-      </div>
-      {overflow ? (
+    <div className="min-w-0 shrink-0 border-b border-content/10">
+      {task.children.length > 2 ? null : (
+        <div
+          ref={stripRef}
+          aria-hidden={collapse || undefined}
+          inert={collapse}
+          className={
+            collapse
+              ? "invisible flex h-0 items-center gap-1 overflow-hidden px-2"
+              : "flex items-center gap-1 overflow-x-auto px-2 py-1.5"
+          }
+        >
+          {task.children.map((entry) => (
+            <TaskChildChip
+              key={entry.id}
+              task={task}
+              entry={entry}
+              selected={
+                !!entry.workingCopy &&
+                pathKey(entry.workingCopy) === pathKey(viewCwd)
+              }
+              enabled={enabled}
+              stores={stores}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      )}
+      {collapse ? (
         <TaskChildSelector
           task={task}
           viewCwd={viewCwd}

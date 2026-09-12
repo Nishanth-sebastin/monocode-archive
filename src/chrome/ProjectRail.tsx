@@ -351,18 +351,12 @@ export function ProjectRail({
   }, [tasksRaw, busySessionIds]);
   const railTasks = useMemo(() => {
     const live = loadTaskWorkspaces().filter((task) => !task.archived);
-    const rank = (task: TaskWorkspace) =>
-      task.id === currentTaskId
-        ? 0
-        : taskBusyIds.has(task.id)
-          ? 1
-          : 2;
-    return [...live].sort(
-      (a, b) => rank(a) - rank(b) || b.createdAt - a.createdAt,
-    );
+    // Stable newest-first order — selecting or working on a task must not
+    // move its row; state shows through the row's indicators instead.
+    return [...live].sort((a, b) => b.createdAt - a.createdAt);
     // tasksRaw changes on every store write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasksRaw, currentTaskId, taskBusyIds]);
+  }, [tasksRaw]);
   const archivedTasks = useMemo(
     () =>
       loadTaskWorkspaces()

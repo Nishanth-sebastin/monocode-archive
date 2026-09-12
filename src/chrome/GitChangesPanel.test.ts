@@ -408,6 +408,70 @@ it("lets a task session switch the panel between child working copies", async ()
   }
 });
 
+it("uses the selector instead of chips for more than two children", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => rows.get(key) ?? null,
+    setItem: (key: string, value: string) => rows.set(key, value),
+  });
+  rows.set(
+    "monocode.taskWorkspaces.v1",
+    JSON.stringify([
+      {
+        id: "t1",
+        projectId: "p1",
+        name: "Ship it",
+        sessionIds: ["s1"],
+        createdAt: 1,
+        children: ["a", "b", "c"].map((name, index) => ({
+          id: `c${index + 1}`,
+          repositoryId: `r${index + 1}`,
+          workingCopy: `/repo-${name}`,
+          branch: `feat/${name}`,
+          sessionIds: [],
+          launch: { state: "ready" },
+        })),
+      },
+    ]),
+  );
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const selector = () =>
+    host.querySelector('button[aria-haspopup="menu"]') as HTMLButtonElement | null;
+  const menuRow = (name: string) =>
+    [...document.querySelectorAll('ul[role="menu"] button')].find((button) =>
+      button.textContent?.includes(name),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-a",
+          sourceSessionId: "s1",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    // No chip row — a compact selector shows the active child and count.
+    expect(selector()?.textContent).toContain("repo-a");
+    expect(selector()?.textContent).toContain("3 repos");
+    await act(async () => selector()!.click());
+    expect(menuRow("repo-c")).toBeTruthy();
+    await act(async () => (menuRow("repo-c") as HTMLButtonElement).click());
+    expect(host.querySelector("header")?.textContent).toContain("feature");
+    expect(selector()?.textContent).toContain("repo-c");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
 it("collapses the child chips into a selector menu when they overflow", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rows = new Map<string, string>();
