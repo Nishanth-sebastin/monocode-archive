@@ -320,6 +320,8 @@ export function ProjectRail({
     path: string;
     projectKey: string;
     projectId?: string;
+    /** Right-clicked row — anchors follow-up popovers to the project itself. */
+    rowRect?: DOMRect;
   } | null>(null);
   const [repositoriesProject, setRepositoriesProject] = useState<{
     path: string;
@@ -329,6 +331,8 @@ export function ProjectRail({
     x: number;
     y: number;
     task: TaskWorkspace;
+    /** Right-clicked row — anchors follow-up popovers to the task itself. */
+    rowRect?: DOMRect;
   } | null>(null);
   const tasksRaw = useSyncExternalStore(
     subscribeTaskWorkspaces,
@@ -484,13 +488,19 @@ export function ProjectRail({
     return () => scrollParent.removeEventListener("scroll", onScroll, true);
   }, [projectMenu]);
 
-  const openProjectMenu = (item: RailProjectItem, x: number, y: number) => {
+  const openProjectMenu = (
+    item: RailProjectItem,
+    x: number,
+    y: number,
+    rowRect?: DOMRect,
+  ) => {
     setProjectMenu({
       x,
       y,
       path: item.path,
       projectKey: projectKey(item.path),
       projectId: item.project?.id,
+      rowRect,
     });
   };
 
@@ -500,11 +510,21 @@ export function ProjectRail({
   ) => {
     event.preventDefault();
     event.stopPropagation();
-    openProjectMenu(item, event.clientX, event.clientY);
+    openProjectMenu(
+      item,
+      event.clientX,
+      event.clientY,
+      event.currentTarget.getBoundingClientRect(),
+    );
   };
 
-  const openTaskMenu = (task: TaskWorkspace, x: number, y: number) => {
-    setTaskMenu({ task, x, y });
+  const openTaskMenu = (
+    task: TaskWorkspace,
+    x: number,
+    y: number,
+    rowRect?: DOMRect,
+  ) => {
+    setTaskMenu({ task, x, y, rowRect });
   };
 
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(
@@ -632,7 +652,7 @@ export function ProjectRail({
       onRemoveProject?.(path, { purgeData });
   };
 
-  const onProjectMenuPick = (action: string, itemRect?: DOMRect) => {
+  const onProjectMenuPick = (action: string) => {
     if (!projectMenu) return;
     const { path, projectKey, projectId } = projectMenu;
     const displayName =
@@ -642,10 +662,11 @@ export function ProjectRail({
     else if (action === "new-task") onNewTask?.(path, projectId);
     else if (action === "commands") {
       onOpenCommands?.({
-        // Anchor at the picked row's edge so the popover reads as a submenu
-        // of the context menu rather than floating at the right-click point.
-        anchor: itemRect
-          ? { x: itemRect.right, y: itemRect.top }
+        // Anchor to the right-clicked row — it stays mounted, so the popover
+        // reads as attached to the project rather than floating where the
+        // dismissed context menu item happened to be.
+        anchor: projectMenu.rowRect
+          ? { x: projectMenu.rowRect.right, y: projectMenu.rowRect.top }
           : { x: projectMenu.x, y: projectMenu.y },
         path: isProjectRailKey(path) ? undefined : path,
         projectId,
@@ -999,10 +1020,11 @@ export function ProjectRail({
                 type="button"
                 role="menuitem"
                 className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
-                onClick={(event) => {
-                  const itemRect = event.currentTarget.getBoundingClientRect();
+                onClick={() => {
                   onOpenCommands({
-                    anchor: { x: itemRect.right, y: itemRect.top },
+                    anchor: taskMenu.rowRect
+                      ? { x: taskMenu.rowRect.right, y: taskMenu.rowRect.top }
+                      : { x: taskMenu.x, y: taskMenu.y },
                     projectId: taskMenu.task.projectId,
                     taskId: taskMenu.task.id,
                   });
@@ -1335,6 +1357,7 @@ function ProjectSection({
     item: RailProjectItem,
     x: number,
     y: number,
+    rowRect?: DOMRect,
   ) => void;
   scopeRepoIds?: ReadonlySet<string>;
   groupLabels: Record<string, string>;
@@ -1707,7 +1730,12 @@ function TasksSection({
   busySessionIds: ReadonlySet<string>;
   needsInputIds?: ReadonlySet<string>;
   onOpen?: (taskId: string) => void;
-  onMenu: (task: TaskWorkspace, x: number, y: number) => void;
+  onMenu: (
+    task: TaskWorkspace,
+    x: number,
+    y: number,
+    rowRect?: DOMRect,
+  ) => void;
   onNewTask?: () => void;
 }) {
   const [showArchived, setShowArchived] = useState(false);
@@ -1758,7 +1786,12 @@ function TasksSection({
         onMenu={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          onMenu(task, event.clientX, event.clientY);
+          onMenu(
+            task,
+            event.clientX,
+            event.clientY,
+            event.currentTarget.getBoundingClientRect(),
+          );
         }}
       />
     );
@@ -2214,7 +2247,12 @@ function ProjectCard({
   onSelect: (path: string) => void;
   onTogglePin: (path: string) => void;
   onContextMenu: (item: RailProjectItem, event: MouseEvent<HTMLElement>) => void;
-  onOpenMenu: (item: RailProjectItem, x: number, y: number) => void;
+  onOpenMenu: (
+    item: RailProjectItem,
+    x: number,
+    y: number,
+    rowRect?: DOMRect,
+  ) => void;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
   groupCustomColors: Record<string, string>;
@@ -2362,7 +2400,12 @@ function ProjectCard({
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => {
             event.stopPropagation();
-            onOpenMenu(item, event.clientX, event.clientY);
+            onOpenMenu(
+              item,
+              event.clientX,
+              event.clientY,
+              event.currentTarget.getBoundingClientRect(),
+            );
           }}
           className="invisible grid size-6 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:visible"
         >

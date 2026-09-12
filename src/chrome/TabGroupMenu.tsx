@@ -66,8 +66,7 @@ type Props = {
   /** When false, only name / logo / color controls are shown. */
   showActions?: boolean;
   extraItems?: TabGroupMenuExtraItem[];
-  /** `rect` is the picked row — a cascading popover anchors to its edge. */
-  onExtraPick?: (id: string, rect?: DOMRect) => void;
+  onExtraPick?: (id: string) => void;
 };
 
 const MENU_WIDTH = 260;
@@ -304,8 +303,8 @@ export function TabGroupMenu({
               ) : null}
               <MenuRow
                 item={item}
-                onPick={(rect) => {
-                  onExtraPick?.(item.id, rect);
+                onPick={() => {
+                  onExtraPick?.(item.id);
                   onClose();
                 }}
               />
@@ -350,7 +349,7 @@ function MenuRow({
   onPick,
 }: {
   item: MenuItem;
-  onPick: (rect: DOMRect) => void;
+  onPick: () => void;
 }) {
   const Icon = item.icon;
   return (
@@ -358,7 +357,7 @@ function MenuRow({
       type="button"
       role="menuitem"
       onMouseDown={(e) => e.preventDefault()}
-      onClick={(e) => onPick(e.currentTarget.getBoundingClientRect())}
+      onClick={onPick}
       className={`flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-[13px] leading-none ${
         item.danger
           ? "text-red-300/90 hover:bg-red-500/15"
