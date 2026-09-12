@@ -95,6 +95,7 @@ import {
 import { AccessPicker } from "./AccessPicker";
 import { AttachPicker } from "./AttachPicker";
 import { ComposerRunner } from "./ComposerRunner";
+import { ConfluencePicker } from "./ConfluencePicker";
 import { ContextMeter } from "./ContextMeter";
 import { AttachmentChip } from "./AttachmentChip";
 import { BranchPicker } from "./BranchPicker";
@@ -518,6 +519,7 @@ export function Composer({
   const [mention, setMention] = useState<MentionToken | null>(null);
   const [mentionActive, setMentionActive] = useState(0);
   const [attachOpen, setAttachOpen] = useState(false);
+  const [confluenceOpen, setConfluenceOpen] = useState(false);
   const [attachQuery, setAttachQuery] = useState("");
   const [attachActive, setAttachActive] = useState(0);
   const attachPending = useRef(new Set<string>());
@@ -1620,6 +1622,24 @@ export function Composer({
                   </button>
                   <button
                     type="button"
+                    disabled={!enabled}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setPlusOpen(false);
+                      setConfluenceOpen(true);
+                    }}
+                    className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <StickyNote className="mt-0.5 size-4 shrink-0" />
+                    <span className="min-w-0">
+                      <span className="block text-[13px]">Confluence page</span>
+                      <span className="block text-[11px] leading-4 text-content/45">
+                        Add pages or sections from the Atlassian connection
+                      </span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
                     aria-pressed={planSelected}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
@@ -1710,6 +1730,16 @@ export function Composer({
             </div>
           </div>
         </div>
+        {confluenceOpen ? (
+          <ConfluencePicker
+            cwd={executionCwd}
+            sessionId={sessionId}
+            onClose={() => {
+              setConfluenceOpen(false);
+              ref.current?.focus();
+            }}
+          />
+        ) : null}
         {runnerLive && runnerEnabled ? (
           <ComposerRunner
             boxRef={boxRef}

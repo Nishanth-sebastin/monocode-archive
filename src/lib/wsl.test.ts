@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, expect, it, vi } from "vitest";
 import { connectWslProject } from "./wsl";
+import { wslStatusFor } from "./wslStatus";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 beforeEach(() => {
@@ -20,6 +21,8 @@ it("opens only the selected distribution and preserves cancellation and errors",
     distribution: "Ubuntu Work",
     path: "/home/me/Zażółć Repo",
   });
+  // The shared store tracks the connect for badges/banners.
+  expect(wslStatusFor("Ubuntu Work").state).toBe("connected");
   vi.mocked(invoke).mockResolvedValue({
     distribution: "Debian",
     path: "/real/project",
@@ -27,8 +30,16 @@ it("opens only the selected distribution and preserves cancellation and errors",
   await expect(connectWslProject(path)).rejects.toThrow(
     "different distribution",
   );
+  // A mismatched answer means the requested distro failed, the returned
+  // one did connect.
+  expect(wslStatusFor("Ubuntu Work").state).toBe("error");
+  expect(wslStatusFor("Debian").state).toBe("connected");
   vi.mocked(invoke).mockRejectedValue(new Error("Distribution stopped"));
   await expect(connectWslProject(path)).rejects.toThrow("Distribution stopped");
+  expect(wslStatusFor("Ubuntu Work")).toMatchObject({
+    state: "error",
+    error: "Error: Distribution stopped",
+  });
   vi.mocked(invoke).mockResolvedValue({
     distribution: "Ubuntu Work",
     path: "/real/project",
@@ -48,6 +59,8 @@ it("opens only the selected distribution and preserves cancellation and errors",
   controller.abort();
   finish({ distribution: "Ubuntu Work", path: "/late/project" });
   await expect(pending).rejects.toThrow();
+  // The link came up even though the caller walked away mid-request.
+  expect(wslStatusFor("Ubuntu Work").state).toBe("connected");
   vi.mocked(invoke).mockClear();
   await expect(connectWslProject(path, controller.signal)).rejects.toThrow();
   await expect(connectWslProject("C:/native/project")).rejects.toThrow(

@@ -145,14 +145,32 @@ export function historyWithLiveSessions(
   for (const session of sessions) {
     if (session.inboxAsk) continue;
     if (!sameProjectPath(session.cwd, cwd)) continue;
-    const live = session.busy || sessionNeedsInput(session);
-    if (!shouldPersistSession(session) && !live) continue;
-    if (rows.some((row) => row.id === session.id)) continue;
     const sessionHint: SessionGitHint = {
       ...hint,
       ...(session.branch ? { branch: session.branch } : {}),
     };
-    rows = mergeHistorySummary(rows, summaryFromSession(session, sessionHint));
+    const summary = summaryFromSession(session, sessionHint);
+    const existing = rows.findIndex((row) => row.id === session.id);
+    if (existing >= 0) {
+      // The live session wins over the last persisted write so agent/model/
+      // title changes show immediately instead of after the debounced save.
+      const row = rows[existing];
+      rows[existing] = {
+        ...row,
+        harness: summary.harness,
+        model: summary.model,
+        runtimeMode: summary.runtimeMode,
+        title: summary.title,
+        cwd: summary.cwd,
+        linkedWorkItem: summary.linkedWorkItem,
+        worktreeCwd: summary.worktreeCwd,
+        providerSessionId: summary.providerSessionId,
+      };
+      continue;
+    }
+    const live = session.busy || sessionNeedsInput(session);
+    if (!shouldPersistSession(session) && !live) continue;
+    rows = mergeHistorySummary(rows, summary);
   }
   return [...rows].sort(compareSessionSummaries);
 }

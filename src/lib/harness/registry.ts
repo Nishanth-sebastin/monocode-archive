@@ -7,6 +7,7 @@ import type { NativeCommandProvider } from "./nativeCommands";
 import type {
   ApprovalDecision,
   CompactContextInput,
+  HarnessSessionInput,
   SendTurnInput,
   SteerTurnInput,
 } from "./types";
@@ -29,6 +30,12 @@ export type HarnessAdapter = {
   canSteer?: boolean;
   commands?: NativeCommandProvider;
   sendTurn(input: SendTurnInput): Promise<void>;
+  /**
+   * Warm the provider session (spawn + initialize + resume) ahead of a prompt
+   * so a send does not pay the cold-start chain. No-op when a live child
+   * already serves the session.
+   */
+  prewarm?(input: HarnessSessionInput): Promise<void>;
   /** Trigger provider-owned compaction outside MonoCode's normal user-turn path. */
   compactContext?(input: CompactContextInput): Promise<void>;
   steerTurn(input: SteerTurnInput): Promise<void>;
@@ -76,6 +83,9 @@ const adapters = new Map<HarnessId, HarnessAdapter>();
  */
 export const HARNESS_IDLE_PARK_MS = 5 * 60_000;
 const idleParkTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Sends in flight — a prewarm can arm a park timer while a turn is still
+// running, so the timer must re-arm instead of parking a busy session.
+const inFlightSends = new Map<string, number>();
 
 function cancelIdlePark(sessionId: string): void {
   const timer = idleParkTimers.get(sessionId);
@@ -89,6 +99,10 @@ function scheduleIdlePark(harness: HarnessId, sessionId: string): void {
     sessionId,
     setTimeout(() => {
       idleParkTimers.delete(sessionId);
+      if (inFlightSends.get(sessionId)) {
+        scheduleIdlePark(harness, sessionId);
+        return;
+      }
       void stopHarnessSession(harness, sessionId);
     }, HARNESS_IDLE_PARK_MS),
   );
@@ -98,6 +112,7 @@ function scheduleIdlePark(harness: HarnessId, sessionId: string): void {
 export function resetHarnessIdlePark(): void {
   for (const timer of idleParkTimers.values()) clearTimeout(timer);
   idleParkTimers.clear();
+  inFlightSends.clear();
 }
 
 export function registerHarness(adapter: HarnessAdapter): void {
@@ -132,8 +147,34 @@ export async function sendHarnessTurn(
     throw new Error(`${input.harness} is not connected yet`);
   }
   cancelIdlePark(input.sessionId);
+  inFlightSends.set(
+    input.sessionId,
+    (inFlightSends.get(input.sessionId) ?? 0) + 1,
+  );
   try {
     await adapter.sendTurn(input);
+  } finally {
+    const count = (inFlightSends.get(input.sessionId) ?? 1) - 1;
+    if (count <= 0) inFlightSends.delete(input.sessionId);
+    else inFlightSends.set(input.sessionId, count);
+    scheduleIdlePark(input.harness, input.sessionId);
+  }
+}
+
+/**
+ * Warm a provider session in the background so the next prompt does not pay
+ * spawn + handshake + resume on the user's keystroke. Prewarmed children obey
+ * the same idle park as post-turn ones, so a peeked-at session cannot leak a
+ * process. Best-effort: failures surface again on the real send.
+ */
+export async function prewarmHarness(
+  input: HarnessSessionInput & { harness: HarnessId },
+): Promise<void> {
+  const adapter = getHarness(input.harness);
+  if (!adapter?.live || !adapter.prewarm) return;
+  cancelIdlePark(input.sessionId);
+  try {
+    await adapter.prewarm(input);
   } finally {
     scheduleIdlePark(input.harness, input.sessionId);
   }
@@ -176,7 +217,12 @@ export async function steerHarnessTurn(
     throw new Error(`${input.harness} is not connected yet`);
   }
   cancelIdlePark(input.sessionId);
-  await adapter.steerTurn(input);
+  try {
+    await adapter.steerTurn(input);
+  } finally {
+    // Re-arm even mid-turn — the in-flight guard just postpones the park.
+    scheduleIdlePark(input.harness, input.sessionId);
+  }
 }
 
 export async function cancelHarnessTurn(

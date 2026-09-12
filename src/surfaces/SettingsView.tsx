@@ -683,6 +683,7 @@ function JiraSettings() {
     connected: false,
     site: "",
     account: "",
+    capabilities: [],
   });
   const [site, setSite] = useState("");
   const [email, setEmail] = useState("");
@@ -729,7 +730,7 @@ function JiraSettings() {
             {status.connected ? "Connected account" : "Connect your account"}
           </span>
         }
-        description="Browse issues from your Jira Cloud site. Your API token stays on this device."
+        description="One Atlassian Cloud account for Jira issues and Confluence pages. Your API token stays on this device."
       >
         {status.connected ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -739,6 +740,17 @@ function JiraSettings() {
             >
               {status.site} · {status.account}
             </span>
+            {(status.capabilities.length
+              ? status.capabilities
+              : ["Jira"]
+            ).map((capability) => (
+              <span
+                key={capability}
+                className="rounded-full border border-content/15 px-2 py-0.5 text-[11px] text-content/60"
+              >
+                {capability}
+              </span>
+            ))}
             <SecondaryButton onClick={() => void save(true)} disabled={busy}>
               Disconnect
             </SecondaryButton>
@@ -757,7 +769,7 @@ function JiraSettings() {
                   value: site,
                   change: setSite,
                   type: "url",
-                  label: "Jira Cloud site",
+                  label: "Atlassian Cloud site",
                   placeholder: "https://team.atlassian.net",
                 },
                 {
@@ -771,7 +783,7 @@ function JiraSettings() {
                   value: token,
                   change: setToken,
                   type: "password",
-                  label: "Jira API token",
+                  label: "Atlassian API token",
                   placeholder: "API token",
                 },
               ] as const
@@ -799,7 +811,8 @@ function JiraSettings() {
             ))}
             <div className="flex items-start justify-between gap-4 sm:col-span-2">
               <p className="max-w-sm text-[12px] leading-relaxed text-content/45">
-                Use an API token without scopes. Jira Server and Data Center
+                Use an API token without scopes. Jira and Confluence are
+                enabled automatically per your account. Server and Data Center
                 aren't supported.
               </p>
               <SecondaryButton
@@ -842,7 +855,7 @@ function InboxPage() {
 
       <Heading title="Linear" id={ANCHOR_IDS.linear} />
       <LinearSettings />
-      <Heading title="Jira Cloud" id={ANCHOR_IDS.jira} />
+      <Heading title="Atlassian Cloud" id={ANCHOR_IDS.jira} />
       <JiraSettings />
       <Heading title="Azure DevOps" id={ANCHOR_IDS.azure} />
       <AzureSettings />

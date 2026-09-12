@@ -240,6 +240,28 @@ pub async fn gitlab_work_item_comment(
 }
 
 #[tauri::command]
+pub async fn gitlab_issue_relations(
+    app: AppHandle,
+    cwd: String,
+    kind: String,
+    number: i64,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Validate before resolving the repo — an MR or bad number should not
+        // pay for a `git config` subprocess just to return empty.
+        validate_item(&kind, number)?;
+        if kind == "pr" {
+            return Ok(serde_json::json!({ "edges": [], "truncated": false }));
+        }
+        let config = require_config(&app)?;
+        let repo = gitlab_repo_for(&expand_home(&cwd), &config.url)?;
+        gitlab_issue_relations_for(&config, &repo, &kind, number)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn gitlab_mr_diff(
     app: AppHandle,
     cwd: String,
@@ -348,6 +370,77 @@ fn gitlab_work_item_comment_for(
         .and_then(Value::as_i64)
         .ok_or_else(|| "GitLab did not return a comment".to_string())?;
     Ok(note_url(&config.url, repo, kind, number, id))
+}
+
+fn gitlab_link_group(link_type: &str) -> (&'static str, &'static str) {
+    match link_type {
+        "blocks" => ("blocks", "Blocks"),
+        "is_blocked_by" => ("blocked-by", "Is blocked by"),
+        _ => ("related", "Relates to"),
+    }
+}
+
+fn gitlab_issue_relations_for(
+    config: &GitlabConfig,
+    repo: &str,
+    kind: &str,
+    number: i64,
+) -> Result<Value, String> {
+    validate_item(kind, number)?;
+    // Merge requests expose no linked-item API; only issues carry links.
+    if kind == "pr" {
+        return Ok(serde_json::json!({ "edges": [], "truncated": false }));
+    }
+    let path = format!("{}/links?per_page=50", item_path(repo, kind, number));
+    let response = gitlab_get(config, &path)?;
+    let rows = response
+        .value
+        .as_array()
+        .ok_or_else(|| "GitLab did not return linked issues".to_string())?;
+    let edges: Vec<Value> = rows
+        .iter()
+        .take(50)
+        .filter_map(|row| {
+            let iid = row.get("iid").and_then(Value::as_i64)?;
+            if iid <= 0 {
+                return None;
+            }
+            let (key, label) =
+                gitlab_link_group(row.get("link_type").and_then(Value::as_str).unwrap_or(""));
+            let reference = row
+                .pointer("/references/full")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let linked_repo = reference
+                .rsplit_once('#')
+                .map(|(path, _)| path.trim().to_string())
+                .filter(|path| !path.is_empty());
+            // An unresolvable reference cannot prove same-project identity —
+            // fail safe and render the row display-only.
+            let foreign = linked_repo
+                .as_deref()
+                .is_none_or(|path| !path.eq_ignore_ascii_case(repo));
+            Some(serde_json::json!({
+                "key": key,
+                "label": label,
+                "ref": format!("#{iid}"),
+                "foreign": foreign,
+                "item": {
+                    "number": iid,
+                    "title": string_field(row, "title").unwrap_or_default(),
+                    "url": string_field(row, "web_url").unwrap_or_default(),
+                    "state": normalize_state(&string_field(row, "state").unwrap_or_default()),
+                    "updatedAt": string_field(row, "updated_at").unwrap_or_default(),
+                    "repo": linked_repo.unwrap_or_else(|| repo.to_string()),
+                },
+            }))
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "edges": edges,
+        "truncated": response.has_next_page,
+    }))
 }
 
 fn gitlab_mr_diff_for(
@@ -1200,6 +1293,17 @@ mod tests {
             thread.comments[0].url,
             "https://gitlab.example.com/acme/web/-/merge_requests/9#note_2"
         );
+    }
+
+    #[test]
+    fn maps_gitlab_link_types_to_groups() {
+        assert_eq!(gitlab_link_group("blocks"), ("blocks", "Blocks"));
+        assert_eq!(
+            gitlab_link_group("is_blocked_by"),
+            ("blocked-by", "Is blocked by")
+        );
+        assert_eq!(gitlab_link_group("relates_to"), ("related", "Relates to"));
+        assert_eq!(gitlab_link_group(""), ("related", "Relates to"));
     }
 
     #[test]

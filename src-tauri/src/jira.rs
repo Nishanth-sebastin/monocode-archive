@@ -18,6 +18,10 @@ pub(crate) struct JiraConfig {
     pub(crate) email: String,
     pub(crate) token: String,
     account: String,
+    /// Atlassian products verified for this credential. Empty means the
+    /// connection predates capability tracking — treated as unknown.
+    #[serde(default)]
+    pub(crate) capabilities: Vec<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -25,6 +29,7 @@ pub struct JiraStatus {
     connected: bool,
     site: String,
     account: String,
+    capabilities: Vec<String>,
 }
 
 impl JiraConfig {
@@ -33,6 +38,7 @@ impl JiraConfig {
             connected: true,
             site: self.site.clone(),
             account: self.account.clone(),
+            capabilities: self.capabilities.clone(),
         }
     }
 }
@@ -120,15 +126,54 @@ pub async fn jira_set_config(
             email: email.trim().into(),
             token: token.trim().into(),
             account: String::new(),
+            capabilities: Vec::new(),
         };
-        let viewer = request(&config, "myself", &[])?;
-        if viewer["accountId"].as_str().unwrap_or_default().is_empty() {
-            return Err("Jira did not return an authenticated account".into());
+        // A 200 with a degenerate body is inconclusive, not definitive — treat
+        // it like a transport failure so a working Confluence still connects.
+        let viewer = request(&config, "myself", &[]).and_then(|viewer| {
+            if viewer["accountId"].as_str().unwrap_or_default().is_empty() {
+                Err(HttpError::other(
+                    "Jira did not return an authenticated account",
+                ))
+            } else {
+                Ok(viewer)
+            }
+        });
+        let confluence = crate::confluence::probe(&config);
+        match (viewer, confluence) {
+            (Ok(viewer), wiki) => {
+                config.account = viewer["displayName"]
+                    .as_str()
+                    .unwrap_or(&config.email)
+                    .to_string();
+                config.capabilities.push("Jira".into());
+                // Only a definitive denial records Confluence as absent; a
+                // transient probe failure leaves it enabled for per-request
+                // errors instead of blocking it until the next reconnect.
+                if !matches!(&wiki, Err(error) if error.denied()) {
+                    config.capabilities.push("Confluence".into());
+                }
+            }
+            (Err(jira_error), Ok(user)) => {
+                // The site may provision Confluence without Jira for this account.
+                if user["accountId"].as_str().unwrap_or_default().is_empty()
+                    && user["displayName"].as_str().unwrap_or_default().is_empty()
+                {
+                    return Err("Confluence did not return an authenticated account".into());
+                }
+                config.account = user["displayName"]
+                    .as_str()
+                    .unwrap_or(&config.email)
+                    .to_string();
+                if !jira_error.denied() {
+                    // Jira's answer was inconclusive — keep it enabled rather
+                    // than silently downgrading a working connection.
+                    config.capabilities.push("Jira".into());
+                }
+                config.capabilities.push("Confluence".into());
+            }
+            (Err(jira_error), Err(_)) => return Err(jira_error.into()),
         }
-        config.account = viewer["displayName"]
-            .as_str()
-            .unwrap_or(&config.email)
-            .to_string();
         fs::create_dir_all(path.parent().ok_or("Cannot locate Jira settings")?)
             .map_err(|_| "Cannot create Jira settings")?;
         let raw = serde_json::to_string(&config).map_err(|_| "Cannot encode Jira settings")?;
@@ -153,29 +198,65 @@ fn http_error(status: u16) -> String {
     }
 }
 
+/// The HTTP status rides along with the message so capability probing can tell
+/// a definitive denial (401/403/404) from a transient failure.
+#[derive(Debug)]
+pub(crate) struct HttpError {
+    message: String,
+    status: Option<u16>,
+}
+
+impl HttpError {
+    pub(crate) fn status(message: impl Into<String>, status: u16) -> Self {
+        Self {
+            message: message.into(),
+            status: Some(status),
+        }
+    }
+
+    pub(crate) fn other(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: None,
+        }
+    }
+
+    /// The product answered with an auth/permission/absence status — only then
+    /// is it safe to record the capability as absent.
+    pub(crate) fn denied(&self) -> bool {
+        matches!(self.status, Some(401 | 403 | 404))
+    }
+}
+
+impl From<HttpError> for String {
+    fn from(error: HttpError) -> Self {
+        error.message
+    }
+}
+
 pub(crate) fn request(
     config: &JiraConfig,
     path: &str,
     query: &[(&str, String)],
-) -> Result<Value, String> {
+) -> Result<Value, HttpError> {
     serde_json::from_slice(&request_bytes(config, path, query)?)
-        .map_err(|_| "Jira returned an invalid response".into())
+        .map_err(|_| HttpError::other("Jira returned an invalid response"))
 }
 
 fn request_bytes(
     config: &JiraConfig,
     path: &str,
     query: &[(&str, String)],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, HttpError> {
     if BACKOFF
         .lock()
-        .map_err(|_| "Jira request state unavailable")?
+        .map_err(|_| HttpError::other("Jira request state unavailable"))?
         .as_ref()
         .is_some_and(|(site, until)| site == &config.site && *until > Instant::now())
     {
-        return Err(
-            "Jira requests are paused after a service error. Wait before refreshing.".into(),
-        );
+        return Err(HttpError::other(
+            "Jira requests are paused after a service error. Wait before refreshing.",
+        ));
     }
     let authorization = base64::engine::general_purpose::STANDARD
         .encode(format!("{}:{}", config.email, config.token));
@@ -202,23 +283,29 @@ fn request_bytes(
                     .clamp(1, 300);
                 *BACKOFF
                     .lock()
-                    .map_err(|_| "Jira request state unavailable")? = Some((
+                    .map_err(|_| HttpError::other("Jira request state unavailable"))? = Some((
                     config.site.clone(),
                     Instant::now() + Duration::from_secs(seconds),
                 ));
             }
-            return Err(http_error(status));
+            return Err(HttpError::status(http_error(status), status));
         }
-        Err(_) => return Err("Cannot reach Jira Cloud. Check your connection and retry.".into()),
+        Err(_) => {
+            return Err(HttpError::other(
+                "Cannot reach Jira Cloud. Check your connection and retry.",
+            ))
+        }
     };
     let mut bytes = Vec::new();
     response
         .into_reader()
         .take(MAX_RESPONSE + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read Jira response")?;
+        .map_err(|_| HttpError::other("Cannot read Jira response"))?;
     if bytes.len() as u64 > MAX_RESPONSE {
-        return Err("Jira response is too large. Choose a narrower filter.".into());
+        return Err(HttpError::other(
+            "Jira response is too large. Choose a narrower filter.",
+        ));
     }
     Ok(bytes)
 }
@@ -275,7 +362,7 @@ pub async fn jira_list_issues(
             if !token.is_empty() {
                 query.push(("nextPageToken", token.to_string()));
             }
-            request(&config, "search/jql", &query)
+            request(&config, "search/jql", &query).map_err(String::from)
         })?;
         Ok(json!({ "site": config.site, "issues": issues }))
     })
@@ -383,9 +470,88 @@ pub async fn jira_issue_content(
                 &[("fields", "description,creator,attachment".into())],
             )
         }
+        .map_err(String::from)
     })
     .await
     .map_err(|_| "Jira details task failed")?
+}
+
+/// Directional link wording stays provider-native; the key only picks a group.
+fn relation_key(name: &str, outward: bool) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "blocks" | "block" | "blocking" => if outward { "blocks" } else { "blocked-by" }.into(),
+        "duplicate" | "duplicates" | "duplicate of" => "duplicate".into(),
+        "relates" | "relates to" | "related" => "related".into(),
+        other => other.to_string(),
+    }
+}
+
+fn push_edge(edges: &mut Vec<Value>, key: &str, label: &str, issue: &Value) -> bool {
+    if edges.len() >= 50 {
+        return false;
+    }
+    edges.push(json!({
+        "key": key,
+        "label": label,
+        "ref": issue["key"].as_str().unwrap_or_default(),
+        "item": issue,
+    }));
+    true
+}
+
+fn relation_edges(fields: &Value) -> (Vec<Value>, bool) {
+    let mut edges = Vec::new();
+    let mut truncated = false;
+    if fields["parent"]["key"].is_string() {
+        truncated |= !push_edge(&mut edges, "parent", "Parent", &fields["parent"]);
+    }
+    if let Some(subtasks) = fields["subtasks"].as_array() {
+        truncated |= subtasks.len() > 50;
+        for subtask in subtasks.iter().take(50) {
+            truncated |= !push_edge(&mut edges, "children", "Sub-task", subtask);
+        }
+    }
+    if let Some(links) = fields["issuelinks"].as_array() {
+        truncated |= links.len() > 50;
+        for link in links.iter().take(50) {
+            let (outward, linked) = if link["outwardIssue"].is_object() {
+                (true, &link["outwardIssue"])
+            } else if link["inwardIssue"].is_object() {
+                (false, &link["inwardIssue"])
+            } else {
+                continue;
+            };
+            let name = link["type"]["name"].as_str().unwrap_or("Related");
+            let label = link["type"][if outward { "outward" } else { "inward" }]
+                .as_str()
+                .unwrap_or("related");
+            truncated |= !push_edge(&mut edges, &relation_key(name, outward), label, linked);
+        }
+    }
+    (edges, truncated)
+}
+
+#[tauri::command]
+pub async fn jira_issue_relations(
+    app: AppHandle,
+    site: String,
+    id: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &site)?;
+        if !numeric_id(&id) {
+            return Err("Invalid Jira issue identity".into());
+        }
+        let issue = request(
+            &config,
+            &format!("issue/{id}"),
+            &[("fields", "parent,subtasks,issuelinks".into())],
+        )?;
+        let (edges, truncated) = relation_edges(&issue["fields"]);
+        Ok(json!({ "edges": edges, "truncated": truncated }))
+    })
+    .await
+    .map_err(|_| "Jira relations task failed")?
 }
 
 fn image_on_issue(issue: &Value, attachment_id: &str) -> bool {
@@ -499,5 +665,46 @@ mod tests {
         assert!(!numeric_id("../myself"));
         assert!(http_error(401).contains("Reconnect"));
         assert!(http_error(403).contains("permissions"));
+    }
+
+    #[test]
+    fn relation_edges_keep_direction_and_provider_labels() {
+        let fields = json!({
+            "parent": {"id":"1","key":"ENG-1","fields":{"summary":"Epic"}},
+            "subtasks": [{"id":"2","key":"ENG-2","fields":{"summary":"Sub"}}],
+            "issuelinks": [
+                {"type":{"name":"Blocks","inward":"is blocked by","outward":"blocks"},
+                 "outwardIssue":{"id":"3","key":"ENG-3","fields":{"summary":"Downstream"}}},
+                {"type":{"name":"Blocks","inward":"is blocked by","outward":"blocks"},
+                 "inwardIssue":{"id":"4","key":"ENG-4","fields":{"summary":"Upstream"}}},
+                {"type":{"name":"Cloners","inward":"is cloned by","outward":"clones"},
+                 "inwardIssue":{"id":"5","key":"ENG-5","fields":{"summary":"Clone"}}},
+                {"type":{"name":"Blocks","inward":"is blocked by","outward":"blocks"}}
+            ]
+        });
+        let (edges, truncated) = relation_edges(&fields);
+        assert!(!truncated);
+        let rows: Vec<(&str, &str, &str)> = edges
+            .iter()
+            .map(|e| {
+                (
+                    e["key"].as_str().unwrap(),
+                    e["label"].as_str().unwrap(),
+                    e["ref"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("parent", "Parent", "ENG-1"),
+                ("children", "Sub-task", "ENG-2"),
+                ("blocks", "blocks", "ENG-3"),
+                ("blocked-by", "is blocked by", "ENG-4"),
+                ("cloners", "is cloned by", "ENG-5"),
+            ]
+        );
+        // A link with no readable issue is skipped, never faked.
+        assert_eq!(edges.len(), 5);
     }
 }

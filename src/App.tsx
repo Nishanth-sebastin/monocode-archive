@@ -92,6 +92,7 @@ import {
 import { HAS_NATIVE_GLASS, IS_MAC, IS_WIN } from "./lib/platform";
 import { WslProjectDialog } from "./chrome/WslProjectDialog";
 import { connectWslProject, invalidateWslDiscovery } from "./lib/wsl";
+import { setWslStatus, wslStatusFor } from "./lib/wslStatus";
 import {
   applyUiScale,
   loadUiScale,
@@ -186,6 +187,10 @@ import { ProjectCommandsMenu } from "./chrome/ProjectCommandsMenu";
 import { ProjectCommandsSheet } from "./chrome/ProjectCommandsSheet";
 import type { PopoverAnchor } from "./chrome/Popover";
 import {
+  OPEN_BOUND_PROCESS,
+  type BoundProcess,
+} from "./lib/worktreeRemoval";
+import {
   applyGroupedReorder,
   insertTabBesideActive,
   removeTabFromGroup,
@@ -221,6 +226,7 @@ import {
   respondHarnessQuestion,
   keepHarnessQuestionOpen,
   sendHarnessTurn,
+  prewarmHarness,
   steerHarnessTurn,
   startHarnessBridge,
   stopHarnessSession,
@@ -419,11 +425,19 @@ import {
   emptyTabVisitHistory,
   pruneTabVisitHistory,
   recordTabVisit,
+  sameVisitLocation,
   tabVisitBack,
   tabVisitForward,
   type TabVisitHistory,
+  type VisitLocation,
 } from "./lib/tabVisitHistory";
 import { preparePrompt } from "./lib/promptPreparation";
+import {
+  beginTurnTiming,
+  endTurnTiming,
+  markFirstTurnEvent,
+  markTurn,
+} from "./lib/turnTiming";
 import { warmNativeSkills, isNativeCommandPrompt } from "./lib/skills";
 import { nativeSkillContextForSession } from "./lib/sessionSkills";
 import {
@@ -741,8 +755,43 @@ export default function App({
     () => subscribeRemovedWorktree(({ path, replacement }) => {
       setRecents(loadRecents());
       setProjectCwd((current) =>
-        sameProjectPath(current, path) ? replacement : current,
+        isEqualOrInside(current, path) ? replacement : current,
       );
+      // The removed checkout's dock detaches: terminals spawned inside it
+      // were bound processes — stopped, or they blocked the removal. A
+      // terminal running elsewhere keeps running and moves to the
+      // replacement dock instead of losing its only UI.
+      setProjectTerminals((current) => {
+        let touched = false;
+        let survivors: FilePaneTab[] = [];
+        const docks = current.filter((dock) => {
+          if (!isEqualOrInside(dock.projectPath, path)) return true;
+          touched = true;
+          survivors = dock.pane.files.filter(
+            (file) =>
+              file.terminal &&
+              !!file.cwd &&
+              !isEqualOrInside(file.cwd, path),
+          );
+          return false;
+        });
+        if (!touched) return current;
+        if (survivors.length === 0) return docks;
+        const index = docks.findIndex((dock) =>
+          sameProjectPath(dock.projectPath, replacement),
+        );
+        if (index < 0) {
+          const [first, ...rest] = survivors;
+          let dock = createProjectTerminal(replacement, first);
+          for (const file of rest) dock = addTerminalToDock(dock, file);
+          return [...docks, dock];
+        }
+        docks[index] = survivors.reduce(
+          (dock, file) => addTerminalToDock(dock, file),
+          docks[index],
+        );
+        return docks;
+      });
     }),
     [],
   );
@@ -846,9 +895,18 @@ export default function App({
     if (!location) return;
     let disposed = false;
     const openingAtStart = wslOpenRequest.current;
+    // Publish the probe only when nothing fresher landed meanwhile — a
+    // connect started (or finished) during the probe outranks its result.
+    const statusBefore = wslStatusFor(location.distribution);
     void invoke<boolean>("wsl_connected", { distribution: location.distribution }).then((connected) => {
+      if (wslStatusFor(location.distribution) === statusBefore)
+        setWslStatus(location.distribution, {
+          state: connected ? "connected" : "disconnected",
+        });
       if (!disposed && wslOpenRequest.current === openingAtStart && !connected) setWslOpening((current) => current ?? { path: projectCwd, busy: false, error: "Reconnect WSL to access this project. Windows execution will not be used." });
     }).catch((error) => {
+      if (wslStatusFor(location.distribution) === statusBefore)
+        setWslStatus(location.distribution, { state: "error", error: String(error) });
       if (!disposed && wslOpenRequest.current === openingAtStart) setWslOpening((current) => current ?? { path: projectCwd, busy: false, error: String(error) });
     });
     return () => { disposed = true; };
@@ -864,6 +922,15 @@ export default function App({
     useState<EditorNavigationTarget | null>(null);
   const editorNavigationToken = useRef(0);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
+  /** Workspace navigation (session/file/diff/terminal opens) dismisses the
+   * overlay surfaces so the target is never activated hidden behind them. */
+  const dismissOverlays = useCallback(() => {
+    setInboxViewOpen(false);
+    setSearchViewOpen(false);
+    setSettingsOpen(false);
+    setNotesViewOpen(false);
+    setFilePickerOpen(false);
+  }, []);
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(
     () => new Set(windowTransfer?.dirtyFileIds ?? []),
   );
@@ -912,10 +979,31 @@ export default function App({
   const projectCwdRef = useRef(projectCwd);
   useEffect(() => {
     const unlisten = listen<string>("wsl:disconnected", (event) => {
-      const path = projectCwdRef.current;
-      invalidateWslDiscovery(`//wsl.localhost/${event.payload}/`);
-      if (wslLocation(path)?.distribution.toLowerCase() === event.payload.toLowerCase())
-        setWslOpening((current) => current?.busy ? current : { path, busy: false, error: "WSL connection interrupted. Reconnect, then inspect any in-flight action before retrying it." });
+      const distribution = event.payload;
+      invalidateWslDiscovery(`//wsl.localhost/${distribution}/`);
+      // The emit fires for any failed request on the bridge's owner — a
+      // request holding a stale bridge can report after a fresh bridge
+      // already reconnected. Confirm before flagging the distro down.
+      void invoke<boolean>("wsl_connected", { distribution })
+        .then((alive) => {
+          // A connect in flight reports its own failure; don't pre-empt it.
+          if (alive || wslStatusFor(distribution).state === "connecting")
+            return;
+          setWslStatus(distribution, {
+            state: "disconnected",
+            error: "WSL connection interrupted",
+          });
+          const path = projectCwdRef.current;
+          if (wslLocation(path)?.distribution.toLowerCase() === distribution.toLowerCase())
+            setWslOpening((current) => current?.busy ? current : { path, busy: false, error: "WSL connection interrupted. Reconnect, then inspect any in-flight action before retrying it." });
+        })
+        .catch(() => {
+          if (wslStatusFor(distribution).state === "connecting") return;
+          setWslStatus(distribution, {
+            state: "disconnected",
+            error: "WSL connection interrupted",
+          });
+        });
     });
     return () => { void unlisten.then((stop) => stop()); };
   }, []);
@@ -924,6 +1012,7 @@ export default function App({
   searchViewOpenRef.current = searchViewOpen;
   const inboxViewOpenRef = useRef(inboxViewOpen);
   inboxViewOpenRef.current = inboxViewOpen;
+  const activeRef = useRef<Session | undefined>(undefined);
   const notesViewOpenRef = useRef(notesViewOpen);
   notesViewOpenRef.current = notesViewOpen;
   const settingsOpenRef = useRef(settingsOpen);
@@ -954,7 +1043,7 @@ export default function App({
     readProjectReturnMemory();
   }, [activeTabId, tabs, sessions, readProjectReturnMemory]);
 
-  const tabVisitRef = useRef(emptyTabVisitHistory(activeTabId));
+  const tabVisitRef = useRef(emptyTabVisitHistory({ tab: activeTabId }));
   const tabVisitFromHistoryRef = useRef(false);
   const [tabVisitNav, setTabVisitNav] = useState({
     canBack: false,
@@ -1166,6 +1255,7 @@ export default function App({
     sessions.find(
       (session) => activeTab && leafIds(activeTab.layout).includes(session.id),
     );
+  activeRef.current = active;
   const sessionDefaults = active ?? sessions[0];
   // Saved commands resolve their owning project at open: explicit id → rail
   // path → the active task's project → the current folder's project.
@@ -1732,16 +1822,92 @@ export default function App({
     );
   }, []);
 
+  /**
+   * What the user currently sees: the topmost overlay, otherwise the active
+   * tab and its focused leaf. Overlay priority matches `onRailBack`.
+   */
+  const navLocation = useMemo<VisitLocation>(() => {
+    if (settingsOpen) return { view: "settings" };
+    if (searchViewOpen) return { view: "search" };
+    if (inboxViewOpen) return { view: "inbox" };
+    if (notesViewOpen) return { view: "notes" };
+    return {
+      tab: activeTabId,
+      leaf: activeTab?.focusedId,
+      diff: !!activeTab?.diffFocused,
+    };
+  }, [
+    settingsOpen,
+    searchViewOpen,
+    inboxViewOpen,
+    notesViewOpen,
+    activeTabId,
+    activeTab?.focusedId,
+    activeTab?.diffFocused,
+  ]);
+  const navLocationRef = useRef(navLocation);
+  navLocationRef.current = navLocation;
+
   useEffect(() => {
     const openIds = new Set(tabs.map((tab) => tab.id));
-    let next = pruneTabVisitHistory(tabVisitRef.current, openIds, activeTabId);
+    let next = pruneTabVisitHistory(tabVisitRef.current, openIds, navLocation);
     if (tabVisitFromHistoryRef.current) {
       tabVisitFromHistoryRef.current = false;
-    } else if (next.current !== activeTabId) {
-      next = recordTabVisit(next, activeTabId);
+    } else if (!sameVisitLocation(next.current, navLocation)) {
+      next = recordTabVisit(next, navLocation);
     }
-    commitTabVisit(pruneTabVisitHistory(next, openIds, activeTabId));
-  }, [activeTabId, commitTabVisit, tabs]);
+    commitTabVisit(pruneTabVisitHistory(next, openIds, navLocation));
+  }, [navLocation, commitTabVisit, tabs]);
+
+  /**
+   * Warm the focused session's provider ahead of a prompt so the next send
+   * does not pay spawn + resume on the keystroke. Events use the same sink as
+   * a real turn so `session.providerBound` still persists resume state; the
+   * adapter no-ops when a live child already serves the session.
+   */
+  const prewarmSession = useCallback(
+    (sessionId: string) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId);
+      if (
+        !session ||
+        session.busy ||
+        // Only bound (resumable) sessions warm: spawning a fresh provider
+        // session on a mere pane focus creates phantom provider threads.
+        !session.providerSessionId ||
+        !isLiveHarness(session.harness) ||
+        removingSessionIds.current.has(sessionId)
+      ) {
+        return;
+      }
+      const cwd = sessionWorkCwd(session);
+      if (!cwd || cwd === "~") return;
+      void prewarmHarness({
+        harness: session.harness,
+        sessionId,
+        cwd,
+        model: session.model,
+        modelSettings: session.modelSettings,
+        runtimeMode: session.runtimeMode,
+        onEvent: (event) => {
+          if (removingSessionIds.current.has(sessionId)) return;
+          nudgeOpenEditors(event, cwd);
+          trackSessionEdits(sessionId, cwd, event);
+          enqueueHarnessEvent(sessionId, event);
+        },
+      }).catch(() => undefined);
+    },
+    [enqueueHarnessEvent],
+  );
+
+  // A bound-but-cold provider session is the expensive path: spawn, handshake,
+  // resume. Start it shortly after the session becomes visible so the first
+  // prompt lands on a warm host.
+  const prewarmTargetId = active?.providerSessionId ? active.id : undefined;
+  useEffect(() => {
+    if (!prewarmTargetId || active?.busy) return;
+    const timer = setTimeout(() => prewarmSession(prewarmTargetId), 250);
+    return () => clearTimeout(timer);
+  }, [prewarmTargetId, active?.busy, prewarmSession]);
 
   /** `cwd` scopes group inheritance: a tab from another project starts alone. */
   const appendTab = useCallback(
@@ -2059,6 +2225,7 @@ export default function App({
 
   const onOpenTerminal = useCallback(
     (cwd: string, asWorkspaceTab = false, occupySessionId?: string) => {
+      dismissOverlays();
       const workdir = cwd || active?.cwd || projectCwd;
       if (openProjectTerminal(workdir)) return;
 
@@ -2097,7 +2264,7 @@ export default function App({
       );
       setComposerFocused(false);
     },
-    [active?.cwd, activeTab, appendTab, openProjectTerminal, projectCwd],
+    [active?.cwd, activeTab, appendTab, dismissOverlays, openProjectTerminal, projectCwd],
   );
 
   const onNewTerminal = useCallback(() => {
@@ -2813,33 +2980,62 @@ export default function App({
     }
   }, [activateTab, activeTabId, deckProjectTabs]);
 
+  /** Restore a recorded location: the right overlay, or tab + focused leaf. */
+  const applyVisitLocation = useCallback(
+    (location: VisitLocation) => {
+      const overlay = "view" in location ? location.view : undefined;
+      setInboxViewOpen(overlay === "inbox");
+      setSearchViewOpen(overlay === "search");
+      setSettingsOpen(overlay === "settings");
+      setNotesViewOpen(overlay === "notes");
+      if (!("tab" in location)) return;
+      const tab = tabsRef.current.find((entry) => entry.id === location.tab);
+      if (!tab) return;
+      // Leaf first: activateTab clears diffFocused when it moves focus, so
+      // the recorded diff flag is applied last.
+      activateTab(tab.id, location.leaf);
+      if (location.diff !== undefined && !!tab.diffFocused !== location.diff) {
+        setTabs((prev) =>
+          prev.map((entry) =>
+            entry.id === tab.id
+              ? { ...entry, diffFocused: !!location.diff }
+              : entry,
+          ),
+        );
+      }
+    },
+    [activateTab],
+  );
+
   const onVisitBack = useCallback(() => {
     const openIds = new Set(tabsRef.current.map((tab) => tab.id));
     const pruned = pruneTabVisitHistory(
       tabVisitRef.current,
       openIds,
-      activeTabIdRef.current,
+      navLocationRef.current,
     );
     const next = tabVisitBack(pruned);
-    if (!next || !openIds.has(next.current)) return;
+    if (!next || ("tab" in next.current && !openIds.has(next.current.tab)))
+      return;
     tabVisitFromHistoryRef.current = true;
     commitTabVisit(next);
-    activateTab(next.current);
-  }, [activateTab, commitTabVisit]);
+    applyVisitLocation(next.current);
+  }, [applyVisitLocation, commitTabVisit]);
 
   const onVisitForward = useCallback(() => {
     const openIds = new Set(tabsRef.current.map((tab) => tab.id));
     const pruned = pruneTabVisitHistory(
       tabVisitRef.current,
       openIds,
-      activeTabIdRef.current,
+      navLocationRef.current,
     );
     const next = tabVisitForward(pruned);
-    if (!next || !openIds.has(next.current)) return;
+    if (!next || ("tab" in next.current && !openIds.has(next.current.tab)))
+      return;
     tabVisitFromHistoryRef.current = true;
     commitTabVisit(next);
-    activateTab(next.current);
-  }, [activateTab, commitTabVisit]);
+    applyVisitLocation(next.current);
+  }, [applyVisitLocation, commitTabVisit]);
 
   const onActivate = useCallback(
     (slot: number) => {
@@ -2866,11 +3062,15 @@ export default function App({
             : t,
         ),
       );
-      setComposerFocused(
-        sessionsRef.current.some((session) => session.id === paneId),
+      const isSessionPane = sessionsRef.current.some(
+        (session) => session.id === paneId,
       );
+      setComposerFocused(isSessionPane);
+      // Clicking into a pane is strong intent to send — warm a bound but
+      // cold provider (prewarmSession itself gates on providerSessionId).
+      if (isSessionPane) prewarmSession(paneId);
     },
-    [activeTabId, inboxAskPortal],
+    [activeTabId, inboxAskPortal, prewarmSession],
   );
 
   const onOpenDiff = useCallback(
@@ -2879,6 +3079,7 @@ export default function App({
       session?: { sessionId: string; cwd: string },
       changeKind?: GitFileDiffKind,
     ) => {
+      dismissOverlays();
       void (async () => {
         const diffCwd = session?.cwd ?? gitCwdRef.current;
         const resolved = path
@@ -2915,7 +3116,7 @@ export default function App({
         setComposerFocused(false);
       })();
     },
-    [activeTabId],
+    [activeTabId, dismissOverlays],
   );
 
   const onOpenWorkingTreeDiff = useCallback(
@@ -2924,14 +3125,16 @@ export default function App({
   );
 
   const onOpenDelivery = useCallback((cwd: string, delivery: DeliveryTabSource) => {
+    dismissOverlays();
     setTabs(previous => previous.map(tab => tab.id === activeTabId
       ? openEditorTab(tab, { id: crypto.randomUUID(), path: delivery.kind === "pr" ? "Pull requests" : "CI", cwd, delivery })
       : tab));
     setComposerFocused(false);
-  }, [activeTabId]);
+  }, [activeTabId, dismissOverlays]);
 
   /** Stack every working-tree change in one review, whatever the diff-view setting. */
   const onOpenAllChanges = useCallback(() => {
+    dismissOverlays();
     setTabs((prev) =>
       prev.map((tab) =>
         tab.id === activeTabId
@@ -2940,10 +3143,11 @@ export default function App({
       ),
     );
     setComposerFocused(false);
-  }, [activeTabId]);
+  }, [activeTabId, dismissOverlays]);
 
   const onOpenCommit = useCallback(
     (commit: GitHistoryCommit) => {
+      dismissOverlays();
       setTabs((prev) =>
         prev.map((tab) =>
           tab.id === activeTabId
@@ -2957,7 +3161,7 @@ export default function App({
       );
       setComposerFocused(false);
     },
-    [activeTabId],
+    [activeTabId, dismissOverlays],
   );
 
   const onShowSourceControl = useCallback(() => {
@@ -3238,6 +3442,9 @@ export default function App({
 
   const onSelectHistorySession = useCallback(
     async (sessionId: string) => {
+      // Selecting a conversation is a workspace navigation: overlays must not
+      // stay on top of it. `onOpenInboxSession` re-opens Inbox right after.
+      dismissOverlays();
       if (focusOpenSession(sessionId)) return;
       const session = await ensureOpenSession(sessionId);
       if (!session || session.inboxAsk) return;
@@ -3249,6 +3456,7 @@ export default function App({
     },
     [
       appendTab,
+      dismissOverlays,
       ensureOpenSession,
       focusOpenSession,
       replaceBlankPaneWithSession,
@@ -3260,17 +3468,13 @@ export default function App({
       const session = await ensureOpenSession(sessionId);
       if (!session)
         throw new Error("This conversation is no longer available.");
-      setSearchViewOpen(false);
-      setInboxViewOpen(false);
-      setNotesViewOpen(false);
-      setSettingsOpen(false);
-      setFilePickerOpen(false);
+      dismissOverlays();
       setSidebarTab("sessions");
       setProjectCwd(session.cwd);
       setRecents(rememberProject(session.cwd));
       await onSelectHistorySession(sessionId);
     },
-    [ensureOpenSession, onSelectHistorySession],
+    [dismissOverlays, ensureOpenSession, onSelectHistorySession],
   );
 
   const ensureReminderSessionsSaved = useCallback(
@@ -4056,6 +4260,7 @@ export default function App({
 
   const onOpenFile = useCallback<OpenFileFn>(
     (path, navigation, options) => {
+      dismissOverlays();
       void (async () => {
         const resolved = await resolveFileOpenRequest(
           gitCwdRef.current,
@@ -4082,7 +4287,7 @@ export default function App({
         setComposerFocused(false);
       })();
     },
-    [activeTabId],
+    [activeTabId, dismissOverlays],
   );
 
   const onOpenPlan = useCallback(
@@ -4662,6 +4867,7 @@ export default function App({
         const planEventKey = `turn:${gen}`;
         let nativePlanSeen = false;
         let providerFailureSeen = false;
+        const turnClock = beginTurnTiming(sessionId, current.harness);
         const routePlanEvent = (event: HarnessEvent): HarnessEvent | null => {
           if (event.type === "session.error") providerFailureSeen = true;
           if (intent !== "plan") return event;
@@ -4675,21 +4881,33 @@ export default function App({
           return event;
         };
 
-        if (!current.inboxAsk) {
-          await beginSessionTurn(sessionId, workCwd).catch(() => undefined);
+        // The checkpoint only has to be durable before the turn can edit
+        // files, not before the prompt is prepared — run it alongside
+        // attachment/prompt prep instead of serially ahead of it.
+        const checkpoint = current.inboxAsk
+          ? Promise.resolve()
+          : beginSessionTurn(sessionId, workCwd).catch(() => undefined);
+        if (turnGen.current.get(sessionId) !== gen) {
+          await checkpoint;
+          endTurnTiming(sessionId, "turn cancelled", turnClock);
+          return;
         }
-        if (turnGen.current.get(sessionId) !== gen) return;
         let buildSucceeded = false;
         try {
-          const prepared = await prepareAttachments(attachments, workCwd);
-          const prompt =
+          // Attachment transfer and prompt preparation are independent of
+          // each other (and of the checkpoint) — run them together.
+          const [prepared, prompt] = await Promise.all([
+            prepareAttachments(attachments, workCwd),
             intent === "build" && approvedPlan
-              ? buildPlanPrompt(approvedPlan.text)
-              : await preparePrompt(harnessText, {
+              ? Promise.resolve(buildPlanPrompt(approvedPlan.text))
+              : preparePrompt(harnessText, {
                   harness: current.harness,
                   sessionId,
                   cwd: workCwd,
-                });
+                }),
+          ]);
+          await checkpoint;
+          markTurn(sessionId, "checkpoint + prompt ready");
           const turnPrompt =
             intent === "plan" && !rawCommand ? planTurnPrompt(prompt) : prompt;
           const earlier = queuedHandoff
@@ -4701,6 +4919,7 @@ export default function App({
             if (turnGen.current.get(sessionId) !== gen || removingSessionIds.current.has(sessionId)) throw new Error("Repair was cancelled before delivery.");
             updateRepair(repair.id, "running", "Request submitted to the selected agent. Completion does not mean CI passes or comments are resolved.");
           }
+          markTurn(sessionId, "sendHarnessTurn begin");
           await sendHarnessTurn({
             harness: current.harness,
             sessionId,
@@ -4723,6 +4942,7 @@ export default function App({
             attachments: prepared,
             onEvent: (event) => {
               if (turnGen.current.get(sessionId) !== gen) return;
+              markFirstTurnEvent(sessionId);
               if (
                 wrap &&
                 (event.type === "session.started" ||
@@ -4766,6 +4986,11 @@ export default function App({
           }
           providerFailureSeen = true;
         } finally {
+          endTurnTiming(
+            sessionId,
+            providerFailureSeen ? "turn failed" : "turn done",
+            turnClock,
+          );
           if (repair && turnGen.current.get(sessionId) !== gen) updateRepair(repair.id, "uncertain", "Turn interrupted. Inspect the conversation before allowing another request.");
           if (turnGen.current.get(sessionId) !== gen) return;
           if (repair && buildSucceeded) updateRepair(repair.id, providerFailureSeen ? "uncertain" : "completed", providerFailureSeen ? "Provider reported a failure; inspect the conversation before retry." : "Agent turn completed. Verify the changes and provider results separately.");
@@ -4831,9 +5056,65 @@ export default function App({
     return () => window.removeEventListener(OPEN_REPAIR, open);
   }, [onSelectHistorySession]);
 
+  // "Open" on a removal blocker row: focus the bound session or terminal.
+  useEffect(() => {
+    const open = (event: Event) => {
+      const process = (event as CustomEvent<BoundProcess>).detail;
+      if (!process?.id) return;
+      if (process.kind === "terminal") {
+        for (const tab of tabsRef.current) {
+          for (const pane of tab.terminalPanes ?? []) {
+            if (!pane.files.some((file) => file.id === process.id)) continue;
+            setTabs((current) =>
+              current.map((entry) =>
+                entry.id === tab.id
+                  ? {
+                      ...entry,
+                      terminalPanes: (entry.terminalPanes ?? []).map(
+                        (item) =>
+                          item.id === pane.id
+                            ? { ...item, activeFileId: process.id }
+                            : item,
+                      ),
+                    }
+                  : entry,
+              ),
+            );
+            activateTab(tab.id, pane.id);
+            return;
+          }
+        }
+        const dock = projectTerminalsRef.current.find((entry) =>
+          entry.pane.files.some((file) => file.id === process.id),
+        );
+        if (dock) {
+          setProjectCwd(dock.projectPath);
+          setProjectTerminals((prev) =>
+            mapProjectTerminal(prev, dock.projectPath, (entry) =>
+              withDockOpen(selectDockTerminal(entry, process.id), true),
+            ),
+          );
+          focusProjectTerminal();
+        }
+        return;
+      }
+      setInboxViewOpen(false);
+      void onSelectHistorySession(process.id);
+    };
+    window.addEventListener(OPEN_BOUND_PROCESS, open);
+    return () => window.removeEventListener(OPEN_BOUND_PROCESS, open);
+  }, [activateTab, focusProjectTerminal, onSelectHistorySession]);
+
   // The task just created — the rail's "current" task until a task session
   // takes over. Never launches work on its own.
   const [focusTaskId, setFocusTaskId] = useState<string>();
+  // The session that was focused when the task was armed — the highlight
+  // must survive being created while another task's session is open.
+  const focusTaskSessionRef = useRef<string | undefined>(undefined);
+  const armTaskFocus = useCallback((taskId: string) => {
+    focusTaskSessionRef.current = activeRef.current?.id;
+    setFocusTaskId(taskId);
+  }, []);
   // The just-created highlight lifts once another task's session becomes
   // the rail's current task, or the task is archived/deleted. Focusing an
   // unrelated non-task session keeps it — it still marks your current task.
@@ -4849,8 +5130,11 @@ export default function App({
     const activeTask = active?.id
       ? taskForSession(active.id, sessionWorkCwd(active))
       : undefined;
-    if (!task || (activeTask && activeTask.task.id !== focusTaskId))
+    const navigated = active?.id !== focusTaskSessionRef.current;
+    if (!task || (navigated && activeTask && activeTask.task.id !== focusTaskId)) {
+      focusTaskSessionRef.current = undefined;
       setFocusTaskId(undefined);
+    }
   }, [focusTaskId, active?.id, taskStoreSnapshot]);
   const [taskSheet, setTaskSheet] = useState<{
     projectId: string;
@@ -5160,6 +5444,7 @@ export default function App({
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       const child = task?.children.find((entry) => entry.id === childId);
       if (!task || !child) return;
+      armTaskFocus(taskId);
       // The task's single session wins; a legacy child may own its own.
       const sessionId = task.sessionIds?.[0] ?? child.sessionIds[0];
       // Only re-attribute the active child when it actually owns the
@@ -5175,7 +5460,7 @@ export default function App({
       // the task session when it becomes the host.
       void launchTaskChildren(taskId, [childId]);
     },
-    [launchTaskChildren, onSelectHistorySession, taskSessionAlive],
+    [armTaskFocus, launchTaskChildren, onSelectHistorySession, taskSessionAlive],
   );
 
   /** Opens a task's last active child, or its first session-owning child. */
@@ -5183,6 +5468,7 @@ export default function App({
     (taskId: string) => {
       const task = loadTaskWorkspaces().find((entry) => entry.id === taskId);
       if (!task) return;
+      armTaskFocus(taskId);
       // The task's own session wins over per-child lookups — but a dead id
       // (deleted conversation) must not dead-end the task: prune it and
       // fall through to relaunch.
@@ -5211,7 +5497,7 @@ export default function App({
         task.children[0];
       if (child) void onOpenTaskChild(taskId, child.id);
     },
-    [launchTaskChildren, onOpenTaskChild, onSelectHistorySession, taskSessionAlive],
+    [armTaskFocus, launchTaskChildren, onOpenTaskChild, onSelectHistorySession, taskSessionAlive],
   );
 
   /** Resolves the owning project for a send-to-task path without inventing
@@ -6244,21 +6530,14 @@ export default function App({
 
   const onOpenApprovalSession = useCallback(
     (sessionId: string) => {
+      // Notification clicks and approval toasts can fire while an overlay is
+      // open — always reveal the session.
+      dismissOverlays();
       if (!focusOpenSession(sessionId)) {
         void onSelectHistorySession(sessionId);
       }
     },
-    [focusOpenSession, onSelectHistorySession],
-  );
-
-  const onSelectLiveAgent = useCallback(
-    (sessionId: string) => {
-      setSearchViewOpen(false);
-      setInboxViewOpen(false);
-      setNotesViewOpen(false);
-      onOpenApprovalSession(sessionId);
-    },
-    [onOpenApprovalSession],
+    [dismissOverlays, focusOpenSession, onSelectHistorySession],
   );
 
   const nextTitleTabs: TitleTab[] = deckProjectTabs.map((tab) =>
@@ -6374,35 +6653,26 @@ export default function App({
   }, []);
 
   const onOpenSearch = useCallback(() => {
-    setFilePickerOpen(false);
-    setSettingsOpen(false);
-    setInboxViewOpen(false);
-    setNotesViewOpen(false);
+    dismissOverlays();
     setSearchViewOpen(true);
     setSearchViewFocusToken((token) => token + 1);
-  }, []);
+  }, [dismissOverlays]);
 
   const onLeaveSearch = useCallback(() => {
     setSearchViewOpen(false);
   }, []);
 
   const onOpenInbox = useCallback(() => {
-    setFilePickerOpen(false);
-    setSettingsOpen(false);
-    setSearchViewOpen(false);
-    setNotesViewOpen(false);
+    dismissOverlays();
     setInboxTarget(null);
     setInboxViewOpen(true);
-  }, []);
+  }, [dismissOverlays]);
 
   const onOpenLinkedWorkItem = useCallback((item: LinkedWorkItem) => {
-    setFilePickerOpen(false);
-    setSettingsOpen(false);
-    setSearchViewOpen(false);
-    setNotesViewOpen(false);
+    dismissOverlays();
     setInboxTarget({ ...item });
     setInboxViewOpen(true);
-  }, []);
+  }, [dismissOverlays]);
 
   useEffect(() => {
     const open = (event: Event) => onOpenLinkedWorkItem((event as CustomEvent<LinkedWorkItem>).detail);
@@ -6457,12 +6727,9 @@ export default function App({
 
   const onOpenNotes = useCallback(() => {
     if (!loadNotesEnabled()) return;
-    setFilePickerOpen(false);
-    setSettingsOpen(false);
-    setSearchViewOpen(false);
-    setInboxViewOpen(false);
+    dismissOverlays();
     setNotesViewOpen(true);
-  }, []);
+  }, [dismissOverlays]);
 
   const onLeaveNotes = useCallback(() => {
     setNotesViewOpen(false);
@@ -6470,10 +6737,7 @@ export default function App({
 
   const openSettings = useCallback(
     (section?: SettingsSectionId, anchor?: SettingsAnchor) => {
-      setFilePickerOpen(false);
-      setSearchViewOpen(false);
-      setInboxViewOpen(false);
-      setNotesViewOpen(false);
+      dismissOverlays();
       if (section) {
         setSettingsSection(section);
         saveSettingsSection(section);
@@ -6481,7 +6745,7 @@ export default function App({
       setSettingsAnchor(anchor ?? null);
       setSettingsOpen(true);
     },
-    [],
+    [dismissOverlays],
   );
 
   const onOpenSettings = useCallback(() => openSettings(), [openSettings]);
@@ -6649,10 +6913,10 @@ export default function App({
       try {
         switch (action.kind) {
           case "open-session":
-            onSelectLiveAgent(action.sessionId);
+            onOpenApprovalSession(action.sessionId);
             return;
           case "open-changes":
-            onSelectLiveAgent(action.sessionId);
+            onOpenApprovalSession(action.sessionId);
             setSidebarTab("changes");
             return;
           case "open-item":
@@ -6822,7 +7086,7 @@ export default function App({
       }
     },
     [
-      onSelectLiveAgent,
+      onOpenApprovalSession,
       onOpenLinkedWorkItem,
       onStartItemToTask,
       onOpenInboxDelivery,
@@ -7065,37 +7329,28 @@ export default function App({
 
   const onOpenArchivedSession = useCallback(
     (sessionId: string) => {
-      setSettingsOpen(false);
       void onSelectHistorySession(sessionId);
     },
     [onSelectHistorySession],
   );
 
   const onRailBack = useCallback(() => {
-    if (settingsOpen) {
-      setSettingsOpen(false);
-      return;
-    }
-    if (searchViewOpen) {
-      setSearchViewOpen(false);
-      return;
-    }
-    if (inboxViewOpen) {
-      setInboxViewOpen(false);
-      return;
-    }
-    if (notesViewOpen) {
-      setNotesViewOpen(false);
+    // Overlays are stack entries, so a recorded back step handles them; this
+    // only covers an overlay that somehow never made it onto the stack.
+    if (
+      !canTabVisitBack(tabVisitRef.current) &&
+      (settingsOpenRef.current ||
+        searchViewOpenRef.current ||
+        inboxViewOpenRef.current ||
+        notesViewOpenRef.current)
+    ) {
+      dismissOverlays();
       return;
     }
     onVisitBack();
-  }, [onVisitBack, searchViewOpen, settingsOpen, inboxViewOpen, notesViewOpen]);
+  }, [dismissOverlays, onVisitBack]);
 
   const onRailForward = useCallback(() => {
-    setSearchViewOpen(false);
-    setSettingsOpen(false);
-    setInboxViewOpen(false);
-    setNotesViewOpen(false);
     onVisitForward();
   }, [onVisitForward]);
 
@@ -7620,7 +7875,7 @@ export default function App({
           session.busy && session.cwd ? [session.cwd] : [],
         )}
         liveAgents={liveAgents}
-        onSelectAgent={onSelectLiveAgent}
+        onSelectAgent={onOpenApprovalSession}
         onSelectProject={onSelectProject}
         onOpenProject={pickProject}
         onNewTask={onNewTask}
@@ -7696,7 +7951,7 @@ export default function App({
           initialBrief={taskSheet.initialBrief}
           initialChildren={taskSheet.initialChildren}
           onCreated={(taskId) => {
-            setFocusTaskId(taskId);
+            armTaskFocus(taskId);
             setProjectRailOpen((open) => {
               if (open) return open;
               saveProjectRailOpen(true);
