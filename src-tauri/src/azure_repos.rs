@@ -1,5 +1,5 @@
-//! Read-only Azure Repos inspection through the shared app-host Azure connection.
-use crate::azure::{component, request, require_config, AzureConfig};
+//! Azure Repos inspection and pull-request creation through the shared app-host Azure connection.
+use crate::azure::{component, request, request_method, require_config, AzureConfig};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
@@ -536,6 +536,165 @@ pub async fn azure_pr_list(
     }).await.map_err(|_| "Azure PR lookup task failed")?
 }
 
+/// Normalize a user/agent-provided branch name into a `refs/heads/` target.
+fn pr_branch_name(value: &str) -> Result<String, String> {
+    let name = value.trim();
+    let name = name.strip_prefix("refs/heads/").unwrap_or(name);
+    if name.is_empty()
+        || name.len() > 250
+        || name.starts_with("refs/")
+        || name.chars().any(char::is_control)
+        || name.contains("..")
+        || name.contains("@{")
+        || name.starts_with('-')
+        || name.ends_with('/')
+        || name.ends_with(".lock")
+    {
+        return Err("Enter a valid branch name".into());
+    }
+    Ok(name.to_string())
+}
+
+fn write_denied(error: &str) -> String {
+    if error.contains("denied access") {
+        "Azure denied this PR write. Grant Code (Read & Write) to the token in Settings; other Azure features remain available.".into()
+    } else {
+        error.to_string()
+    }
+}
+
+/// Create a pull request in Azure Repos. A duplicate create returns the
+/// existing PR instead of failing, so retries never produce a second PR.
+#[tauri::command]
+pub async fn azure_pr_create(
+    app: AppHandle,
+    target: PrTarget,
+    source_branch: String,
+    target_branch: String,
+    title: String,
+    description: String,
+    draft: bool,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &target.site)?;
+        checked_account(&config, &target.account_id)?;
+        if !config.has_capability("Repos") {
+            return Err(
+                "The Azure connection has no Repos access. Reconnect with Code (Read & Write)."
+                    .into(),
+            );
+        }
+        let source = pr_branch_name(&source_branch)?;
+        let target_branch = pr_branch_name(&target_branch)?;
+        if source == target_branch {
+            return Err("Source and target branches are the same".into());
+        }
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > 500 {
+            return Err("Enter a pull request title".into());
+        }
+        let description: String = description.trim().chars().take(64_000).collect();
+        // Resolve names to stable IDs inside the explicitly chosen organization.
+        let repo = get(&config, &repository_path(&target.project, &target.repository)?, &[])
+            .map_err(|error| write_denied(&error))?;
+        let repository = text(&repo, "id")?;
+        let project = text(&repo["project"], "id")?;
+        let path = repository_path(project, repository)?;
+        let source_ref = format!("refs/heads/{source}");
+        let target_ref = format!("refs/heads/{target_branch}");
+        let created = request(
+            &config,
+            &format!("{path}/pullRequests"),
+            &[("api-version", "7.1".into())],
+            Some(json!({
+                "sourceRefName": source_ref,
+                "targetRefName": target_ref,
+                "title": title,
+                "description": description,
+                "isDraft": draft,
+            })),
+        );
+        let (pr, existing) = match created {
+            Ok(pr) => (pr, false),
+            Err(error) if error.contains("HTTP 409") => {
+                // Azure allows one active PR per source branch; the conflict may
+                // point at another target — look it up by source only and link it.
+                let found = get(&config, &format!("{path}/pullRequests"), &[
+                    ("searchCriteria.sourceRefName", source_ref),
+                    ("searchCriteria.status", "active".into()),
+                    ("$top", "1".into()),
+                ])?;
+                let pr = found["value"]
+                    .as_array()
+                    .and_then(|rows| rows.first().cloned())
+                    .ok_or(error)?;
+                (pr, true)
+            }
+            Err(error) => return Err(write_denied(&error)),
+        };
+        let number = pr["pullRequestId"]
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or("Azure returned an invalid PR number")?;
+        verify_pr(&pr, project, repository, number)?;
+        // Never report a result under a newly selected account after a reconnect.
+        checked_account(&require_config(&app, &target.site)?, &target.account_id)?;
+        Ok(json!({
+            "pr": summary(&pr)?,
+            "existing": existing,
+            "revision": revision(&pr)?,
+            "target": {"site":config.site,"accountId":config.account_id,"project":project,"repository":repository,"number":number},
+            "repositoryName": repo["name"].clone(),
+            "projectName": repo["project"]["name"].clone(),
+            "account": config.account,
+        }))
+    })
+    .await
+    .map_err(|_| "Azure PR creation task failed")?
+}
+
+/// Replace an Azure Repos pull request's description.
+#[tauri::command]
+pub async fn azure_pr_update(
+    app: AppHandle,
+    target: PrTarget,
+    description: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if target.number == 0 {
+            return Err("Choose a PR first".into());
+        }
+        let config = require_config(&app, &target.site)?;
+        checked_account(&config, &target.account_id)?;
+        let description: String = description.trim().chars().take(64_000).collect();
+        let repo = get(
+            &config,
+            &repository_path(&target.project, &target.repository)?,
+            &[],
+        )?;
+        let repository = text(&repo, "id")?;
+        let project = text(&repo["project"], "id")?;
+        let path = format!(
+            "{}/pullRequests/{}",
+            repository_path(project, repository)?,
+            target.number
+        );
+        let pr = request_method(
+            &config,
+            "PATCH",
+            &path,
+            &[("api-version", "7.1".into())],
+            Some(json!({"description": description})),
+        )
+        .map_err(|error| write_denied(&error))?;
+        verify_pr(&pr, project, repository, target.number)?;
+        checked_account(&require_config(&app, &target.site)?, &target.account_id)?;
+        Ok(json!({"pr": summary(&pr)?, "revision": revision(&pr)?}))
+    })
+    .await
+    .map_err(|_| "Azure PR update task failed")?
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PrSection {
@@ -920,5 +1079,38 @@ mod tests {
         assert!(last["nextSkip"].is_null());
         assert!(page(&json!({}), "value", 0, false).is_err());
         assert!(check_skip(10_001).is_err());
+    }
+
+    #[test]
+    fn pr_branch_names_normalize_and_reject_unsafe_input() {
+        assert_eq!(pr_branch_name("dev").unwrap(), "dev");
+        assert_eq!(
+            pr_branch_name(" refs/heads/feature/x ").unwrap(),
+            "feature/x"
+        );
+        for bad in [
+            "",
+            "  ",
+            "refs/heads/",
+            "refs/tags/v1",
+            "-rm",
+            "trail/",
+            "name.lock",
+            "a..b",
+            "at@{0}",
+            "bad\nname",
+        ] {
+            assert!(pr_branch_name(bad).is_err(), "{bad}");
+        }
+        assert!(pr_branch_name(&"x".repeat(251)).is_err());
+    }
+
+    #[test]
+    fn write_denied_explains_missing_scope_only() {
+        assert!(write_denied(
+            "The requested resource requires authentication or the user denied access"
+        )
+        .contains("Read & Write"));
+        assert_eq!(write_denied("boom"), "boom");
     }
 }

@@ -229,6 +229,7 @@ import {
 } from "./lib/paths";
 import { removeProjectData } from "./lib/projectData";
 import { TaskCreateSheet } from "./chrome/TaskCreateSheet";
+import { TaskPrSheet } from "./chrome/TaskPrSheet";
 import {
   addTaskChildren,
   composeTaskPrompt,
@@ -4580,6 +4581,23 @@ export default function App({
     if (task) setTaskSheet({ projectId: task.projectId, editingTaskId: taskId });
   }, []);
 
+  const [taskPrSheetTaskId, setTaskPrSheetTaskId] = useState<string | null>(
+    null,
+  );
+  const onCreateTaskPrs = useCallback(
+    (taskId: string) => setTaskPrSheetTaskId(taskId),
+    [],
+  );
+  useEffect(() => {
+    const listener = (event: Event) => {
+      const taskId = (event as CustomEvent<string>).detail;
+      if (typeof taskId === "string" && taskId) setTaskPrSheetTaskId(taskId);
+    };
+    window.addEventListener("monocode:open-task-prs", listener);
+    return () =>
+      window.removeEventListener("monocode:open-task-prs", listener);
+  }, []);
+
   /** True when a task-linked session can still be opened — open now, or
    * loadable (archived sessions restore). A deleted id is pruned off the
    * task so the next open relaunches instead of silently dead-ending. */
@@ -6703,6 +6721,7 @@ export default function App({
         onOpenTask={onOpenTask}
         focusTaskId={focusTaskId}
         onEditTask={onEditTask}
+        onCreateTaskPrs={onCreateTaskPrs}
         needsInputSessionIds={needsInputSessionIds}
         onRemoveProject={onRemoveProject}
         onNew={onNew}
@@ -6803,6 +6822,13 @@ export default function App({
           onClose={() => setCommandsSheet(null)}
         />
       ) : null}
+      {taskPrSheetTaskId && (
+        <TaskPrSheet
+          taskId={taskPrSheetTaskId}
+          sessions={sessions}
+          onClose={() => setTaskPrSheetTaskId(null)}
+        />
+      )}
       <div className="body-glass flex min-h-0 min-w-0 flex-1 flex-col">
         {wslOpening && (
           <div role={wslOpening.error ? "alert" : "status"} className="flex shrink-0 items-center gap-3 border-b border-content/10 px-4 py-2 text-[12px]">

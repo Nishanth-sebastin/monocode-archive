@@ -36,8 +36,9 @@ export async function generateCodexCommitMessage(cwd: string): Promise<string> {
 
 export async function generateCodexPrContent(
   cwd: string,
+  base?: string,
 ): Promise<(PrContent & { base: string; head: string }) | null> {
-  const range = await gitRangeContext(cwd);
+  const range = await gitRangeContext(cwd, base);
   let parsed: PrContent | null = null;
   try {
     const output = await runCodexTextPrompt({

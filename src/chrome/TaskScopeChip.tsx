@@ -396,6 +396,27 @@ export function TaskScopeChip({
               );
             })}
           </div>
+          <div className="border-t border-content/10 px-1.5 py-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                window.dispatchEvent(
+                  new CustomEvent("monocode:open-task-prs", {
+                    detail: task.id,
+                  }),
+                );
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+            >
+              <GitPullRequest
+                aria-hidden="true"
+                className="size-3.5 shrink-0 text-content/50"
+                strokeWidth={1.75}
+              />
+              Create pull requests…
+            </button>
+          </div>
         </Popover>
       ) : null}
     </div>
