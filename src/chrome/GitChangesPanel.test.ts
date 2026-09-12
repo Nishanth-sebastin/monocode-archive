@@ -591,6 +591,126 @@ it("collapses the child chips into a selector menu when they overflow", async ()
   }
 });
 
+it("applies an in-flight mutation to the repo it ran on after a child switch", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => rows.get(key) ?? null,
+    setItem: (key: string, value: string) => rows.set(key, value),
+  });
+  rows.set(
+    "monocode.taskWorkspaces.v1",
+    JSON.stringify([
+      {
+        id: "t1",
+        projectId: "p1",
+        name: "Ship it",
+        sessionIds: ["s1"],
+        createdAt: 1,
+        children: [
+          {
+            id: "c1",
+            repositoryId: "r1",
+            workingCopy: "/repo-a",
+            branch: "feat/a",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+          {
+            id: "c2",
+            repositoryId: "r2",
+            workingCopy: "/repo-b",
+            branch: "feat/b",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+        ],
+      },
+    ]),
+  );
+  const { invoke } = await import("@tauri-apps/api/core");
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  const stagedAll = new Set<string>();
+  let release: (() => void) | undefined;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_stage_file") {
+      const cwd = (args as { cwd: string }).cwd;
+      // Hold repo A's mutation open so the child switch lands mid-flight.
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      stagedAll.add(cwd);
+      return null;
+    }
+    if (command === "git_diff_index") {
+      const cwd = (args as { cwd: string }).cwd;
+      return {
+        branch: cwd === "/repo-b" ? "feat/b" : "feat/a",
+        ahead: 0,
+        behind: 0,
+        files: [
+          {
+            path: `${cwd}/only.ts`,
+            relative: cwd === "/repo-b" ? "b-only.ts" : "a-only.ts",
+            status: "modified",
+            staged: stagedAll.has(cwd),
+            unstaged: !stagedAll.has(cwd),
+            additions: 1,
+            deletions: 0,
+          },
+        ],
+      };
+    }
+    return original(command, args);
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const chip = (name: string) =>
+    [...host.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes(name),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-a",
+          sourceSessionId: "s1",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    const stageButton = () =>
+      host.querySelector('button[aria-label="Stage Changes"]');
+    const unstageButton = () =>
+      host.querySelector('button[aria-label="Unstage Changes"]');
+    // Start staging repo A, then switch to repo B before it resolves.
+    await act(async () => {
+      (stageButton() as HTMLButtonElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => chip("repo-b")!.click());
+    expect(host.querySelector("header")?.textContent).toContain("feat/b");
+    await act(async () => release?.());
+    // Repo B's displayed index is untouched by repo A's mutation.
+    expect(host.querySelector('button[title="b-only.ts"]')).not.toBeNull();
+    expect(stageButton()).not.toBeNull();
+    expect(unstageButton()).toBeNull();
+    // Repo A's own cache picked it up — switching back shows it staged.
+    await act(async () => chip("repo-a")!.click());
+    expect(host.querySelector('button[title="a-only.ts"]')).not.toBeNull();
+    expect(unstageButton()).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.mocked(invoke).mockImplementation(original);
+    vi.unstubAllGlobals();
+  }
+});
+
 it("routes GitHub rows externally and keeps an Azure CI override independent", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rows = new Map<string, string>();

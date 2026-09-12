@@ -22,10 +22,17 @@ import {
 import { AZURE_PR_ASSOCIATIONS_CHANGED } from "../lib/azureRepos";
 import { AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
 import {
+  diffStatsVersion,
   peekProjectDiffStats,
+  subscribeDiffStatsVersion,
   useProjectDiffStats,
 } from "../hooks/useProjectDiffStats";
-import { cachedBranchPr, useCachedBranchPr } from "../hooks/useBranchPr";
+import {
+  branchPrVersion,
+  cachedBranchPr,
+  subscribeBranchPrVersion,
+  useCachedBranchPr,
+} from "../hooks/useBranchPr";
 import { Popover } from "./Popover";
 import {
   Check,
@@ -106,7 +113,6 @@ function TaskChildRow({
   entry,
   current,
   needsInput,
-  expanded,
   stores,
   onOpen,
   onRetry,
@@ -115,8 +121,6 @@ function TaskChildRow({
   entry: TaskChild;
   current: boolean;
   needsInput: boolean;
-  /** Popover open — stats subscribe only while the row is visible. */
-  expanded: boolean;
   stores: DeliveryStores;
   onOpen?: () => void;
   onRetry?: () => void;
@@ -124,9 +128,10 @@ function TaskChildRow({
   const ready =
     entry.sessionIds.length > 0 || entry.launch.state === "ready";
   const failed = entry.launch.state === "failed";
+  // Rows only mount while the popover is open — stats subscribe on sight.
   const stats = useProjectDiffStats(
     entry.workingCopy ?? "",
-    expanded && !!entry.workingCopy,
+    !!entry.workingCopy,
   );
   const branch = stats?.branch ?? entry.branch;
   const githubPr = useCachedBranchPr(entry.workingCopy ?? "", branch);
@@ -264,6 +269,13 @@ export function TaskScopeChip({
     [deliveryTick],
   );
   const anchor = useRef<HTMLButtonElement>(null);
+  // Re-derive when a stats or PR cache publish lands — the peeks below never
+  // subscribe or fetch, so the ticks are what keep the dot honest.
+  const statsV = useSyncExternalStore(
+    subscribeDiffStatsVersion,
+    diffStatsVersion,
+  );
+  const prV = useSyncExternalStore(subscribeBranchPrVersion, branchPrVersion);
   // Task-level attention: a linked pipeline failed or PR needs the author —
   // derived from saved links and already-cached data only; the closed chip
   // never fetches.
@@ -277,7 +289,7 @@ export function TaskScopeChip({
             const delivery = childDelivery(
               scope.task,
               entry,
-              [branch],
+              [branch, entry.branch],
               cachedBranchPr(entry.workingCopy, branch),
               stores,
             );
@@ -285,7 +297,7 @@ export function TaskScopeChip({
           })
         : false,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [scope, stores, tasksRaw],
+    [scope, stores, tasksRaw, statsV, prV],
   );
   if (!scope) return null;
   const { task, child } = scope;
@@ -359,7 +371,6 @@ export function TaskScopeChip({
                   entry={entry}
                   current={current}
                   needsInput={!!needsInput}
-                  expanded={open}
                   stores={stores}
                   onOpen={
                     ready

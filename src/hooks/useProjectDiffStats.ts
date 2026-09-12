@@ -19,6 +19,22 @@ type Entry = {
 
 const entries = new Map<string, Entry>();
 
+/** Bumped on every publish so peek-based aggregates (task rail, chip dots)
+ * can re-derive without subscribing to a stats entry per child. */
+let version = 0;
+const versionListeners = new Set<() => void>();
+
+export function subscribeDiffStatsVersion(listener: () => void) {
+  versionListeners.add(listener);
+  return () => {
+    versionListeners.delete(listener);
+  };
+}
+
+export function diffStatsVersion(): number {
+  return version;
+}
+
 function entryFor(cwd: string): Entry {
   const existing = entries.get(pathKey(cwd));
   if (existing) return existing;
@@ -46,7 +62,9 @@ function publish(entry: Entry, stats: GitDiffStats | null) {
     return;
   }
   entry.stats = stats;
+  version += 1;
   for (const listener of entry.listeners) listener();
+  for (const listener of versionListeners) listener();
 }
 
 async function load(entry: Entry, force = false) {

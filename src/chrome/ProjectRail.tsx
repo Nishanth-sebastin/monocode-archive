@@ -61,10 +61,16 @@ import {
 import { useDragResize } from "../hooks/useDragResize";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import {
+  diffStatsVersion,
   peekProjectDiffStats,
+  subscribeDiffStatsVersion,
   useProjectDiffStats,
 } from "../hooks/useProjectDiffStats";
-import { cachedBranchPr } from "../hooks/useBranchPr";
+import {
+  branchPrVersion,
+  cachedBranchPr,
+  subscribeBranchPrVersion,
+} from "../hooks/useBranchPr";
 import { useSortable } from "../hooks/useSortable";
 import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
 import {
@@ -1799,7 +1805,14 @@ function TaskRailRow({
     })
     .join(" · ");
   // Delivery per child, from saved links and already-cached data only —
-  // the rail must stay cheap even with several tasks expanded.
+  // the rail must stay cheap even with several tasks expanded. The version
+  // ticks re-derive when a stats or PR cache publish lands — the peeks
+  // themselves never subscribe or fetch.
+  const statsV = useSyncExternalStore(
+    subscribeDiffStatsVersion,
+    diffStatsVersion,
+  );
+  const prV = useSyncExternalStore(subscribeBranchPrVersion, branchPrVersion);
   const deliveryMap = useMemo(() => {
     const map = new Map<string, TaskChildDelivery>();
     for (const entry of task.children) {
@@ -1811,14 +1824,16 @@ function TaskRailRow({
         childDelivery(
           task,
           entry,
-          [branch],
+          [branch, entry.branch],
           cachedBranchPr(entry.workingCopy, branch),
           stores,
         ),
       );
     }
     return map;
-  }, [task, stores]);
+    // statsV/prV only tick the caches — the peeks re-read inside.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task, stores, statsV, prV]);
   const failing = task.children.some(
     (entry) =>
       entry.launch.state === "failed" ||
@@ -1830,7 +1845,8 @@ function TaskRailRow({
     busySessionIds,
     needsInputIds,
     delivery: deliveryMap,
-  }).filter((segment) => !segment.endsWith("working"));
+    dropWorking: true,
+  });
   const statusText = segments.join(" · ");
   const title = [
     ticket,

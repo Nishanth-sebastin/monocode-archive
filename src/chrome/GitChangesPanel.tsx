@@ -19,6 +19,7 @@ import {
   deliveryStores,
   EMPTY_DELIVERY,
   type DeliveryStores,
+  type TaskChildDelivery,
 } from "../lib/taskDelivery";
 import { projectsSnapshot, repositoryDisplayName, subscribeProjects } from "../lib/projects";
 import { pathKey, projectName } from "../lib/paths";
@@ -85,6 +86,7 @@ import {
   subscribeGitChanged,
   type GitChangedFile,
   type GitDiffIndex,
+  type GitDiffStats,
   type GitFileDiffKind,
   type GitHistoryCommit,
   type GitPr,
@@ -122,6 +124,7 @@ let changesView: ChangesView = loadChangesView();
 /** Folders the user collapsed in tree view, keyed `<kind>:<dir>`. */
 const collapsedDirs = new Set<string>();
 const indexByCwd = new Map<string, GitDiffIndex>();
+const warmInFlight = new Set<string>();
 
 const EMPTY_FILES: GitChangedFile[] = [];
 
@@ -191,16 +194,33 @@ export function GitChangesPanel({
 
   // Warm every prepared child's index once so switching chips swaps to
   // cached content instead of flashing an empty list. Writes go to the
-  // shared cache only — the live hook picks them up on selection.
+  // shared cache only — the live hook picks them up on selection. A git
+  // change under a child drops its warm entry so a stale index is never
+  // served, and a copy that became the displayed one mid-fetch keeps the
+  // live hook's fresher result.
+  const viewCwdRef = useRef(viewCwd);
+  viewCwdRef.current = viewCwd;
   useEffect(() => {
     if (!enabled || !task) return;
+    const unsubs: (() => void)[] = [];
     for (const entry of task.children) {
       const copy = entry.workingCopy;
       if (!copy || copy === "~") continue;
-      if (indexByCwd.has(copy) || pathKey(copy) === pathKey(viewCwd)) continue;
+      const key = pathKey(copy);
+      unsubs.push(
+        subscribeGitChanged(() => indexByCwd.delete(key), copy),
+      );
+      if (
+        indexByCwd.has(key) ||
+        warmInFlight.has(key) ||
+        key === pathKey(viewCwd)
+      )
+        continue;
+      warmInFlight.add(key);
       void gitDiffIndex(copy)
         .then((next) => {
-          indexByCwd.set(copy, next);
+          if (key === pathKey(viewCwdRef.current)) return;
+          indexByCwd.set(key, next);
           applyProjectDiffStats(copy, {
             files: next.files.length,
             additions: next.additions,
@@ -210,8 +230,12 @@ export function GitChangesPanel({
         })
         .catch(() => {
           /* The live hook reports its own errors on selection. */
-        });
+        })
+        .finally(() => warmInFlight.delete(key));
     }
+    return () => {
+      for (const unsub of unsubs) unsub();
+    };
   }, [enabled, task, viewCwd]);
 
   const { index, patch } = useDiffIndex(viewCwd, enabled);
@@ -230,8 +254,18 @@ export function GitChangesPanel({
       window.removeEventListener(DELIVERY_PROVIDERS_CHANGED, refresh);
     };
   }, []);
-  const prs = loadAzurePrAssociations(viewCwd, index?.branch ?? "", sourceSessionId);
-  const pipelines = loadCiSources(viewCwd, index?.branch ?? "", sourceSessionId);
+  // Parsed once per scope/store change — this render runs on every poll.
+  const prs = useMemo(
+    () =>
+      loadAzurePrAssociations(viewCwd, index?.branch ?? "", sourceSessionId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [viewCwd, index?.branch, sourceSessionId, deliveryTick],
+  );
+  const pipelines = useMemo(
+    () => loadCiSources(viewCwd, index?.branch ?? "", sourceSessionId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [viewCwd, index?.branch, sourceSessionId, deliveryTick],
+  );
   const stores = useMemo(
     () => deliveryStores(),
     // Re-parsed when any delivery store signals a change.
@@ -395,9 +429,20 @@ export function GitChangesPanel({
         fill
         onOpenFile={onOpenFile}
         onOpenAllChanges={onOpenAllChanges}
-        onMutated={(paths, apply, touchWorktree) => {
-          if (apply) patch(apply);
-          notifyGitChanged(viewCwd);
+        onMutated={(paths, apply, touchWorktree, mutationCwd) => {
+          // A mutation resolving after a child switch belongs to the repo it
+          // ran on — patch the displayed index only when it still is, and
+          // keep that repo's own cache optimistic so switching back is right.
+          if (apply) {
+            if (pathKey(mutationCwd) === pathKey(viewCwd)) {
+              patch(apply);
+            } else {
+              const prev = indexByCwd.get(pathKey(mutationCwd));
+              if (prev)
+                indexByCwd.set(pathKey(mutationCwd), apply(prev));
+            }
+          }
+          notifyGitChanged(mutationCwd);
           // Only discard and sync rewrite worktree bytes; staging and
           // committing must not reload open editors.
           if (touchWorktree) {
@@ -468,7 +513,8 @@ function TaskChildStrip({
     ) ?? null;
   // Beyond two children the chips never read well in the sidebar — go
   // straight to the selector; at two, measured overflow still collapses.
-  const collapse = task.children.length > 2 || overflow;
+  const many = task.children.length > 2;
+  const collapse = many || overflow;
 
   // Chip widths grow as branch and diff stats land, so the fit is re-measured
   // on every render; the observer catches sidebar resizes. In selector mode
@@ -485,7 +531,8 @@ function TaskChildStrip({
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+    // The strip unmounts while collapsed by count — re-attach when it returns.
+  }, [many]);
 
   return (
     <div className="min-w-0 shrink-0 border-b border-content/10">
@@ -530,6 +577,38 @@ function TaskChildStrip({
   );
 }
 
+/** Change stats and PR/CI attention shared by the chips, selector and menu. */
+function ChildBadges({
+  stats,
+  delivery,
+}: {
+  stats: GitDiffStats | null;
+  delivery: TaskChildDelivery;
+}) {
+  return (
+    <>
+      {stats?.files ? (
+        <span className="shrink-0 tabular-nums">
+          <span className="text-emerald-400/80">+{stats.additions}</span>{" "}
+          <span className="text-red-400/80">−{stats.deletions}</span>
+        </span>
+      ) : null}
+      {delivery.prs ? (
+        <GitPullRequest
+          className={`size-3 shrink-0 ${delivery.prNeedsAttention ? "text-red-400" : "text-content/45"}`}
+          strokeWidth={1.75}
+        />
+      ) : null}
+      {delivery.ci ? (
+        <CircleDashed
+          className={`size-3 shrink-0 ${delivery.ciFailing ? "text-red-400" : delivery.ciRunning ? "text-amber-400" : "text-content/45"}`}
+          strokeWidth={1.75}
+        />
+      ) : null}
+    </>
+  );
+}
+
 /** Compact dropdown shown when the chip row cannot fit the sidebar width. */
 function TaskChildSelector({
   task,
@@ -549,6 +628,10 @@ function TaskChildSelector({
   const anchor = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const data = useTaskChildData(task, selectedEntry, enabled, stores);
+  // The session copy may sit outside any child working copy — show it.
+  const name = selectedEntry
+    ? data.repoName
+    : basename(viewCwd) || "Repository";
   return (
     <div className="flex items-center px-2 py-1.5">
       <button
@@ -558,36 +641,19 @@ function TaskChildSelector({
         aria-expanded={open}
         title={
           selectedEntry?.workingCopy
-            ? `${data.repoName} · ${selectedEntry.workingCopy}`
+            ? `${name} · ${selectedEntry.workingCopy}`
             : "Choose a repository"
         }
         onClick={() => setOpen((value) => !value)}
-        className="flex min-w-0 items-center gap-1.5 rounded-full border border-accent/50 bg-accent/10 px-2 py-1 text-[11px] text-content"
+        className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-accent/50 bg-accent/10 px-2 py-1 text-[11px] text-content"
       >
-        <span className="max-w-28 truncate">{data.repoName}</span>
+        <span className="max-w-28 truncate">{name}</span>
         {data.branch ? (
           <span className="max-w-24 truncate text-content/40">
             {data.branch}
           </span>
         ) : null}
-        {data.stats?.files ? (
-          <span className="shrink-0 tabular-nums">
-            <span className="text-emerald-400/80">+{data.stats.additions}</span>{" "}
-            <span className="text-red-400/80">−{data.stats.deletions}</span>
-          </span>
-        ) : null}
-        {data.delivery.prs ? (
-          <GitPullRequest
-            className={`size-3 shrink-0 ${data.delivery.prNeedsAttention ? "text-red-400" : "text-content/45"}`}
-            strokeWidth={1.75}
-          />
-        ) : null}
-        {data.delivery.ci ? (
-          <CircleDashed
-            className={`size-3 shrink-0 ${data.delivery.ciFailing ? "text-red-400" : data.delivery.ciRunning ? "text-amber-400" : "text-content/45"}`}
-            strokeWidth={1.75}
-          />
-        ) : null}
+        <ChildBadges stats={data.stats} delivery={data.delivery} />
         <span className="shrink-0 text-content/40">
           {task.children.length} repos
         </span>
@@ -674,24 +740,7 @@ function TaskChildMenuRow({
             {data.branch}
           </span>
         ) : null}
-        {data.stats?.files ? (
-          <span className="shrink-0 tabular-nums">
-            <span className="text-emerald-400/80">+{data.stats.additions}</span>{" "}
-            <span className="text-red-400/80">−{data.stats.deletions}</span>
-          </span>
-        ) : null}
-        {data.delivery.prs ? (
-          <GitPullRequest
-            className={`size-3 shrink-0 ${data.delivery.prNeedsAttention ? "text-red-400" : "text-content/45"}`}
-            strokeWidth={1.75}
-          />
-        ) : null}
-        {data.delivery.ci ? (
-          <CircleDashed
-            className={`size-3 shrink-0 ${data.delivery.ciFailing ? "text-red-400" : data.delivery.ciRunning ? "text-amber-400" : "text-content/45"}`}
-            strokeWidth={1.75}
-          />
-        ) : null}
+        <ChildBadges stats={data.stats} delivery={data.delivery} />
       </button>
     </li>
   );
@@ -728,7 +777,8 @@ function useTaskChildData(
     : entry?.workingCopy
       ? basename(entry.workingCopy)
       : "Repository";
-  return { stats, branch, delivery, repoName, prepared: !!entry?.workingCopy };
+  const prepared = !!entry?.workingCopy && entry.workingCopy !== "~";
+  return { stats, branch, delivery, repoName, prepared };
 }
 
 function TaskChildChip({
@@ -772,24 +822,7 @@ function TaskChildChip({
       {branch ? (
         <span className="max-w-24 truncate text-content/40">{branch}</span>
       ) : null}
-      {stats?.files ? (
-        <span className="shrink-0 tabular-nums">
-          <span className="text-emerald-400/80">+{stats.additions}</span>{" "}
-          <span className="text-red-400/80">−{stats.deletions}</span>
-        </span>
-      ) : null}
-      {delivery.prs ? (
-        <GitPullRequest
-          className={`size-3 shrink-0 ${delivery.prNeedsAttention ? "text-red-400" : "text-content/45"}`}
-          strokeWidth={1.75}
-        />
-      ) : null}
-      {delivery.ci ? (
-        <CircleDashed
-          className={`size-3 shrink-0 ${delivery.ciFailing ? "text-red-400" : delivery.ciRunning ? "text-amber-400" : "text-content/45"}`}
-          strokeWidth={1.75}
-        />
-      ) : null}
+      <ChildBadges stats={stats} delivery={delivery} />
     </button>
   );
 }
@@ -820,9 +853,12 @@ function ChangedFiles({
   onOpenFile: (path: string, kind: GitFileDiffKind) => void;
   onOpenAllChanges: () => void;
   onMutated: (
-    paths?: string[],
-    apply?: (index: GitDiffIndex) => GitDiffIndex,
-    touchWorktree?: boolean,
+    paths: string[] | undefined,
+    apply: ((index: GitDiffIndex) => GitDiffIndex) | undefined,
+    touchWorktree: boolean | undefined,
+    /** The working copy the git command ran against — captured when the
+     * action started, not when it resolved. */
+    mutationCwd: string,
   ) => void;
 }) {
   const [selectingContext, setSelectingContext] = useState(false);
@@ -892,8 +928,8 @@ function ChangedFiles({
       paths?: string[],
       apply?: (index: GitDiffIndex) => GitDiffIndex,
       touchWorktree?: boolean,
-    ) => onMutatedRef.current(paths, apply, touchWorktree),
-    [],
+    ) => onMutatedRef.current(paths, apply, touchWorktree, cwd),
+    [cwd],
   );
   const onOpenFileRef = useRef(onOpenFile);
   onOpenFileRef.current = onOpenFile;
@@ -2144,7 +2180,7 @@ function useDiffIndex(
       if (!prev) return;
       const next = update(prev);
       if (next === prev) return;
-      indexByCwd.set(cwd, next);
+      indexByCwd.set(pathKey(cwd), next);
       indexRef.current = next;
       setIndex(next);
     },
@@ -2190,7 +2226,7 @@ function useDiffIndex(
         if (patchEpoch.current !== epoch) return;
         const prev = indexRef.current;
         if (sameIndex(prev, next)) return;
-        indexByCwd.set(cwd, next);
+        indexByCwd.set(pathKey(cwd), next);
         indexRef.current = next;
         setIndex(next);
         if (prev) {
@@ -2207,7 +2243,7 @@ function useDiffIndex(
         }
       } catch {
         if (!cancelled) {
-          indexByCwd.delete(cwd);
+          indexByCwd.delete(pathKey(cwd));
           indexRef.current = null;
           setIndex(null);
         }
@@ -2247,7 +2283,7 @@ function useDiffIndex(
 
 function cachedIndex(cwd: string | undefined): GitDiffIndex | null {
   if (!cwd || cwd === "~") return null;
-  return indexByCwd.get(cwd) ?? null;
+  return indexByCwd.get(pathKey(cwd)) ?? null;
 }
 
 function changedFilePaths(prev: GitDiffIndex, next: GitDiffIndex): string[] {

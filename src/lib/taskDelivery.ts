@@ -9,6 +9,7 @@ import {
   type CiSource,
 } from "./azurePipelines";
 import type { GitPr } from "./fs";
+import { pathKey } from "./paths";
 import type { TaskChild, TaskWorkspace } from "./taskWorkspaces";
 
 /**
@@ -60,12 +61,14 @@ function taskSessionIds(task: TaskWorkspace): Set<string> {
 /**
  * Delivery links saved against one child checkout.
  *
- * `branches` are the names this child may be known under (the recorded
- * `child.branch` plus the observed head from diff stats/index). A saved link
- * counts when its scope session belongs to this task (or is unassigned) and
- * its own branch — or the PR's source ref — names a known branch, so a
- * checkout that moved on does not silently inherit a stale link. With no
- * known branch the child's links stay unknown rather than guessed.
+ * `branches` are the names this child may be known under — the recorded
+ * `child.branch` plus the observed head from diff stats/index. Links for the
+ * recorded branch keep counting even when the checkout moved on: they belong
+ * to the child's task branch, not to whatever someone checked out meanwhile.
+ * A saved link counts when its scope session belongs to this task (or is
+ * unassigned) and its own branch — or the PR's source ref — names a known
+ * branch. With no known branch the child's links stay unknown rather than
+ * guessed.
  */
 export function childDelivery(
   task: TaskWorkspace,
@@ -77,6 +80,7 @@ export function childDelivery(
   const delivery = { ...EMPTY_DELIVERY };
   const cwd = child.workingCopy;
   if (!cwd) return delivery;
+  const cwdKey = pathKey(cwd);
   const known = new Set(branches.filter((b): b is string => !!b));
   if (!known.size) return delivery;
   const sessions = taskSessionIds(task);
@@ -84,7 +88,7 @@ export function childDelivery(
     session === undefined || sessions.has(session);
 
   for (const row of stores.prs) {
-    if (row.cwd !== cwd || !scoped(row.sourceSessionId)) continue;
+    if (pathKey(row.cwd) !== cwdKey || !scoped(row.sourceSessionId)) continue;
     if (!known.has(row.branch) && !known.has(shortRef(row.pr.sourceRefName)))
       continue;
     if (row.pr.status.toLowerCase() !== "active") continue;
@@ -95,7 +99,7 @@ export function childDelivery(
   if (githubPr && githubPr.state.toLowerCase() === "open") delivery.prs += 1;
 
   for (const row of stores.ci) {
-    if (row.cwd !== cwd || !scoped(row.session)) continue;
+    if (pathKey(row.cwd) !== cwdKey || !scoped(row.session)) continue;
     if (
       !known.has(row.branch) &&
       !known.has(shortRef(row.last?.run.branch ?? ""))
@@ -127,6 +131,9 @@ export function taskStatusSegments(
     needsInputIds?: ReadonlySet<string>;
     /** Per-child delivery from childDelivery; omit for session-only state. */
     delivery?: ReadonlyMap<string, TaskChildDelivery>;
+    /** Skip the "N working" segment — e.g. a row that already shows its own
+     * Working badge. Prefer this over filtering the strings afterwards. */
+    dropWorking?: boolean;
   } = {},
 ): string[] {
   const sessions = taskSessionIds(task);
@@ -166,9 +173,17 @@ export function taskStatusSegments(
   const working = [...sessions].filter((id) =>
     opts.busySessionIds?.has(id),
   ).length;
-  if (working)
+  if (working && !opts.dropWorking)
     segments.push(working === 1 ? "1 working" : `${working} working`);
-  else if (ciRunning) segments.push("CI running");
+  else if (!working && ciRunning) segments.push("CI running");
+
+  const preparing = task.children.filter(
+    (child) => child.launch.state === "working",
+  ).length;
+  if (preparing)
+    segments.push(
+      preparing === 1 ? "1 preparing" : `${preparing} preparing`,
+    );
 
   const unprepared = task.children.filter(
     (child) => !child.workingCopy && child.launch.state === "pending",

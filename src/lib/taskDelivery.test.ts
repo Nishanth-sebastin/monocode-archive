@@ -180,6 +180,15 @@ describe("childDelivery", () => {
     expect(childDelivery(task([c]), c, ["feat/x"]).prs).toBe(2);
   });
 
+  it("matches links saved under an equivalent but unnormalized path", () => {
+    saveAzurePr({ cwd: "/repo/a/" });
+    saveCi({ cwd: "/repo/a/", result: "failed" });
+    const c = child({ workingCopy: "/repo/a" });
+    const delivery = childDelivery(task([c]), c, ["feat/x"]);
+    expect(delivery.prs).toBe(1);
+    expect(delivery.ciFailing).toBe(true);
+  });
+
   it("counts links saved under a child session", () => {
     saveAzurePr({ session: "child-session" });
     const c = child({ sessionIds: ["child-session"] });
@@ -327,6 +336,25 @@ describe("taskStatusSegments", () => {
         busySessionIds: new Set(["s1"]),
       }),
     ).toEqual(["1 working"]);
+  });
+
+  it("drops the working segment on request for rows with their own badge", () => {
+    const t = task([child()], { sessionIds: ["s1"] });
+    const busy = new Set(["s1"]);
+    expect(taskStatusSegments(t, { busySessionIds: busy })).toEqual([
+      "1 working",
+    ]);
+    expect(
+      taskStatusSegments(t, { busySessionIds: busy, dropWorking: true }),
+    ).toEqual([]);
+  });
+
+  it("reports children whose launch is still preparing", () => {
+    const t = task([
+      child({ id: "c1", launch: { state: "working" } }),
+      child({ id: "c2" }),
+    ]);
+    expect(taskStatusSegments(t)).toEqual(["1 preparing"]);
   });
 
   it("combines segments in actionable order", () => {
