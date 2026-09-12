@@ -1,11 +1,62 @@
 import { openGitHubDelivery, saveDeliveryProvider } from "./lib/deliveryProviders";
-import { ciContext } from "./lib/azurePipelines";
+import {
+  ciContext,
+  ciLookup,
+  ciRead,
+  type CiJobs,
+  type CiLog,
+  type CiSource,
+} from "./lib/azurePipelines";
+import {
+  readAzurePr,
+  readAzurePrSection,
+  type AzurePrAssociation,
+  type AzurePrThread,
+} from "./lib/azureRepos";
+import { githubWorkItemThread } from "./lib/githubTasks";
+import {
+  attentionStoreFromSnapshot,
+  attentionSnapshot,
+  dismissAttention,
+  removeAttention,
+  snoozeAttention,
+  subscribeAttention,
+  visibleAttention,
+  type AttentionAction,
+  type AttentionItem,
+} from "./lib/attention";
+import { deriveLocalAttention } from "./lib/attentionSources";
+import {
+  ciRepair,
+  commentsRepair,
+  githubCiRepair,
+  githubCommentsRepair,
+  REPAIR_CHANGE,
+  type RepairEvidence,
+} from "./lib/repair";
+import { startWatcherEngine, type WatcherEngineHooks } from "./lib/watcherEngine";
+import {
+  OPEN_WATCH_SHEET,
+  type WatchSheetRequest,
+} from "./lib/watchers";
+import { WatchSheet } from "./chrome/WatchSheet";
+import { AttentionQueue } from "./chrome/AttentionQueue";
 import type { DeliveryTabSource } from "./lib/layout";
 import { RepairStatus } from "./chrome/RepairStatus";
-import { assertRepairOwner, repairOwnerError, reserveRepair, updateRepair, validateRepair, OPEN_REPAIR, repairRecords, type RepairDelivery } from "./lib/repair";
-import { composeAgentContext } from "./lib/agentContext";
+import { assertRepairOwner, repairOwnerError, reserveRepair, updateRepair, validateRepair, OPEN_REPAIR, repairRecords, type RepairDelivery, type RepairRecord } from "./lib/repair";
+import {
+  composeAgentContext,
+  contextFromText,
+  requestAgentContext,
+  type AgentContext,
+} from "./lib/agentContext";
+import {
+  composeActionPrompt,
+  loadAgentActions,
+} from "./lib/agentActions";
 import { AgentContextPicker } from "./chrome/AgentContextPicker";
 import { PREPARE_AGENT_CONTEXT, removeContextItem, contextFromTicketDescriptions, linkTicketContext, prepareSessionContext, type AgentContextRequest } from "./lib/agentContext";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -49,6 +100,8 @@ import { runUpdateFlow } from "./lib/updater";
 import { displayAttachments, prepareAttachments } from "./lib/attachments";
 import {
   basename,
+  gitMergeAbort,
+  gitUpdateFromDefault,
   listDir,
   notifyGitChanged,
   pickFolder,
@@ -637,6 +690,16 @@ function titleTabsEqual(a: TitleTab[], b: TitleTab[]): boolean {
 
 // Register capabilities before composer hooks choose their discovery strategy.
 registerBuiltinHarnesses();
+
+const EMPTY_REPAIRS: RepairRecord[] = [];
+/** repairRecords() throws on unreadable data — the queue must not. */
+function repairRecordsSafe(): RepairRecord[] {
+  try {
+    return repairRecords();
+  } catch {
+    return EMPTY_REPAIRS;
+  }
+}
 
 /** Prefill a task name from an inbox item: "ENG-41 Fix login redirect". */
 function inboxItemTaskName(item: InboxItem): string {
@@ -6432,6 +6495,428 @@ export default function App({
     saveSettingsSection(section);
   }, []);
 
+  // --- Attention queue (#76) + watcher engine (#23) ---
+
+  const attentionRaw = useSyncExternalStore(subscribeAttention, attentionSnapshot);
+  const attentionStore = useMemo(
+    () => attentionStoreFromSnapshot(attentionRaw),
+    [attentionRaw],
+  );
+  const repairRows = useSyncExternalStore(
+    (listener) => {
+      window.addEventListener(REPAIR_CHANGE, listener);
+      return () => window.removeEventListener(REPAIR_CHANGE, listener);
+    },
+    repairRecordsSafe,
+  );
+  const derivedAttention = useMemo(
+    () =>
+      deriveLocalAttention({
+        sessions,
+        unseenFinishedIds,
+        reminders: sessionReminders.due,
+        repairs: repairRows,
+      }),
+    [sessions, unseenFinishedIds, sessionReminders, repairRows],
+  );
+  const attentionItems = useMemo(
+    () => visibleAttention(derivedAttention, attentionStore),
+    [derivedAttention, attentionStore],
+  );
+  const [queueAnchor, setQueueAnchor] = useState<HTMLElement | null>(null);
+  const onToggleQueue = useCallback(
+    (anchor: HTMLElement) =>
+      setQueueAnchor((current) => (current ? null : anchor)),
+    [],
+  );
+
+  /** Repair drafts route through the context picker — the user confirms the
+   * destination and instruction before anything reaches an agent. */
+  const dispatchRepairDraft = useCallback(
+    (
+      draft: { evidence: RepairEvidence; context: AgentContext },
+      sessionId?: string,
+    ) => {
+      requestAgentContext({
+        context: draft.context,
+        repair: draft.evidence,
+        cwd: draft.evidence.head.cwd,
+        sourceSessionId: sessionId,
+        requireDestinationSelection: !sessionId,
+      });
+    },
+    [],
+  );
+
+  /** Fetch + merge/rebase the remote default branch into the bound checkout.
+   * Confirm-gated; conflicts stay in the tree and can be sent to the owning
+   * agent or aborted explicitly. */
+  const onAttentionUpdateBranch = useCallback(
+    async (
+      item: AttentionItem,
+      action: Extract<AttentionAction, { kind: "update-branch" }>,
+    ) => {
+      let mode: "merge" | "rebase" = "merge";
+      if (
+        !(await ask(
+          "Fetch the remote default branch and merge it into this checkout? The tree must be clean; conflicts stay in place for you to resolve.",
+          { title: item.title, kind: "info", okLabel: "Merge", cancelLabel: "Cancel" },
+        ))
+      ) {
+        if (
+          !(await ask(
+            "Rebase onto the remote default branch instead?",
+            { title: "Update branch", kind: "info", okLabel: "Rebase", cancelLabel: "Cancel" },
+          ))
+        )
+          return;
+        mode = "rebase";
+      }
+      const result = await gitUpdateFromDefault(action.cwd, mode);
+      notifyGitChanged(action.cwd);
+      if (result.outcome === "conflicts") {
+        const session = action.sessionId
+          ? sessionsRef.current.find((row) => row.id === action.sessionId)
+          : undefined;
+        const list = result.conflicts.slice(0, 10).join("\n");
+        const send = session
+          ? await ask(
+              `${result.conflicts.length} conflicted file${result.conflicts.length === 1 ? "" : "s"}:\n${list}\n\nSend the conflict list to the owning conversation?`,
+              { title: "Merge conflicts", kind: "warning", okLabel: "Send to agent", cancelLabel: "Resolve manually" },
+            )
+          : false;
+        if (send && session) {
+          requestAgentContext({
+            context: contextFromText(
+              `Merge conflicts in ${result.branch}`,
+              `Merging ${result.updatedFrom} into ${result.branch} left ${result.conflicts.length} conflicted file${result.conflicts.length === 1 ? "" : "s"}:\n\n${result.conflicts.join("\n")}\n\nResolve the conflicts in this checkout — keep both sides' intent. Do not push or merge.`,
+              action.cwd,
+            ),
+            cwd: action.cwd,
+            sourceSessionId: session.id,
+          });
+        } else if (
+          await ask(
+            `Leave the ${result.conflicts.length} conflicted file${result.conflicts.length === 1 ? "" : "s"} in the tree, or abort the ${mode}?`,
+            { title: "Merge conflicts", kind: "warning", okLabel: `Abort ${mode}`, cancelLabel: "Keep conflicts" },
+          )
+        ) {
+          await gitMergeAbort(action.cwd);
+          notifyGitChanged(action.cwd);
+        }
+        return;
+      }
+      // The condition the row described is handled — drop it; the next poll
+      // re-verifies and re-emits if the branch is still behind.
+      removeAttention(item.key);
+      await message(
+        result.outcome === "up-to-date"
+          ? `${result.branch} is already up to date with ${result.updatedFrom}.`
+          : `Merged ${result.updatedFrom} into ${result.branch}. Nothing was pushed.`,
+        { title: item.title },
+      );
+    },
+    [],
+  );
+
+  const onAttentionAction = useCallback(
+    async (item: AttentionItem) => {
+      const action = item.action;
+      if (!action) return;
+      try {
+        switch (action.kind) {
+          case "open-session":
+            onSelectLiveAgent(action.sessionId);
+            return;
+          case "open-changes":
+            onSelectLiveAgent(action.sessionId);
+            setSidebarTab("changes");
+            return;
+          case "open-item":
+            onOpenLinkedWorkItem(action.item);
+            return;
+          case "start-task":
+            onStartItemToTask(action.item, null);
+            return;
+          case "open-delivery":
+            await onOpenInboxDelivery(
+              action.sessionId,
+              action.delivery,
+              () => true,
+              action.provider,
+              action.prUrl,
+            );
+            return;
+          case "send-context":
+            requestAgentContext({
+              context: action.context,
+              cwd: item.cwd,
+              sourceSessionId: action.sessionId,
+              requireDestinationSelection: !action.sessionId,
+            });
+            return;
+          case "repair":
+            requestAgentContext({
+              context: action.context,
+              repair: action.evidence,
+              cwd: action.evidence.head.cwd,
+              sourceSessionId: item.sessionId,
+              requireDestinationSelection: !item.sessionId,
+            });
+            return;
+          case "azure-pr-comments": {
+            const { pr, revision } = await readAzurePr(action.target);
+            if (pr.status !== "active")
+              throw new Error("The PR is no longer active.");
+            const association: AzurePrAssociation = {
+              target: action.target,
+              pr,
+              revision,
+              account: action.target.accountId,
+              projectName: action.projectName,
+              repositoryName: action.repositoryName,
+              cwd: action.cwd,
+              branch: action.branch,
+              ...(action.sessionId
+                ? { sourceSessionId: action.sessionId }
+                : {}),
+            };
+            const threads = await readAzurePrSection<AzurePrThread>(
+              action.target,
+              revision,
+              "threads",
+            );
+            const draft = await commentsRepair(association, threads.items, 0);
+            dispatchRepairDraft(draft, action.sessionId);
+            return;
+          }
+          case "github-pr-comments": {
+            const thread = await githubWorkItemThread(
+              action.cwd,
+              "pr",
+              action.number,
+              { force: true },
+            );
+            const open = thread.comments.filter(
+              (comment) => comment.kind === "review" && !comment.resolved,
+            );
+            const draft = await githubCommentsRepair({
+              cwd: action.cwd,
+              repo: action.repo,
+              number: action.number,
+              comments: open.length ? open : thread.comments.slice(-10),
+            });
+            dispatchRepairDraft(draft, action.sessionId);
+            return;
+          }
+          case "azure-ci-fix": {
+            const checkout = await ciContext(action.cwd);
+            if (checkout.branch !== action.branch)
+              throw new Error(
+                `Checkout is on ${checkout.branch || "detached HEAD"}, not ${action.branch}.`,
+              );
+            const head = {
+              cwd: checkout.cwd,
+              branch: checkout.branch,
+              commit: checkout.commit,
+              remote: action.remote,
+            };
+            const page = await ciLookup(
+              action.target,
+              head,
+              null,
+              action.runId,
+            );
+            const run = page.items.find((entry) => entry.id === action.runId);
+            if (!run)
+              throw new Error(
+                "The run is no longer listed. Refresh the pipeline.",
+              );
+            const jobs = await ciRead<CiJobs>(
+              action.target,
+              head,
+              run,
+              "jobs",
+            );
+            const job = jobs.items.find(
+              (entry) => entry.result === "failed" && entry.attempt && entry.logId,
+            );
+            if (!job)
+              throw new Error("No failed job with a log on this run.");
+            const log = await ciRead<CiLog>(action.target, head, run, "log", {
+              recordId: job.id,
+              attempt: job.attempt ?? undefined,
+              logId: job.logId ?? undefined,
+            });
+            const source: CiSource = {
+              target: action.target,
+              definitionName: action.definitionName,
+              projectName: page.projectName,
+              remote: action.remote,
+              cwd: action.cwd,
+              branch: action.branch,
+              ...(action.sessionId ? { session: action.sessionId } : {}),
+            };
+            dispatchRepairDraft(
+              ciRepair(source, head, run, job, log),
+              action.sessionId,
+            );
+            return;
+          }
+          case "github-ci-fix": {
+            const draft = await githubCiRepair({
+              cwd: action.cwd,
+              repo: action.repo,
+              number: action.number,
+            });
+            dispatchRepairDraft(draft, action.sessionId);
+            return;
+          }
+          case "update-branch":
+            await onAttentionUpdateBranch(item, action);
+            return;
+          case "open-automations":
+            openSettings("automations");
+            return;
+          case "reconnect":
+            openSettings("inbox", action.source);
+            return;
+          case "open-url":
+            await openUrl(action.url);
+            return;
+        }
+      } catch (error) {
+        await message(
+          error instanceof Error ? error.message : String(error),
+          { title: item.title, kind: "error" },
+        );
+      }
+    },
+    [
+      onSelectLiveAgent,
+      onOpenLinkedWorkItem,
+      onStartItemToTask,
+      onOpenInboxDelivery,
+      dispatchRepairDraft,
+      onAttentionUpdateBranch,
+      openSettings,
+    ],
+  );
+
+  const onAttentionSnooze = useCallback(
+    (item: AttentionItem) => snoozeAttention(item.key, item.signature),
+    [],
+  );
+  const onAttentionDismissItem = useCallback(
+    (item: AttentionItem) => dismissAttention(item.key, item.signature),
+    [],
+  );
+
+  const [watchSheet, setWatchSheet] = useState<WatchSheetRequest | null>(null);
+  useEffect(() => {
+    const onOpen = (event: Event) =>
+      setWatchSheet((event as CustomEvent<WatchSheetRequest>).detail ?? null);
+    window.addEventListener(OPEN_WATCH_SHEET, onOpen);
+    return () => window.removeEventListener(OPEN_WATCH_SHEET, onOpen);
+  }, []);
+
+  // The watcher engine owns polling/dedup; these hooks are its only bridge
+  // into App dispatch. Hooks live on a ref so the engine never re-subscribes.
+  const watcherHooksRef = useRef<WatcherEngineHooks>({});
+  watcherHooksRef.current = {
+    prepareDraft: (watcher, item) => {
+      const action = item.action;
+      if (
+        action &&
+        (action.kind === "azure-pr-comments" ||
+          action.kind === "github-pr-comments" ||
+          action.kind === "azure-ci-fix" ||
+          action.kind === "github-ci-fix")
+      ) {
+        void onAttentionAction(item);
+        return;
+      }
+      requestAgentContext({
+        context: contextFromText(
+          item.title,
+          [item.detail, item.url, item.revision && `Revision: ${item.revision}`]
+            .filter(Boolean)
+            .join("\n\n"),
+          item.repo ?? item.cwd ?? "",
+        ),
+        cwd: item.cwd,
+        sourceSessionId: watcher.target?.sessionId,
+        requireDestinationSelection: !watcher.target?.sessionId,
+      });
+    },
+    runAction: async (watcher, item) => {
+      const action = loadAgentActions().find(
+        (entry) => entry.id === watcher.actionId,
+      );
+      if (!action) return "The saved action is gone — edit the watcher.";
+      const target = watcher.target;
+      if (!target?.cwd) return "No target checkout — edit the watcher.";
+      const bound = target.sessionId
+        ? sessionsRef.current.find((row) => row.id === target.sessionId)
+        : undefined;
+      if (bound && (bound.busy || sessionNeedsInput(bound)))
+        return "The bound agent is busy — run skipped.";
+      const { text, revision } = composeActionPrompt({
+        name: action.name,
+        instructions: action.instructions,
+        sections: [
+          {
+            title: item.title,
+            text: [
+              item.detail,
+              item.url,
+              item.revision && `Revision: ${item.revision}`,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          },
+        ],
+      });
+      const ref = { actionId: action.id, name: action.name, revision };
+      if (bound) {
+        const accepted = await onSubmit(bound.id, text, [], {
+          action: ref,
+          followUpBehavior: "queue",
+        });
+        return accepted === false
+          ? "The destination conversation refused the run."
+          : undefined;
+      }
+      const session = {
+        ...newSession(target.harness, target.cwd, target.model),
+        title: formatSessionTitle(target.harness, watcher.name),
+      };
+      sessionsRef.current = [...sessionsRef.current, session];
+      setSessions(sessionsRef.current);
+      const tab = newTab(session.id);
+      appendTab(tab, target.cwd);
+      setActiveTabId(tab.id);
+      const accepted = await onSubmit(session.id, text, [], {
+        action: ref,
+        followUpBehavior: "queue",
+      });
+      return accepted === false
+        ? "The destination conversation refused the run."
+        : undefined;
+    },
+  };
+  useEffect(
+    () =>
+      startWatcherEngine({
+        prepareDraft: (watcher, item) =>
+          watcherHooksRef.current.prepareDraft?.(watcher, item),
+        runAction: (watcher, item) =>
+          watcherHooksRef.current.runAction?.(watcher, item) ??
+          Promise.resolve("No run handler."),
+      }),
+    [],
+  );
+
   const onOpenArchivedSession = useCallback(
     (sessionId: string) => {
       setSettingsOpen(false);
@@ -7006,6 +7491,9 @@ export default function App({
         onSearch={onOpenSearch}
         onOpenInbox={onOpenInbox}
         onOpenInboxItem={onOpenLinkedWorkItem}
+        attentionCount={attentionItems.length}
+        queueActive={queueAnchor !== null}
+        onOpenQueue={onToggleQueue}
         onOpenNotes={notesEnabled ? onOpenNotes : undefined}
         onGoToFile={onGoToFile}
         searchActive={searchViewOpen}
@@ -7025,6 +7513,25 @@ export default function App({
         onDismissUpdate={() => setUpdateNotice(null)}
       />
 
+      {queueAnchor ? (
+        <AttentionQueue
+          anchor={queueAnchor}
+          items={attentionItems}
+          onDismiss={() => setQueueAnchor(null)}
+          onAction={(item) => void onAttentionAction(item)}
+          onSnooze={onAttentionSnooze}
+          onDismissItem={onAttentionDismissItem}
+          onOpenAutomations={() => openSettings("automations")}
+        />
+      ) : null}
+      {watchSheet ? (
+        <WatchSheet
+          request={watchSheet}
+          sessions={sessions}
+          defaultCwd={projectCwd || "~"}
+          onClose={() => setWatchSheet(null)}
+        />
+      ) : null}
       {wslPickerOpen && <WslProjectDialog cwd={projectCwd} onOpen={selectProject} onClose={() => setWslPickerOpen(false)} />}
       {taskSheet && (
         <TaskCreateSheet

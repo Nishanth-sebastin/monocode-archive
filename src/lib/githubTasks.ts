@@ -433,6 +433,43 @@ export async function githubWorkItemComment(
   return url;
 }
 
+export type GithubPrCheck = {
+  name: string;
+  status: string;
+  conclusion: string;
+  url: string;
+  /** Sanitized, bounded failure summary — only set on failing runs. */
+  outputTitle: string;
+  outputText: string;
+};
+
+export type GithubPrState = {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  headRefOid: string;
+  headRefName: string;
+  baseRefName: string;
+  /** GitHub's merge verdict: BEHIND, DIRTY (conflicts), CLEAN, BLOCKED… */
+  mergeStateStatus: string;
+  reviewDecision: string;
+  isDraft: boolean;
+  checks: GithubPrCheck[];
+};
+
+/**
+ * One read of a PR's review/merge/check state. Watcher polls and repair
+ * evidence both go through this — check output is already bounded and
+ * sanitized by the backend.
+ */
+export function githubPrState(
+  cwd: string,
+  number: number,
+): Promise<GithubPrState> {
+  return invoke<GithubPrState>("git_github_pr_state", { cwd, number });
+}
+
 export function githubReviewDecisionLabel(decision: string): string {
   switch (decision.trim().toUpperCase()) {
     case "APPROVED":

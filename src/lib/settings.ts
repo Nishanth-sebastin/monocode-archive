@@ -8,6 +8,7 @@ export type SettingsSectionId =
   | "keybindings"
   | "providers"
   | "inbox"
+  | "automations"
   | "skills"
   | "archive";
 
@@ -42,6 +43,12 @@ export const SETTINGS_SECTIONS: {
     id: "inbox",
     label: "Inbox",
     description: "Connect and manage the services that appear in your Inbox.",
+  },
+  {
+    id: "automations",
+    label: "Automations",
+    description:
+      "Watchers and schedules that run while MonoCode is open, and the attention they raise.",
   },
   {
     id: "skills",

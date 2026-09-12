@@ -193,11 +193,15 @@ export function azureItem(site: string, item: WorkItem): InboxItem {
 }
 export async function listAzureItems(
   status: AzureStatus,
+  filter?: AzureFilter,
 ): Promise<InboxItem[]> {
   const before = generation;
   const result = await invoke<{ site: string; items: WorkItem[] }>(
     "azure_list_items",
-    { site: status.site, ...loadAzureFilter(status.site, status.project) },
+    {
+      site: status.site,
+      ...(filter ?? loadAzureFilter(status.site, status.project)),
+    },
   );
   if (generation !== before)
     throw new Error("Azure connection changed. Refresh and retry.");

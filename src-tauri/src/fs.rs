@@ -483,6 +483,138 @@ pub async fn git_sync(cwd: String) -> Result<(), String> {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct GitUpdateResult {
+    /// "updated" | "up-to-date" | "conflicts"
+    pub outcome: String,
+    pub branch: String,
+    /// The remote default ref merged or rebased onto, e.g. "origin/main".
+    pub updated_from: String,
+    pub before: String,
+    pub after: String,
+    /// Conflicted paths when the update stopped on conflicts; the merge or
+    /// rebase is left in progress so resolution keeps both sides.
+    pub conflicts: Vec<String>,
+}
+
+/// Fetch the remote default branch and merge (or rebase) it into the current
+/// checkout. Refuses a dirty tree up front and never pushes; conflicts are
+/// left in place with their file list for explicit or agent-assisted
+/// resolution.
+#[tauri::command]
+pub async fn git_update_from_default(cwd: String, mode: String) -> Result<GitUpdateResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_update_from_default_for(&expand_home(&cwd), &mode)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn git_update_from_default_for(root: &Path, mode: &str) -> Result<GitUpdateResult, String> {
+    if mode != "merge" && mode != "rebase" {
+        return Err("Choose merge or rebase.".into());
+    }
+    if !git_is_work_tree(root) {
+        return Err("Not a git repository".into());
+    }
+    if git_stdout(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_some()
+        || git_stdout(root, &["rev-parse", "-q", "--verify", "REBASE_HEAD"]).is_some()
+    {
+        return Err("A merge or rebase is already in progress. Resolve or abort it first.".into());
+    }
+    let branch = git_head_branch(root)
+        .ok_or("Check out a branch before updating from the default branch.")?;
+    let remote = git_remote_name(root).ok_or("No remote configured for this checkout.")?;
+    let default = git_default_branch(root, Some(&remote))
+        .ok_or("Cannot resolve the remote default branch.")?;
+    let dirty = git_run(root, &["status", "--porcelain", "--", "."])
+        .map(|text| text.lines().count())
+        .unwrap_or(0);
+    if dirty > 0 {
+        return Err(format!(
+            "{dirty} uncommitted change{}. Commit or stash before updating.",
+            if dirty == 1 { "" } else { "s" }
+        ));
+    }
+    git_checked(root, &["fetch", &remote, &default])?;
+    let base = format!("{remote}/{default}");
+    let before = git_stdout(root, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let behind = git_ahead_behind(root, &base).1;
+    if behind <= 0 {
+        return Ok(GitUpdateResult {
+            outcome: "up-to-date".into(),
+            branch,
+            updated_from: base,
+            before: before.clone(),
+            after: before,
+            conflicts: Vec::new(),
+        });
+    }
+    let result = if mode == "merge" {
+        git_command_output(root, &["merge", "--no-edit", &base])
+    } else {
+        git_command_output(root, &["rebase", &base])
+    }?;
+    let after = git_stdout(root, &["rev-parse", "HEAD"]).unwrap_or_default();
+    if result.status.success() {
+        return Ok(GitUpdateResult {
+            outcome: "updated".into(),
+            branch,
+            updated_from: base,
+            before,
+            after,
+            conflicts: Vec::new(),
+        });
+    }
+    let conflicts = git_run(root, &["diff", "--name-only", "--diff-filter=U"])
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .take(100)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if conflicts.is_empty() {
+        let detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("git {mode} from {base} failed")
+        } else {
+            detail
+        });
+    }
+    Ok(GitUpdateResult {
+        outcome: "conflicts".into(),
+        branch,
+        updated_from: base,
+        before,
+        after,
+        conflicts,
+    })
+}
+
+/// Abort an in-progress merge or rebase, leaving the checkout clean.
+#[tauri::command]
+pub async fn git_merge_abort(cwd: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = expand_home(&cwd);
+        if !git_is_work_tree(&root) {
+            return Err("Not a git repository".into());
+        }
+        if git_stdout(&root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_some() {
+            return git_checked(&root, &["merge", "--abort"]);
+        }
+        if git_stdout(&root, &["rev-parse", "-q", "--verify", "REBASE_HEAD"]).is_some() {
+            return git_checked(&root, &["rebase", "--abort"]);
+        }
+        Err("No merge or rebase in progress.".into())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct GitRangeContext {
     pub base: String,
     pub head: String,
@@ -812,6 +944,172 @@ pub async fn git_github_work_item_comment(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubPrCheck {
+    pub name: String,
+    pub status: String,
+    pub conclusion: String,
+    /// Browser link for the check run (html_url preferred, details_url next).
+    pub url: String,
+    /// Sanitized, bounded failure summary — only populated for failing runs.
+    pub output_title: String,
+    pub output_text: String,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubPrState {
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+    pub head_ref_oid: String,
+    pub head_ref_name: String,
+    pub base_ref_name: String,
+    /// GitHub's merge verdict: BEHIND, DIRTY (conflicts), CLEAN, BLOCKED…
+    pub merge_state_status: String,
+    pub review_decision: String,
+    pub is_draft: bool,
+    pub checks: Vec<GitHubPrCheck>,
+}
+
+/// One read of a GitHub PR's review/merge/check state for watchers, queue
+/// rows and repair evidence. Check-run output is bounded and sanitized; it is
+/// evidence text, not a log download.
+#[tauri::command]
+pub async fn git_github_pr_state(cwd: String, number: i64) -> Result<GitHubPrState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_github_pr_state_for(&expand_home(&cwd), number)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn git_github_pr_state_for(root: &Path, number: i64) -> Result<GitHubPrState, String> {
+    if number <= 0 {
+        return Err("Invalid GitHub PR number".into());
+    }
+    let repo = git_github_repo_for(root)?;
+    let number_arg = number.to_string();
+    let json = gh_checked(
+        root,
+        &[
+            "pr",
+            "view",
+            &number_arg,
+            "--repo",
+            &repo,
+            "--json",
+            "number,title,url,state,headRefOid,headRefName,baseRefName,mergeStateStatus,reviewDecision,isDraft",
+        ],
+    )?;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct View {
+        number: i64,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        head_ref_oid: String,
+        #[serde(default)]
+        head_ref_name: String,
+        #[serde(default)]
+        base_ref_name: String,
+        #[serde(default)]
+        merge_state_status: String,
+        #[serde(default)]
+        review_decision: Option<String>,
+        #[serde(default)]
+        is_draft: bool,
+    }
+    let view: View = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    if view.number != number {
+        return Err("GitHub returned a different PR. Refresh and retry.".into());
+    }
+    let checks = github_check_runs(root, &repo, &view.head_ref_oid).unwrap_or_default();
+    Ok(GitHubPrState {
+        number: view.number,
+        title: view.title.chars().take(500).collect(),
+        url: view.url,
+        state: view.state,
+        head_ref_oid: view.head_ref_oid,
+        head_ref_name: view.head_ref_name,
+        base_ref_name: view.base_ref_name,
+        merge_state_status: view.merge_state_status,
+        review_decision: view.review_decision.unwrap_or_default(),
+        is_draft: view.is_draft,
+        checks,
+    })
+}
+
+/// Check runs on a commit — `gh api` caps at 50 runs and per-run output is
+/// sanitized + truncated so the response stays a bounded evidence summary.
+fn github_check_runs(root: &Path, repo: &str, sha: &str) -> Result<Vec<GitHubPrCheck>, String> {
+    let sha = sha.trim();
+    if sha.is_empty() || sha.len() > 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(Vec::new());
+    }
+    let json = gh_checked(
+        root,
+        &[
+            "api",
+            &format!("repos/{repo}/commits/{sha}/check-runs?per_page=50"),
+        ],
+    )?;
+    let value: serde_json::Value =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    let Some(runs) = value["check_runs"].as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(runs
+        .iter()
+        .take(50)
+        .map(|run| {
+            let conclusion = run["conclusion"].as_str().unwrap_or("").to_string();
+            let failing = matches!(
+                conclusion.as_str(),
+                "failure" | "timed_out" | "action_required" | "startup_failure" | "cancelled"
+            );
+            let url = run["html_url"]
+                .as_str()
+                .or_else(|| run["details_url"].as_str())
+                .unwrap_or("")
+                .chars()
+                .take(2000)
+                .collect();
+            let (output_title, output_text) = if failing {
+                let title = run["output"]["title"].as_str().unwrap_or("");
+                let summary = run["output"]["summary"].as_str().unwrap_or("");
+                let text = run["output"]["text"].as_str().unwrap_or("");
+                (
+                    title.chars().take(500).collect(),
+                    crate::azure_pipelines::sanitize_log(&format!("{summary}\n{text}")),
+                )
+            } else {
+                (String::new(), String::new())
+            };
+            GitHubPrCheck {
+                name: run["name"]
+                    .as_str()
+                    .unwrap_or("check")
+                    .chars()
+                    .take(200)
+                    .collect(),
+                status: run["status"].as_str().unwrap_or("").to_string(),
+                conclusion,
+                url,
+                output_title,
+                output_text,
+            }
+        })
+        .collect())
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]

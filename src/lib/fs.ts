@@ -233,6 +233,32 @@ export function gitSync(cwd: string): Promise<void> {
   return invoke<void>("git_sync", { cwd });
 }
 
+export type GitUpdateResult = {
+  /** "updated" | "up-to-date" | "conflicts" */
+  outcome: string;
+  branch: string;
+  updatedFrom: string;
+  before: string;
+  after: string;
+  conflicts: string[];
+};
+
+/**
+ * Fetch the remote default branch and merge or rebase it into the checkout.
+ * Refuses a dirty tree; conflicts stay in progress for explicit resolution.
+ */
+export function gitUpdateFromDefault(
+  cwd: string,
+  mode: "merge" | "rebase",
+): Promise<GitUpdateResult> {
+  return invoke<GitUpdateResult>("git_update_from_default", { cwd, mode });
+}
+
+/** Abort an in-progress merge or rebase, leaving the checkout clean. */
+export function gitMergeAbort(cwd: string): Promise<void> {
+  return invoke<void>("git_merge_abort", { cwd });
+}
+
 export type GitRangeContext = {
   base: string;
   head: string;

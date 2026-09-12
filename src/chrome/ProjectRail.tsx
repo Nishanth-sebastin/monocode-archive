@@ -22,6 +22,7 @@ import {
   Settings,
   Terminal,
   Trash2,
+  Zap,
 } from "./icons";
 import {
   useEffect,
@@ -215,6 +216,11 @@ type Props = {
   searchActive?: boolean;
   onOpenInbox?: () => void;
   inboxActive?: boolean;
+  /** Attention queue (#76) — count badge on the rail row; the click anchors
+   * the popover to the button. */
+  attentionCount?: number;
+  queueActive?: boolean;
+  onOpenQueue?: (anchor: HTMLElement) => void;
   notesEnabled?: boolean;
   onOpenNotes?: () => void;
   notesActive?: boolean;
@@ -265,6 +271,9 @@ export function ProjectRail({
   searchActive = false,
   onOpenInbox,
   inboxActive = false,
+  attentionCount = 0,
+  queueActive = false,
+  onOpenQueue,
   notesEnabled = true,
   onOpenNotes,
   notesActive = false,
@@ -753,6 +762,20 @@ export function ProjectRail({
               dot={inboxUnseen}
               ariaLabel={inboxUnseen ? "Inbox, new items" : "Inbox"}
             />
+            {onOpenQueue ? (
+              <RailAction
+                label="Attention"
+                icon={Zap}
+                onClick={(event) => onOpenQueue(event.currentTarget)}
+                active={queueActive}
+                badge={attentionCount || undefined}
+                ariaLabel={
+                  attentionCount
+                    ? `Attention queue, ${attentionCount} item${attentionCount === 1 ? "" : "s"}`
+                    : "Attention queue"
+                }
+              />
+            ) : null}
             {notesEnabled ? (
               <RailAction
                 label="Notes"

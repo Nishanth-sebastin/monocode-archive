@@ -22,6 +22,11 @@ export type AzurePr = {
   targetRefName: string;
   lastMergeSourceCommit?: { commitId: string };
   lastMergeTargetCommit?: { commitId: string };
+  /** Azure's merge verdict — "conflicts" among others; empty when unknown. */
+  mergeStatus?: string;
+  /** Target branch head at read time (best-effort — absent when the commits
+   * lookup was refused). Compare to lastMergeTargetCommit for behind. */
+  targetHead?: string;
   reviewers: {
     id: string;
     displayName: string;

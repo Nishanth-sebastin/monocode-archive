@@ -273,6 +273,9 @@ type Props = {
   onSearch?: () => void;
   onOpenInbox?: () => void;
   onOpenInboxItem?: (item: LinkedWorkItem) => void;
+  attentionCount?: number;
+  queueActive?: boolean;
+  onOpenQueue?: (anchor: HTMLElement) => void;
   onOpenNotes?: () => void;
   onGoToFile?: () => void;
   searchActive?: boolean;
@@ -358,6 +361,9 @@ function SidebarComponent({
   onSearch,
   onOpenInbox,
   onOpenInboxItem,
+  attentionCount = 0,
+  queueActive = false,
+  onOpenQueue,
   onOpenNotes,
   onGoToFile,
   searchActive = false,
@@ -1718,6 +1724,9 @@ function SidebarComponent({
           searchActive={searchActive}
           onOpenInbox={onOpenInbox}
           inboxActive={inboxActive}
+          attentionCount={attentionCount}
+          queueActive={queueActive}
+          onOpenQueue={onOpenQueue}
           notesEnabled={notesEnabled}
           onOpenNotes={onOpenNotes}
           notesActive={notesActive}

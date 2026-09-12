@@ -145,20 +145,28 @@ export function AgentContextPicker({
     .slice(0, 30);
   return (
     <Modal
-      title={request.repair ? request.repair.kind === "ci" ? "Fix CI" : "Address comments" : tickets ? "Open conversation" : "Send to agent"}
+      title={request.repair ? (request.repair.kind === "ci" || request.repair.kind === "github-ci") ? "Fix CI" : "Address comments" : tickets ? "Open conversation" : "Send to agent"}
       description={
-        request.repair ? request.repair.kind === "comments" ? `PR #${request.repair.association.target.number} · ${request.repair.association.pr.title}` : `Run ${request.repair.run.id} · ${request.repair.job.name}` : tickets
-          ? `${request.context.entries.length} selected · titles and descriptions · send when ready`
-          : "Selected context · does not auto-send"
+        request.repair
+          ? request.repair.kind === "comments"
+            ? `PR !${request.repair.association.target.number} · ${request.repair.association.pr.title}`
+            : request.repair.kind === "github-comments"
+              ? `PR #${request.repair.number} · ${request.repair.repo}`
+              : request.repair.kind === "github-ci"
+                ? `PR #${request.repair.number} · ${request.repair.repo} · ${request.repair.checks.length} check${request.repair.checks.length === 1 ? "" : "s"}`
+                : `Run ${request.repair.run.id} · ${request.repair.job.name}`
+          : tickets
+            ? `${request.context.entries.length} selected · titles and descriptions · send when ready`
+            : "Selected context · does not auto-send"
       }
       onClose={onClose}
       className="max-h-[80vh] [&_header_h2]:text-base"
     >
       <div ref={body} className="space-y-3 p-3 text-[12px] text-content">
         {request.repair ? <div className="space-y-3">
-          <div className="flex items-center justify-between text-content/60"><span>{request.repair.kind === "comments" ? "Comments" : "Log evidence"} · {selected.length} selected</span><button type="button" className="rounded px-1.5 py-1 hover:bg-content/5" disabled={pending} onClick={() => setSelected(selected.length === request.context.entries.length ? [] : request.context.entries.map(entry => entry.id))}>{selected.length === request.context.entries.length ? "Clear selection" : "Select all"}</button></div>
+          <div className="flex items-center justify-between text-content/60"><span>{request.repair.kind === "comments" || request.repair.kind === "github-comments" ? "Comments" : "Log evidence"} · {selected.length} selected</span><button type="button" className="rounded px-1.5 py-1 hover:bg-content/5" disabled={pending} onClick={() => setSelected(selected.length === request.context.entries.length ? [] : request.context.entries.map(entry => entry.id))}>{selected.length === request.context.entries.length ? "Clear selection" : "Select all"}</button></div>
           <div className="max-h-52 overflow-auto rounded-md border border-content/10">{request.context.entries.map(entry => {
-            const comment = request.repair?.kind === "comments" ? request.repair.threads.find(thread => thread.entry === entry.id)?.comment : undefined;
+            const comment = request.repair?.kind === "comments" ? request.repair.threads.find(thread => thread.entry === entry.id)?.comment : request.repair?.kind === "github-comments" ? request.repair.comments.find(row => row.entry === entry.id) : undefined;
             return <div key={entry.id} className="flex items-start gap-2 border-b border-content/5 p-2.5 last:border-0">
               <ContextCheckbox label={entry.title} disabled={pending} checked={selected.includes(entry.id)} onChange={() => setSelected(ids => ids.includes(entry.id) ? ids.filter(id => id !== entry.id) : [...ids, entry.id])} />
               <div className="min-w-0 flex-1"><label className="block text-content/70">{comment ? `${comment.author} · comment ${comment.id}` : entry.title}</label>
@@ -169,7 +177,7 @@ export function AgentContextPicker({
             </div>;
           })}</div>
           <label className="block text-content/60">Instructions<textarea aria-label="Repair instruction" maxLength={4000} rows={2} disabled={pending} className="mt-1 w-full resize-y rounded-md border border-content/10 bg-content/5 px-2 py-1.5 text-[12px] text-content outline-accent" value={instruction} onChange={event => setInstruction(event.target.value)} /></label>
-          <details className="text-[11px] text-content/50"><summary className="cursor-pointer">{request.repair.head.branch} · {request.repair.head.commit.slice(0,8)} · {wslLocation(request.repair.head.cwd) ? "WSL" : "Local checkout"}</summary><p className="mt-1 break-all">{request.repair.head.cwd}<br />{request.repair.kind === "ci" ? `Azure Pipelines · ${request.repair.source.projectName}/${request.repair.source.definitionName} · account ${request.repair.source.target.accountId}` : `Azure Repos · ${request.repair.association.projectName}/${request.repair.association.repositoryName} · account ${request.repair.association.target.accountId}`}</p></details>
+          <details className="text-[11px] text-content/50"><summary className="cursor-pointer">{request.repair.head.branch} · {request.repair.head.commit.slice(0,8)} · {wslLocation(request.repair.head.cwd) ? "WSL" : "Local checkout"}</summary><p className="mt-1 break-all">{request.repair.head.cwd}<br />{request.repair.kind === "ci" ? `Azure Pipelines · ${request.repair.source.projectName}/${request.repair.source.definitionName} · account ${request.repair.source.target.accountId}` : request.repair.kind === "comments" ? `Azure Repos · ${request.repair.association.projectName}/${request.repair.association.repositoryName} · account ${request.repair.association.target.accountId}` : `GitHub · ${request.repair.repo}`}</p></details>
         </div> : null}
         <details open={!request.repair || choosingDestination || !destination} onToggle={event => { if (request.repair) setChoosingDestination(event.currentTarget.open); }}>
           <summary className={request.repair ? "cursor-pointer rounded-md bg-content/5 px-2 py-2 text-content/70" : "hidden"}>Send to · {destination === "new" ? "New conversation" : target?.title || "Choose conversation"}{target ? ` · ${HARNESS_TITLE[target.harness]}` : ""}</summary>

@@ -483,6 +483,7 @@ fn summary(pr: &Value) -> Result<Value, String> {
         "status":pr["status"].as_str().unwrap_or("unknown"),"isDraft":pr["isDraft"].as_bool().unwrap_or(false),
         "sourceRefName":text(pr,"sourceRefName")?,"targetRefName":text(pr,"targetRefName")?,
         "lastMergeSourceCommit":pr["lastMergeSourceCommit"],"lastMergeTargetCommit":pr["lastMergeTargetCommit"],
+        "mergeStatus":pr["mergeStatus"].as_str().unwrap_or(""),
         "reviewers":reviewers,
     }))
 }
@@ -761,7 +762,26 @@ pub async fn azure_pr_read(
                 let modified = if kind.split(',').any(|flag| flag.trim() == "delete") { String::new() } else { file_text(&config, &repo_path, selected, source)? };
                 json!({"path":selected,"originalPath":old_path,"original":original,"modified":modified,"sourceCommit":source,"baseCommit":base,"iteration":iteration})
             }
-            PrSection::Summary => json!({"pr":summary(&pr)?}),
+            PrSection::Summary => {
+                let mut summary = summary(&pr)?;
+                // Behind detection: the merge commit Azure computed ages as the
+                // target branch moves, so compare it to the target head. The
+                // extra read is best-effort — a summary must still work when
+                // the commits call is refused.
+                if let Some(target_branch) = pr["targetRefName"].as_str().and_then(|name| name.strip_prefix("refs/heads/")) {
+                    let commits_path = format!("{}/commits", repository_path(&target.project, &target.repository)?);
+                    if let Ok(commits) = get(&config, &commits_path, &[
+                        ("searchCriteria.itemVersion.version", target_branch.to_string()),
+                        ("searchCriteria.itemVersion.versionType", "branch".into()),
+                        ("$top", "1".into()),
+                    ]) {
+                        if let Some(head) = commits["value"].as_array().and_then(|rows| rows.first()).and_then(|row| row["commitId"].as_str()) {
+                            summary["targetHead"] = json!(head);
+                        }
+                    }
+                }
+                json!({"pr":summary})
+            }
             PrSection::Threads | PrSection::Iterations | PrSection::Workitems => {
                 let suffix = if matches!(section, PrSection::Threads) {
                     "threads"
