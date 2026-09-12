@@ -34,11 +34,17 @@ import {
   type RepairEvidence,
 } from "./lib/repair";
 import { startWatcherEngine, type WatcherEngineHooks } from "./lib/watcherEngine";
+import { startScheduleEngine, type ScheduleEngineHooks } from "./lib/scheduleEngine";
 import {
   OPEN_WATCH_SHEET,
   type WatchSheetRequest,
 } from "./lib/watchers";
+import {
+  OPEN_SCHEDULE_SHEET,
+  type ScheduleSheetRequest,
+} from "./lib/schedules";
 import { WatchSheet } from "./chrome/WatchSheet";
+import { ScheduleSheet } from "./chrome/ScheduleSheet";
 import { AttentionQueue } from "./chrome/AttentionQueue";
 import type { DeliveryTabSource } from "./lib/layout";
 import { RepairStatus } from "./chrome/RepairStatus";
@@ -7107,6 +7113,16 @@ export default function App({
     return () => window.removeEventListener(OPEN_WATCH_SHEET, onOpen);
   }, []);
 
+  const [scheduleSheet, setScheduleSheet] = useState<ScheduleSheetRequest | null>(null);
+  useEffect(() => {
+    const onOpen = (event: Event) =>
+      setScheduleSheet(
+        (event as CustomEvent<ScheduleSheetRequest>).detail ?? {},
+      );
+    window.addEventListener(OPEN_SCHEDULE_SHEET, onOpen);
+    return () => window.removeEventListener(OPEN_SCHEDULE_SHEET, onOpen);
+  }, []);
+
   // The watcher engine owns polling/dedup; these hooks are its only bridge
   // into App dispatch. Hooks live on a ref so the engine never re-subscribes.
   const watcherHooksRef = useRef<WatcherEngineHooks>({});
@@ -7219,6 +7235,94 @@ export default function App({
         runAction: (watcher, item) =>
           watcherHooksRef.current.runAction?.(watcher, item) ??
           Promise.resolve({ error: "No run handler." }),
+      }),
+    [],
+  );
+
+  // The schedule engine owns due-time/catch-up policy; these hooks are its
+  // only bridge into App dispatch — same target/dispatch path as watchers.
+  const scheduleHooksRef = useRef<ScheduleEngineHooks>({});
+  scheduleHooksRef.current = {
+    prepareDraft: (schedule) => {
+      requestAgentContext({
+        context: contextFromText(
+          `Schedule · ${schedule.name}`,
+          schedule.instructions,
+          schedule.target.cwd,
+        ),
+        cwd: schedule.target.cwd,
+        sourceSessionId: schedule.target.sessionId,
+        requireDestinationSelection: !schedule.target.sessionId,
+      });
+    },
+    runSchedule: async (schedule) => {
+      const bound = schedule.target.sessionId
+        ? sessionsRef.current.find(
+            (row) => row.id === schedule.target.sessionId,
+          )
+        : undefined;
+      // An explicit session binding that no longer resolves must not
+      // silently spawn a new conversation — the user chose that one.
+      if (schedule.target.sessionId && !bound)
+        return "The bound conversation is gone — edit the schedule's target.";
+      if (bound && (bound.busy || sessionNeedsInput(bound)))
+        return "The bound conversation is busy — run skipped.";
+      const { text, revision } = composeActionPrompt({
+        name: `Schedule · ${schedule.name}`,
+        instructions: schedule.instructions,
+        sections: [],
+      });
+      const ref = {
+        actionId: `schedule:${schedule.id}`,
+        name: schedule.name,
+        revision,
+      };
+      if (bound) {
+        const accepted = await onSubmit(bound.id, text, [], {
+          action: ref,
+          followUpBehavior: "queue",
+        });
+        return accepted === false
+          ? "The destination conversation refused the run."
+          : undefined;
+      }
+      const session = {
+        ...newSession(schedule.target.harness, schedule.target.cwd, schedule.target.model),
+        title: formatSessionTitle(schedule.target.harness, schedule.name),
+      };
+      sessionsRef.current = [...sessionsRef.current, session];
+      setSessions(sessionsRef.current);
+      const tab = newTab(session.id);
+      // An unattended run must not steal focus — the outcome row is the
+      // entry point to review what ran.
+      appendTab(tab, schedule.target.cwd);
+      const accepted = await onSubmit(session.id, text, [], {
+        action: ref,
+        followUpBehavior: "queue",
+      });
+      return accepted === false
+        ? "The destination conversation refused the run."
+        : undefined;
+    },
+    targetBusy: (schedule) => {
+      const bound = schedule.target.sessionId
+        ? sessionsRef.current.find(
+            (row) => row.id === schedule.target.sessionId,
+          )
+        : undefined;
+      return !!bound && (bound.busy || sessionNeedsInput(bound));
+    },
+  };
+  useEffect(
+    () =>
+      startScheduleEngine({
+        prepareDraft: (schedule) =>
+          scheduleHooksRef.current.prepareDraft?.(schedule),
+        runSchedule: (schedule) =>
+          scheduleHooksRef.current.runSchedule?.(schedule) ??
+          Promise.resolve("No run handler."),
+        targetBusy: (schedule) =>
+          scheduleHooksRef.current.targetBusy?.(schedule) ?? false,
       }),
     [],
   );
@@ -7827,6 +7931,14 @@ export default function App({
           sessions={sessions}
           defaultCwd={projectCwd || "~"}
           onClose={() => setWatchSheet(null)}
+        />
+      ) : null}
+      {scheduleSheet ? (
+        <ScheduleSheet
+          request={scheduleSheet}
+          sessions={sessions}
+          defaultCwd={projectCwd || "~"}
+          onClose={() => setScheduleSheet(null)}
         />
       ) : null}
       {wslPickerOpen && <WslProjectDialog cwd={projectCwd} onOpen={selectProject} onClose={() => setWslPickerOpen(false)} />}
