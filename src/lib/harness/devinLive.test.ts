@@ -252,6 +252,64 @@ describe("devin live turn sequence", () => {
     await stopDevinSession("t3");
   });
 
+  it("answers a permission request that carries a string JSON-RPC id", async () => {
+    const events: HarnessEvent[] = [];
+    const turn = sendDevinTurn(baseInput(events, "run tests", "t7") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
+    await waitFor(() => byMethod("session/new").length > 0, "session/new");
+    reply(byMethod("session/new")[0].id, {
+      ...SETUP,
+      modes: { ...SETUP.modes, currentModeId: "accept-edits" },
+    });
+    await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
+    const promptId = lastByMethod("session/prompt").id;
+
+    onLine!(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "req_abc",
+        method: "session/request_permission",
+        params: {
+          sessionId: "S1",
+          toolCall: {
+            toolCallId: "call_3",
+            title: "Ran npm test",
+            kind: "execute",
+          },
+          options: [
+            { optionId: "allow_once", name: "Allow once" },
+            { optionId: "reject_once", name: "Reject" },
+          ],
+        },
+      }),
+    );
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested",
+    );
+    const requested = events.find((e) => e.type === "approval.requested");
+    expect(requested?.type).toBe("approval.requested");
+    if (requested?.type !== "approval.requested") return;
+    // The UI-facing id is a real number — NaN would wedge the approval card.
+    expect(Number.isFinite(requested.requestId)).toBe(true);
+    respondDevinApproval("t7", requested.requestId, "allow");
+    await waitFor(
+      () => parse().some((m) => m.id === "req_abc" && m.result),
+      "permission response",
+    );
+    // The wire response echoes the server's raw string id.
+    const response = parse().find((m) => m.id === "req_abc");
+    expect(response?.result?.outcome?.optionId).toBe("allow_once");
+
+    reply(promptId, { stopReason: "end_turn" });
+    await turn;
+    await stopDevinSession("t7");
+  });
+
   it("resumes a parked session with session/load instead of session/new", async () => {
     const events: HarnessEvent[] = [];
     const turn = sendDevinTurn(baseInput(events, "hey", "t5") as never);
@@ -414,7 +472,7 @@ describe("devin live turn sequence", () => {
 
     const events: HarnessEvent[] = [];
     const turn = sendDevinTurn({
-      ...baseInput(events, "hey", "t7"),
+      ...baseInput(events, "hey", "t9"),
       model: "devin:swe-2",
       modelSettings: { reasoning: "swe-2-high" },
     } as never);
@@ -459,7 +517,7 @@ describe("devin live turn sequence", () => {
     await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
     reply(lastByMethod("session/prompt").id, { stopReason: "end_turn" });
     await turn;
-    await stopDevinSession("t7");
+    await stopDevinSession("t9");
   });
 
   it("ignores a reasoning uid the selected model does not offer", async () => {

@@ -169,6 +169,7 @@ import {
   loadDiffViewer,
   loadFollowUpBehavior,
   loadGridArcadeEnabled,
+  loadKeepAwakeEnabled,
   loadLiveAgentsEnabled,
   loadNotesEnabled,
   saveClaudeHooks,
@@ -176,14 +177,21 @@ import {
   saveDiffViewer,
   saveFollowUpBehavior,
   saveGridArcadeEnabled,
+  saveKeepAwakeEnabled,
   saveLiveAgentsEnabled,
   saveNotesEnabled,
   settingsSectionDescription,
   settingsSectionLabel,
+  subscribeKeepAwakeEnabled,
   type DiffViewer,
   type FollowUpBehavior,
   type SettingsSectionId,
 } from "../lib/settings";
+import {
+  getPowerStatus,
+  retryKeepAwake,
+  subscribePowerStatus,
+} from "../lib/keepAwake";
 import { loadSoundsEnabled, playCue, saveSoundsEnabled } from "../lib/sounds";
 import {
   cachedNotificationPermission,
@@ -356,6 +364,16 @@ function GeneralPage({
   const [liveAgentsEnabled, setLiveAgentsEnabled] = useState(
     loadLiveAgentsEnabled,
   );
+  const keepAwakeEnabled = useSyncExternalStore(
+    subscribeKeepAwakeEnabled,
+    loadKeepAwakeEnabled,
+    () => false,
+  );
+  const powerStatus = useSyncExternalStore(
+    subscribePowerStatus,
+    getPowerStatus,
+    getPowerStatus,
+  );
   const [soundsEnabled, setSoundsEnabled] = useState(loadSoundsEnabled);
   const [notificationsEnabled, setNotificationsEnabled] = useState(
     loadNotificationsEnabled,
@@ -424,6 +442,10 @@ function GeneralPage({
   const onLiveAgentsEnabled = (next: boolean) => {
     saveLiveAgentsEnabled(next);
     setLiveAgentsEnabled(next);
+  };
+
+  const onKeepAwakeEnabled = (next: boolean) => {
+    saveKeepAwakeEnabled(next);
   };
 
   const onSoundsEnabled = (next: boolean) => {
@@ -531,6 +553,38 @@ function GeneralPage({
           label="Working agents"
           on={liveAgentsEnabled}
           onChange={onLiveAgentsEnabled}
+        />
+      </Row>
+      <Row
+        label="Keep computer awake while agents work"
+        description="Prevents idle sleep; may use more battery. Display and manual sleep are unaffected."
+      >
+        {keepAwakeEnabled && powerStatus.held ? (
+          <span className="text-[12px] text-content/45">
+            Active ·{" "}
+            {powerStatus.working === 1
+              ? "1 agent"
+              : `${powerStatus.working} agents`}{" "}
+            working
+          </span>
+        ) : null}
+        {keepAwakeEnabled && powerStatus.loaded && !powerStatus.supported ? (
+          <span className="text-[12px] text-content/45">
+            Not available on this platform
+          </span>
+        ) : null}
+        {keepAwakeEnabled && powerStatus.supported && powerStatus.error ? (
+          <span className="flex items-center gap-2 text-[12px] text-content/45">
+            {powerStatus.error}
+            <SecondaryButton onClick={() => void retryKeepAwake()}>
+              Retry
+            </SecondaryButton>
+          </span>
+        ) : null}
+        <Toggle
+          label="Keep computer awake while agents work"
+          on={keepAwakeEnabled}
+          onChange={onKeepAwakeEnabled}
         />
       </Row>
       <Row

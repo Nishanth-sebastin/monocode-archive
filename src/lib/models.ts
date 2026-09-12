@@ -1,3 +1,4 @@
+import { copilotEffortSetting } from "./harness/copilotEffort";
 import { pathKey, wslLocation } from "./paths";
 import type { HarnessId } from "./session";
 import { HARNESSES } from "./session";
@@ -25,6 +26,19 @@ export type AgentModel = {
   /** Context window, when the harness catalog reports one. */
   contextWindow?: number;
 };
+
+/** Muse's effort tiers; shared by the placeholder row and the MSP catalog. */
+export const MUSE_EFFORT_OPTIONS: ModelSettingChoice[] = [
+  { value: "default", label: "Default" },
+  { value: "ultra", label: "Ultra" },
+  { value: "max", label: "Max" },
+  { value: "xhigh", label: "Extra High" },
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
+  { value: "minimal", label: "Minimal" },
+  { value: "none", label: "None" },
+];
 
 export const MODELS: AgentModel[] = [
   {
@@ -179,6 +193,33 @@ export const MODELS: AgentModel[] = [
     name: "Default",
     nativeId: "",
   },
+  // Copilot advertises its real catalog over ACP at session start; this entry
+  // is only the pre-probe placeholder that selects Copilot's own default model.
+  // Reasoning effort is a `copilot --acp` launch option, offered separately.
+  {
+    id: "copilot:default",
+    harness: "copilot",
+    name: "Default",
+    nativeId: "",
+    settings: [copilotEffortSetting()],
+  },
+  // Muse advertises its real catalog over MSP; this entry is only the
+  // pre-probe placeholder that selects Muse's own default model.
+  {
+    id: "muse:default",
+    harness: "muse",
+    name: "Default",
+    nativeId: "",
+    settings: [
+      {
+        id: "effort",
+        label: "Reasoning",
+        kind: "select",
+        value: "default",
+        options: MUSE_EFFORT_OPTIONS,
+      },
+    ],
+  },
 ];
 
 export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
@@ -191,6 +232,8 @@ export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
   omp: "omp:default",
   fx: "fx:zai/glm-5.2-fast",
   devin: "devin:default",
+  copilot: "copilot:default",
+  muse: "muse:default",
 };
 
 const FAVORITES_KEY = "monocode.favoriteModels";
@@ -219,6 +262,8 @@ const HARNESS_ORDER: HarnessId[] = [
   "omp",
   "fx",
   "devin",
+  "copilot",
+  "muse",
 ];
 
 const EMPTY_MODELS: AgentModel[] = [];

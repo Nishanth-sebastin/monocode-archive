@@ -5,9 +5,11 @@ import {
   resolveClaudeBinary,
   resolveCodexBinary,
   resolveCursorBinary,
+  resolveCopilotBinary,
   resolveDevinBinary,
   resolveFxBinary,
   resolveGrokBinary,
+  resolveMuseBinary,
   resolveOmpBinary,
   resolveOpenCodeBinary,
   resolvePiBinary,
@@ -36,6 +38,11 @@ const CLI: Record<HarnessId, { name: string; install?: string }> = {
   omp: { name: "omp CLI", install: "curl -fsSL https://omp.sh/install | sh" },
   fx: { name: "fx CLI", install: "curl -fsSL https://fx.sh/setup.sh | bash" },
   devin: { name: "Devin CLI" },
+  copilot: {
+    name: "GitHub Copilot CLI",
+    install: "npm i -g @github/copilot",
+  },
+  muse: { name: "Muse CLI" },
 };
 
 const emptyAvailability: HarnessAvailability = {
@@ -48,6 +55,8 @@ const emptyAvailability: HarnessAvailability = {
   omp: false,
   fx: false,
   devin: false,
+  copilot: false,
+  muse: false,
 };
 const SIGN_IN: Partial<Record<HarnessId, string>> = {
   claude: "claude auth login",
@@ -56,6 +65,8 @@ const SIGN_IN: Partial<Record<HarnessId, string>> = {
   grok: "grok login",
   fx: "fx login",
   devin: "devin auth login",
+  copilot: "copilot login",
+  muse: "muse auth set --api-key-stdin",
 };
 
 type Probe = {
@@ -75,7 +86,7 @@ let version = 0;
 const listeners = new Set<() => void>();
 
 /**
- * A probe stats ~100 paths across eight resolvers. The model picker and the
+ * A probe stats ~100 paths across the per-provider resolvers. The model picker and the
  * providers pane both probe on open, so without a TTL every open pays for it
  * again to learn what it already knows. Installing a CLI mid-session is rare,
  * and `force` covers it.
@@ -184,7 +195,7 @@ export function probeHarnessAvailability(options?: {
   const location = options?.cwd ? wslLocation(options.cwd) : undefined;
   if (options?.cwd && location) {
     const cwd = options.cwd;
-    // One bridged round trip replaces eight serialized resolver requests.
+    // One bridged round trip replaces the serialized resolver requests.
     current.inflight = resolveWslAgents(cwd)
       .then((resolved) => {
         if (probes.get(key) !== current) return;
@@ -222,6 +233,8 @@ export function probeHarnessAvailability(options?: {
     fx: resolveFxBinary,
     grok: resolveGrokBinary,
     devin: resolveDevinBinary,
+    copilot: resolveCopilotBinary,
+    muse: resolveMuseBinary,
   };
   current.inflight = Promise.all(
     HARNESSES.map(async (id) => {

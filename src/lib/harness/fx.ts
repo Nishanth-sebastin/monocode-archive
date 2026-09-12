@@ -1,6 +1,7 @@
 import { nativeModelId } from "../models";
 import type { RuntimeMode } from "../session";
 import { AcpClient, type AcpHandlers } from "./acp";
+import type { JsonRpcId } from "./jsonRpc";
 import {
   killChild,
   resolveFxBinary,
@@ -476,7 +477,7 @@ function handleNotification(live: Live, method: string, params: unknown) {
 
 async function handleRequest(
   live: Live,
-  id: number,
+  id: JsonRpcId,
   method: string,
   params: unknown,
 ) {
@@ -497,7 +498,7 @@ async function handleRequest(
  * us is answered immediately. We never park a turn on an approval — that is
  * what left sessions stuck on "Working…" with an empty transcript.
  */
-async function handlePermission(live: Live, id: number, params: unknown) {
+async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
   const request = permissionRequestFromAcp(params);
   if (request.callId) {
     live.onEvent({

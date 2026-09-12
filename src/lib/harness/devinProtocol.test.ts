@@ -644,10 +644,10 @@ describe("isDevinAuthMessage", () => {
     expect(isDevinAuthMessage("request denied by sandbox policy")).toBe(false);
   });
 
-  it("devinAuthError only appends the auth hint for real auth failures", () => {
+  it("devinAuthError appends the auth hint for auth failures and timeouts", () => {
     expect(
       devinAuthError(new Error("session/new timed out")).message,
-    ).toContain("did not answer initialize");
+    ).toContain("devin auth login");
     expect(devinAuthError(new Error("spawn failed")).message).toBe(
       "Devin did not start. spawn failed",
     );

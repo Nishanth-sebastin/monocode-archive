@@ -36,6 +36,7 @@ export type DiscoveredSkill = {
     | "fx"
     | "grok"
     | "devin"
+    | "copilot"
     | "monocode";
 };
 
