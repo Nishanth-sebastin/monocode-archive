@@ -40,7 +40,8 @@ function publish(entry: Entry, stats: GitDiffStats | null) {
   if (
     entry.stats?.files === stats?.files &&
     entry.stats?.additions === stats?.additions &&
-    entry.stats?.deletions === stats?.deletions
+    entry.stats?.deletions === stats?.deletions &&
+    entry.stats?.branch === stats?.branch
   ) {
     return;
   }
@@ -76,6 +77,13 @@ export function applyProjectDiffStats(cwd: string, stats: GitDiffStats) {
   const entry = entryFor(cwd);
   entry.epoch += 1;
   publish(entry, stats);
+}
+
+/** Last published stats without subscribing or fetching — for aggregates
+ * (task rail rows) that must stay cheap and quiet. */
+export function peekProjectDiffStats(cwd: string): GitDiffStats | null {
+  if (!cwd || cwd === "~") return null;
+  return entries.get(pathKey(cwd))?.stats ?? null;
 }
 
 function start(entry: Entry) {

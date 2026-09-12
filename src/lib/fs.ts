@@ -57,6 +57,8 @@ export type GitDiffStats = {
   files: number;
   additions: number;
   deletions: number;
+  /** Head branch (or short HEAD when detached) — same as GitDiffIndex.branch. */
+  branch: string | null;
 };
 
 export function gitDiffStats(cwd: string): Promise<GitDiffStats> {

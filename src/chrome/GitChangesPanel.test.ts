@@ -301,6 +301,95 @@ it("updates PR and CI rows when their exact conversation associations change", a
   } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
 });
 
+it("lets a task session switch the panel between child working copies", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => rows.get(key) ?? null,
+    setItem: (key: string, value: string) => rows.set(key, value),
+  });
+  rows.set(
+    "monocode.taskWorkspaces.v1",
+    JSON.stringify([
+      {
+        id: "t1",
+        projectId: "p1",
+        name: "Ship it",
+        sessionIds: ["s1"],
+        createdAt: 1,
+        children: [
+          {
+            id: "c1",
+            repositoryId: "r1",
+            workingCopy: "/repo-a",
+            branch: "feat/a",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+          {
+            id: "c2",
+            repositoryId: "r2",
+            workingCopy: "/repo-b",
+            branch: "feat/b",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+        ],
+      },
+    ]),
+  );
+  const { invoke } = await import("@tauri-apps/api/core");
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  const indexed: string[] = [];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_diff_index") {
+      const cwd = (args as { cwd: string }).cwd;
+      indexed.push(cwd);
+      return {
+        branch: cwd === "/repo-b" ? "feat/b" : "feat/a",
+        ahead: 0,
+        behind: 0,
+        files: [],
+      };
+    }
+    return original(command, args);
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const chip = (name: string) =>
+    [...host.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes(name),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-a",
+          sourceSessionId: "s1",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    // A chip per child; the session's own copy is selected by default.
+    expect(chip("repo-a")).toBeTruthy();
+    expect(chip("repo-b")).toBeTruthy();
+    expect(host.querySelector("header")?.textContent).toContain("feat/a");
+    // Switching the chip refetches the index for that child's exact copy.
+    await act(async () => chip("repo-b")!.click());
+    expect(indexed).toContain("/repo-b");
+    expect(host.querySelector("header")?.textContent).toContain("feat/b");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.mocked(invoke).mockImplementation(original);
+    vi.unstubAllGlobals();
+  }
+});
+
 it("routes GitHub rows externally and keeps an Azure CI override independent", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rows = new Map<string, string>();

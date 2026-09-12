@@ -7,10 +7,20 @@ import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
 import {
   loadTaskWorkspaces,
   projectForTask,
+  repositoryForChild,
   subscribeTaskWorkspaces,
+  taskForSession,
   taskWorkspacesSnapshot,
+  type TaskChild,
+  type TaskWorkspace,
 } from "../lib/taskWorkspaces";
-import { projectName } from "../lib/paths";
+import {
+  childDelivery,
+  deliveryStores,
+  type DeliveryStores,
+} from "../lib/taskDelivery";
+import { projectsSnapshot, repositoryDisplayName, subscribeProjects } from "../lib/projects";
+import { pathKey, projectName } from "../lib/paths";
 import { Popover } from "./Popover";
 import { ContextCheckbox } from "./InboxContextPicker";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -64,7 +74,6 @@ import {
   gitDiscardAll,
   gitDiscardFile,
   gitPrCreate,
-  gitPrStatus,
   gitPush,
   gitStageAll,
   gitStageFile,
@@ -88,7 +97,11 @@ import {
 import { generateCommitMessage, generatePrContent } from "../lib/harness";
 import { invalidateWatchedFiles } from "../lib/fileWatch";
 import { MOD } from "../lib/platform";
-import { applyProjectDiffStats } from "../hooks/useProjectDiffStats";
+import {
+  applyProjectDiffStats,
+  useProjectDiffStats,
+} from "../hooks/useProjectDiffStats";
+import { useBranchPr, useCachedBranchPr } from "../hooks/useBranchPr";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 
 const GIT_POLL_MS = 2000;
@@ -108,7 +121,7 @@ let changesView: ChangesView = loadChangesView();
 /** Folders the user collapsed in tree view, keyed `<kind>:<dir>`. */
 const collapsedDirs = new Set<string>();
 const indexByCwd = new Map<string, GitDiffIndex>();
-const prByCwd = new Map<string, GitPr | null>();
+
 const EMPTY_FILES: GitChangedFile[] = [];
 
 type Props = {
@@ -138,9 +151,46 @@ export function GitChangesPanel({
   onOpenDelivery,
   onOpenCommit,
 }: Props) {
-  const { index, patch } = useDiffIndex(cwd, enabled);
+  // A task session's panel can inspect any prepared child working copy —
+  // everything below keys off viewCwd so Git, PR and CI state never mixes
+  // two children.
+  const tasksRaw = useSyncExternalStore(
+    subscribeTaskWorkspaces,
+    taskWorkspacesSnapshot,
+  );
+  const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
+  const task = useMemo(
+    () =>
+      sourceSessionId
+        ? (taskForSession(sourceSessionId, cwd)?.task ?? null)
+        : null,
+    // Stores re-read on every write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sourceSessionId, cwd, tasksRaw, projectsRaw],
+  );
+  const [viewCwd, setViewCwd] = useState(cwd);
+  const prevCwd = useRef(cwd);
+  useEffect(() => {
+    if (prevCwd.current !== cwd) {
+      prevCwd.current = cwd;
+      setViewCwd(cwd);
+      return;
+    }
+    // Drop a selection whose child lost its working copy (task revised).
+    if (
+      viewCwd !== cwd &&
+      !task?.children.some(
+        (entry) =>
+          entry.workingCopy && pathKey(entry.workingCopy) === pathKey(viewCwd),
+      )
+    ) {
+      setViewCwd(cwd);
+    }
+  }, [cwd, task, viewCwd]);
+
+  const { index, patch } = useDiffIndex(viewCwd, enabled);
   const files = index?.files ?? EMPTY_FILES;
-  const [, refreshDelivery] = useState(0);
+  const [deliveryTick, refreshDelivery] = useState(0);
   useEffect(() => {
     const refresh = () => refreshDelivery(value => value + 1);
     window.addEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, refresh);
@@ -154,8 +204,14 @@ export function GitChangesPanel({
       window.removeEventListener(DELIVERY_PROVIDERS_CHANGED, refresh);
     };
   }, []);
-  const prs = loadAzurePrAssociations(cwd, index?.branch ?? "", sourceSessionId);
-  const pipelines = loadCiSources(cwd, index?.branch ?? "", sourceSessionId);
+  const prs = loadAzurePrAssociations(viewCwd, index?.branch ?? "", sourceSessionId);
+  const pipelines = loadCiSources(viewCwd, index?.branch ?? "", sourceSessionId);
+  const stores = useMemo(
+    () => deliveryStores(),
+    // Re-parsed when any delivery store signals a change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deliveryTick],
+  );
 
   const [repository, setRepository] = useState<{cwd: string; branch: string; provider?: DeliveryProvider}>();
   const [choosingProviders, setChoosingProviders] = useState(false);
@@ -169,14 +225,14 @@ export function GitChangesPanel({
     setDeliveryError("");
     setDeliveryBusy(false);
     deliveryPending.current = false;
-    if (enabled && index?.branch) void ciContext(cwd).then(context => {
+    if (enabled && index?.branch) void ciContext(viewCwd).then(context => {
       if (generation === deliveryGeneration.current && context?.branch === index.branch)
-        setRepository({cwd, branch: context.branch, provider: repositoryProvider(context.remotes, index.remote)});
+        setRepository({cwd: viewCwd, branch: context.branch, provider: repositoryProvider(context.remotes, index.remote)});
     }).catch(() => { /* Explicit provider selection remains available. */ });
     return () => { deliveryGeneration.current++; };
-  }, [cwd, index?.branch, index?.remote, sourceSessionId, enabled]);
-  const defaultProvider = repository?.cwd === cwd && repository.branch === index?.branch ? repository.provider : undefined;
-  const providerFor = (kind: "pr" | "ci") => deliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind)
+  }, [viewCwd, index?.branch, index?.remote, sourceSessionId, enabled]);
+  const defaultProvider = repository?.cwd === viewCwd && repository.branch === index?.branch ? repository.provider : undefined;
+  const providerFor = (kind: "pr" | "ci") => deliveryProvider(viewCwd, index?.branch ?? "", sourceSessionId, kind)
     ?? ((kind === "pr" ? prs.length : pipelines.length) ? "azure" : defaultProvider);
   const openDelivery = async (kind: "pr" | "ci") => {
     const provider = providerFor(kind);
@@ -186,8 +242,8 @@ export function GitChangesPanel({
     const generation = deliveryGeneration.current;
     setDeliveryBusy(true); setDeliveryError("");
     try {
-      if (provider === "github") await openGitHubDelivery(cwd, kind, () => generation === deliveryGeneration.current);
-      else onOpenDelivery?.(cwd, {kind, branch: index?.branch ?? "", sourceSessionId});
+      if (provider === "github") await openGitHubDelivery(viewCwd, kind, () => generation === deliveryGeneration.current);
+      else onOpenDelivery?.(viewCwd, {kind, branch: index?.branch ?? "", sourceSessionId});
     } catch (error) { if (generation === deliveryGeneration.current) setDeliveryError(String(error instanceof Error ? error.message : error)); }
     finally { if (generation === deliveryGeneration.current) { deliveryPending.current = false; setDeliveryBusy(false); } }
   };
@@ -238,6 +294,15 @@ export function GitChangesPanel({
           <span className="ml-auto" />
         )}
       </header>
+      {task && task.children.length > 1 ? (
+        <TaskChildStrip
+          task={task}
+          viewCwd={viewCwd}
+          enabled={enabled}
+          stores={stores}
+          onSelect={setViewCwd}
+        />
+      ) : null}
       <div className="shrink-0 border-b border-content/10 py-1">
         {(
           [
@@ -285,15 +350,15 @@ export function GitChangesPanel({
         );})}
         <details open={choosingProviders} onToggle={event => setChoosingProviders(event.currentTarget.open)} className="px-3 text-[11px] text-content/45">
           <summary className="cursor-pointer py-1">Providers</summary>
-          <div className="space-y-1 pb-2">{(["pr", "ci"] as const).map(kind => <div key={kind} className="flex items-center justify-between gap-2"><span>{kind === "pr" ? "PR" : "CI"}</span><Select disabled={!enabled || !index || deliveryBusy} label={kind === "pr" ? "PR provider" : "CI provider"} value={deliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind) ?? ""} options={[{value:"",label:"Automatic"},{value:"github",label:kind === "pr" ? "GitHub" : "GitHub checks"},{value:"azure",label:kind === "pr" ? "Azure Repos" : "Azure Pipelines"}]} onChange={value => {
-            try { saveDeliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind, value as DeliveryProvider | ""); setDeliveryError(""); }
+          <div className="space-y-1 pb-2">{(["pr", "ci"] as const).map(kind => <div key={kind} className="flex items-center justify-between gap-2"><span>{kind === "pr" ? "PR" : "CI"}</span><Select disabled={!enabled || !index || deliveryBusy} label={kind === "pr" ? "PR provider" : "CI provider"} value={deliveryProvider(viewCwd, index?.branch ?? "", sourceSessionId, kind) ?? ""} options={[{value:"",label:"Automatic"},{value:"github",label:kind === "pr" ? "GitHub" : "GitHub checks"},{value:"azure",label:kind === "pr" ? "Azure Repos" : "Azure Pipelines"}]} onChange={value => {
+            try { saveDeliveryProvider(viewCwd, index?.branch ?? "", sourceSessionId, kind, value as DeliveryProvider | ""); setDeliveryError(""); }
             catch { setDeliveryError("Could not save provider choice. Try again."); }
           }} /></div>)}</div>
         </details>
         {deliveryError ? <p role="alert" className="px-3 py-1 text-[11px] text-red-400">{deliveryError}</p> : null}
       </div>
       <ChangedFiles
-        cwd={cwd}
+        cwd={viewCwd}
         textHarness={textHarness}
         sourceSessionId={sourceSessionId}
         index={index}
@@ -306,7 +371,7 @@ export function GitChangesPanel({
         onOpenAllChanges={onOpenAllChanges}
         onMutated={(paths, apply, touchWorktree) => {
           if (apply) patch(apply);
-          notifyGitChanged(cwd);
+          notifyGitChanged(viewCwd);
           // Only discard and sync rewrite worktree bytes; staging and
           // committing must not reload open editors.
           if (touchWorktree) {
@@ -337,7 +402,7 @@ export function GitChangesPanel({
         style={graphExpanded ? { height: graphHeight } : undefined}
       >
         <GitHistoryGraph
-          cwd={cwd}
+          cwd={viewCwd}
           enabled={enabled}
           expanded={graphExpanded}
           selectedSha={selectedSha}
@@ -349,6 +414,116 @@ export function GitChangesPanel({
         />
       </div>
     </div>
+  );
+}
+
+/** Compact per-repository selector for a task session: each chip shows the
+ * child's repo, branch, change stats and delivery attention; selecting one
+ * retargets the whole panel at that working copy. */
+function TaskChildStrip({
+  task,
+  viewCwd,
+  enabled,
+  stores,
+  onSelect,
+}: {
+  task: TaskWorkspace;
+  viewCwd: string;
+  enabled: boolean;
+  stores: DeliveryStores;
+  onSelect: (cwd: string) => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-content/10 px-2 py-1.5">
+      {task.children.map((entry) => (
+        <TaskChildChip
+          key={entry.id}
+          task={task}
+          entry={entry}
+          selected={
+            !!entry.workingCopy &&
+            pathKey(entry.workingCopy) === pathKey(viewCwd)
+          }
+          enabled={enabled}
+          stores={stores}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
+
+function TaskChildChip({
+  task,
+  entry,
+  selected,
+  enabled,
+  stores,
+  onSelect,
+}: {
+  task: TaskWorkspace;
+  entry: TaskChild;
+  selected: boolean;
+  enabled: boolean;
+  stores: DeliveryStores;
+  onSelect: (cwd: string) => void;
+}) {
+  const stats = useProjectDiffStats(
+    entry.workingCopy ?? "",
+    enabled && !!entry.workingCopy,
+  );
+  const branch = stats?.branch ?? entry.branch;
+  const githubPr = useCachedBranchPr(entry.workingCopy ?? "", branch);
+  const delivery = useMemo(
+    () => childDelivery(task, entry, [branch, entry.branch], githubPr, stores),
+    [task, entry, branch, githubPr, stores],
+  );
+  const repo = repositoryForChild(task, entry);
+  const repoName = repo
+    ? repositoryDisplayName(repo)
+    : entry.workingCopy
+      ? basename(entry.workingCopy)
+      : "Repository";
+  const prepared = !!entry.workingCopy;
+  return (
+    <button
+      type="button"
+      disabled={!prepared}
+      title={
+        prepared
+          ? `${repoName} · ${entry.workingCopy}`
+          : `${repoName} · not prepared yet`
+      }
+      onClick={() => entry.workingCopy && onSelect(entry.workingCopy)}
+      className={`flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] ${
+        selected
+          ? "border-accent/50 bg-accent/10 text-content"
+          : "border-content/15 text-content/60 hover:border-content/25 hover:text-content"
+      } disabled:opacity-40`}
+    >
+      <span className="max-w-28 truncate">{repoName}</span>
+      {branch ? (
+        <span className="max-w-24 truncate text-content/40">{branch}</span>
+      ) : null}
+      {stats?.files ? (
+        <span className="shrink-0 tabular-nums">
+          <span className="text-emerald-400/80">+{stats.additions}</span>{" "}
+          <span className="text-red-400/80">−{stats.deletions}</span>
+        </span>
+      ) : null}
+      {delivery.prs ? (
+        <GitPullRequest
+          className={`size-3 shrink-0 ${delivery.prNeedsAttention ? "text-red-400" : "text-content/45"}`}
+          strokeWidth={1.75}
+        />
+      ) : null}
+      {delivery.ci ? (
+        <CircleDashed
+          className={`size-3 shrink-0 ${delivery.ciFailing ? "text-red-400" : delivery.ciRunning ? "text-amber-400" : "text-content/45"}`}
+          strokeWidth={1.75}
+        />
+      ) : null}
+    </button>
   );
 }
 
@@ -460,12 +635,27 @@ function ChangedFiles({
       onOpenFileRef.current(path, kind),
     [],
   );
-  const [message, setMessage] = useState("");
+  // Commit message drafts are per working copy — switching a task's child
+  // chip must not carry one repo's draft into another's commit box.
+  const messageDrafts = useRef(new Map<string, string>());
+  const [message, setMessageState] = useState(
+    () => messageDrafts.current.get(cwd) ?? "",
+  );
+  const setMessage = useCallback(
+    (value: string) => {
+      messageDrafts.current.set(cwd, value);
+      setMessageState(value);
+    },
+    [cwd],
+  );
+  useEffect(() => {
+    setMessageState(messageDrafts.current.get(cwd) ?? "");
+  }, [cwd]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [stagedExpanded, setStagedExpanded] = useState(stagedOpen);
   const [changesExpanded, setChangesExpanded] = useState(changesOpen);
   const [view, setView] = useState<ChangesView>(changesView);
-  const { pr, reload: reloadPr } = usePrStatus(cwd, index?.branch);
+  const { pr, reload: reloadPr } = useBranchPr(cwd, index?.branch);
   const staged = useMemo(() => files.filter((file) => file.staged), [files]);
   const unstaged = useMemo(
     () => files.filter((file) => file.unstaged),
@@ -1011,53 +1201,6 @@ function ChangedFiles({
       ) : null}
     </aside>
   );
-}
-
-function usePrStatus(
-  cwd: string,
-  branch: string | null | undefined,
-): { pr: GitPr | null; reload: () => void } {
-  const [pr, setPr] = useState<GitPr | null>(() => cachedPr(cwd, branch));
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((value) => value + 1), []);
-
-  useEffect(() => {
-    if (!cwd || cwd === "~" || !branch) {
-      setPr(null);
-      return;
-    }
-    let cancelled = false;
-    const load = () => {
-      void gitPrStatus(cwd)
-        .then((next) => {
-          if (cancelled) return;
-          prByCwd.set(cwd, next);
-          setPr(next);
-        })
-        .catch(() => {
-          if (cancelled) return;
-          prByCwd.set(cwd, null);
-          setPr(null);
-        });
-    };
-    load();
-    const onResume = () => load();
-    window.addEventListener("focus", onResume);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("focus", onResume);
-    };
-  }, [branch, cwd, nonce]);
-
-  return { pr, reload };
-}
-
-function cachedPr(
-  cwd: string,
-  branch: string | null | undefined,
-): GitPr | null {
-  if (!cwd || cwd === "~" || !branch) return null;
-  return prByCwd.get(cwd) ?? null;
 }
 
 function syncStatusLabel(index: GitDiffIndex): string {
@@ -1773,6 +1916,7 @@ function useDiffIndex(
           files: next.files.length,
           additions: next.additions,
           deletions: next.deletions,
+          branch: next.branch,
         });
         // A patch landed while this fetch was in flight; the mutation's
         // git-changed notification already queued a follow-up load.
