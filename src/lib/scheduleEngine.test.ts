@@ -162,6 +162,12 @@ it("notify mode emits the row without dispatching", async () => {
   expect(runSchedule).not.toHaveBeenCalled();
   expect(prepareDraft).not.toHaveBeenCalled();
   expect(loadSchedules()[0].history.at(-1)?.text).toBe("Notified.");
+  // The due row IS the notification — no second outcome row.
+  expect(
+    emittedAttention().filter(
+      (row) => row.source?.kind === "schedule" && row.source.id === schedule.id,
+    ),
+  ).toHaveLength(1);
 });
 
 it("runScheduleNow fires immediately without catch-up bookkeeping", async () => {

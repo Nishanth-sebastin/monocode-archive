@@ -1,3 +1,4 @@
+import { resolveAttentionWhere } from "./attention";
 import type { HarnessId } from "./session";
 
 /**
@@ -274,7 +275,9 @@ export function saveSchedule(
   if (!draft.instructions.trim())
     return { error: "Write the instructions this schedule sends." };
   if (!isCadence(draft.cadence)) return { error: "Pick a valid time." };
-  if (draft.cadence.kind === "once" && !existingId && draft.cadence.at <= Date.now())
+  // A one-shot in the past can never fire — saving it would leave a dead,
+  // enabled-looking schedule, so edits face the same check as new rows.
+  if (draft.cadence.kind === "once" && draft.cadence.at <= Date.now())
     return { error: "Pick a time in the future." };
   if (!draft.target.cwd.trim())
     return { error: "Choose the checkout runs happen in." };
@@ -317,17 +320,34 @@ export function saveSchedule(
 
 export function removeSchedule(id: string) {
   writeSchedules(loadSchedules().filter((row) => row.id !== id));
+  // Due/outcome rows from a deleted schedule can never change or resolve —
+  // drop them rather than leaving dead rows in the queue.
+  resolveAttentionWhere(
+    (row) => row.source?.kind === "schedule" && row.source.id === id,
+  );
 }
 
 export function setScheduleEnabled(id: string, enabled: boolean) {
-  updateSchedule(id, (schedule) => ({
-    ...schedule,
-    enabled,
-    // Resuming re-arms from now — a paused schedule never fires a stale slot.
-    nextRunAt: enabled
-      ? (nextOccurrence(schedule.cadence, Date.now()) ?? schedule.nextRunAt)
-      : schedule.nextRunAt,
-  }));
+  updateSchedule(id, (schedule) => {
+    if (!enabled) return { ...schedule, enabled };
+    // Resuming re-arms from now — a paused schedule never fires a stale
+    // slot. For a one-shot whose time passed while paused there is no next
+    // occurrence: mark it missed rather than firing late instructions.
+    const next = nextOccurrence(schedule.cadence, Date.now());
+    if (next === null) {
+      return {
+        ...schedule,
+        enabled: true,
+        nextRunAt: 0,
+        lastOutcome: "Missed — paused past the scheduled time.",
+        history: scheduleHistory(
+          schedule,
+          { kind: "missed", text: "Missed — paused past the scheduled time." },
+        ),
+      };
+    }
+    return { ...schedule, enabled: true, nextRunAt: next };
+  });
 }
 
 /** Single-writer update — engine and UI both go through this. */

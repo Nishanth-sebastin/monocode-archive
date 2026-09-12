@@ -42,25 +42,29 @@ export type ScheduleEngineHooks = {
 
 const TICK_MS = 15_000;
 let timer: number | undefined;
+let changeListener: (() => void) | undefined;
 const inflight = new Set<string>();
 /** Manual "run now" — fires once without touching catch-up accounting. */
 const queuedRuns = new Set<string>();
 
 export function startScheduleEngine(hooks: ScheduleEngineHooks): () => void {
   stopScheduleEngine();
-  const onChange = () => void tick(hooks);
-  window.addEventListener(SCHEDULES_CHANGED, onChange);
+  changeListener = () => void tick(hooks);
+  window.addEventListener(SCHEDULES_CHANGED, changeListener);
   timer = window.setInterval(() => void tick(hooks), TICK_MS);
   void tick(hooks);
-  return () => {
-    window.removeEventListener(SCHEDULES_CHANGED, onChange);
-    stopScheduleEngine();
-  };
+  return () => stopScheduleEngine();
 }
 
 export function stopScheduleEngine() {
   if (timer !== undefined) window.clearInterval(timer);
   timer = undefined;
+  if (changeListener) {
+    window.removeEventListener(SCHEDULES_CHANGED, changeListener);
+    changeListener = undefined;
+  }
+  queuedRuns.clear();
+  inflight.clear();
 }
 
 /** "Run now" from the Automations page — fires once regardless of cadence.
@@ -197,6 +201,10 @@ async function fire(
       outcome = "Draft prepared.";
     } else {
       const error = await hooks.runSchedule?.(schedule);
+      // A delete during the await already resolved this schedule's rows —
+      // an outcome emitted now would be a row nothing can ever resolve.
+      const gone = !loadSchedules().some((row) => row.id === schedule.id);
+      if (gone) return;
       if (error) {
         updateSchedule(schedule.id, (row) => ({
           ...row,
@@ -213,7 +221,9 @@ async function fire(
       lastOutcome: outcome,
       history: scheduleHistory(row, { kind: "run", text: outcome }, now),
     }));
-    outcomeRow(schedule, outcome, true, now);
+    // Notify mode's due row IS the notification — a second "ran — Notified."
+    // outcome row would just duplicate it in the queue.
+    if (schedule.mode !== "notify") outcomeRow(schedule, outcome, true, now);
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     updateSchedule(schedule.id, (row) => ({
@@ -221,7 +231,9 @@ async function fire(
       lastOutcome: text,
       history: scheduleHistory(row, { kind: "error", text }, Date.now()),
     }));
-    outcomeRow(schedule, text, false, now);
+    if (loadSchedules().some((row) => row.id === schedule.id)) {
+      outcomeRow(schedule, text, false, now);
+    }
   }
 }
 

@@ -6997,6 +6997,10 @@ export default function App({
             (row) => row.id === schedule.target.sessionId,
           )
         : undefined;
+      // An explicit session binding that no longer resolves must not
+      // silently spawn a new conversation — the user chose that one.
+      if (schedule.target.sessionId && !bound)
+        return "The bound conversation is gone — edit the schedule's target.";
       if (bound && (bound.busy || sessionNeedsInput(bound)))
         return "The bound conversation is busy — run skipped.";
       const { text, revision } = composeActionPrompt({
@@ -7025,8 +7029,9 @@ export default function App({
       sessionsRef.current = [...sessionsRef.current, session];
       setSessions(sessionsRef.current);
       const tab = newTab(session.id);
+      // An unattended run must not steal focus — the outcome row is the
+      // entry point to review what ran.
       appendTab(tab, schedule.target.cwd);
-      setActiveTabId(tab.id);
       const accepted = await onSubmit(session.id, text, [], {
         action: ref,
         followUpBehavior: "queue",

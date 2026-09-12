@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 import { beforeEach, expect, it } from "vitest";
+import { emitAttention, emittedAttention } from "./attention";
 import {
   loadSchedules,
   nextOccurrence,
+  removeSchedule,
   saveSchedule,
   setScheduleEnabled,
   skippedSlots,
@@ -119,6 +121,76 @@ it("pause keeps the schedule; resume re-arms rather than firing a stale slot", (
   setScheduleEnabled(schedule!.id, true);
   const resumed = loadSchedules()[0];
   expect(resumed.nextRunAt).toBeGreaterThan(Date.now());
+});
+
+it("resuming a one-shot whose slot passed while paused marks it missed", () => {
+  const { schedule } = saveSchedule(
+    draft({ cadence: { kind: "once", at: Date.now() + 60_000 } }),
+  );
+  // The slot passed while paused — resuming must not fire stale
+  // instructions; the schedule is marked missed and left unscheduled.
+  updateSchedule(schedule!.id, (row) => ({
+    ...row,
+    cadence: { kind: "once", at: Date.now() - 60_000 },
+    nextRunAt: Date.now() - 60_000,
+  }));
+  setScheduleEnabled(schedule!.id, false);
+  setScheduleEnabled(schedule!.id, true);
+  const resumed = loadSchedules()[0];
+  expect(resumed.enabled).toBe(true);
+  expect(resumed.nextRunAt).toBe(0);
+  expect(resumed.history.at(-1)?.kind).toBe("missed");
+  expect(resumed.lastOutcome).toMatch(/paused past/);
+});
+
+it("editing a spent one-shot requires a fresh time — not a silent dead row", () => {
+  const past = Date.now() - 60_000;
+  const { schedule } = saveSchedule(
+    draft({ cadence: { kind: "once", at: Date.now() + 60_000 } }),
+  );
+  // The one-shot fired and is spent.
+  updateSchedule(schedule!.id, (row) => ({
+    ...row,
+    cadence: { kind: "once", at: past },
+    nextRunAt: 0,
+  }));
+  const edited = saveSchedule(
+    draft({ name: "Renamed", cadence: { kind: "once", at: past } }),
+    schedule!.id,
+  );
+  expect(edited.error).toMatch(/future/i);
+  // Re-pointing it to the future revives it.
+  const revived = saveSchedule(
+    draft({ cadence: { kind: "once", at: Date.now() + 3600_000 } }),
+    schedule!.id,
+  );
+  expect(revived.schedule?.nextRunAt).toBeGreaterThan(Date.now());
+});
+
+it("removing a schedule resolves its emitted rows", () => {
+  const { schedule } = saveSchedule(draft());
+  emitAttention({
+    key: `schedule-due:${schedule!.id}`,
+    kind: "schedule",
+    title: "Standup prep",
+    urgency: 2,
+    at: Date.now(),
+    signature: "due:1",
+    source: { kind: "schedule", id: schedule!.id },
+  });
+  emitAttention({
+    key: "watcher:other:x",
+    kind: "watcher",
+    title: "unrelated",
+    urgency: 2,
+    at: Date.now(),
+    signature: "x",
+    source: { kind: "watcher", id: "other" },
+  });
+  removeSchedule(schedule!.id);
+  expect(emittedAttention().map((row) => row.key)).toEqual([
+    "watcher:other:x",
+  ]);
 });
 
 it("malformed schedules are dropped; history is bounded", () => {
