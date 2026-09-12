@@ -97,6 +97,10 @@ function terminalTheme(light: boolean) {
   };
 }
 
+/** The newest spawn owns the id: a StrictMode/remount ghost cleanup must not
+ * kill the replacement PTY once its own spawn promise finally settles. */
+const latestSpawn = new Map<string, Promise<void>>();
+
 function monoFont(): string {
   const fromCss = getComputedStyle(document.documentElement)
     .getPropertyValue("--font-mono")
@@ -222,6 +226,7 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
         throw error;
       });
     startingRef.current = starting;
+    latestSpawn.set(id, starting);
     void starting.catch(() => undefined);
 
     const dataSub = term.onData((data) => {
@@ -329,7 +334,13 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
       renderSub.dispose();
       bufferSub.dispose();
       unsubscribe();
-      void starting.catch(() => undefined).then(() => killPty(id));
+      void starting
+        .catch(() => undefined)
+        .then(() => {
+          if (latestSpawn.get(id) !== starting) return;
+          latestSpawn.delete(id);
+          void killPty(id);
+        });
       term.dispose();
       termRef.current = null;
       spawned.current = false;
@@ -388,12 +399,13 @@ export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) 
       .then(() =>
         cancelled || !spawned.current
           ? undefined
-          : writePty(id, `${pending.text}\r`),
+          : writePty(id, `${pending.text}\r`).then(() => {
+              if (!cancelled)
+                onMetaChangeRef.current?.({
+                  command: { launched: pending.runId },
+                });
+            }),
       )
-      .then(() => {
-        if (!cancelled)
-          onMetaChangeRef.current?.({ command: { launched: pending.runId } });
-      })
       .catch(() => undefined);
     return () => {
       cancelled = true;
