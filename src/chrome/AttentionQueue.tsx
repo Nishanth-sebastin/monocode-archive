@@ -13,6 +13,7 @@ import {
   GitBranch,
   GitMerge,
   GitPullRequest,
+  GitPullRequestClosed,
   MessageSquare,
   Play,
   Settings,
@@ -42,6 +43,7 @@ const KIND_ICON = {
   "ci-failure": AlertCircle,
   "pr-behind": GitBranch,
   "pr-conflicts": GitMerge,
+  "pr-done": GitPullRequestClosed,
   schedule: Clock,
   watcher: Zap,
 } as const;

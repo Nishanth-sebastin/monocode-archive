@@ -9,6 +9,7 @@ import { pollWatcherSource, type WatcherPoll } from "./watcherPoll";
 import {
   WATCHERS_CHANGED,
   loadWatchers,
+  removeWatcher,
   updateWatcher,
   watcherHistory,
   watcherPollKey,
@@ -238,6 +239,19 @@ async function runPollGroup(
       // A healthy poll clears any earlier "check failed" row.
       removeAttention(`watcher-error:${watcher.id}`);
       if (!applied) continue; // watcher was removed mid-poll
+      if (result.done) {
+        // The source is terminal — its conditions just resolved above, so
+        // the watcher has nothing left to report. Drop it instead of polling
+        // a finished PR forever; the adapter's goodbye row explains why.
+        removeWatcher(watcher.id);
+        items.push({
+          ...result.done,
+          key: `watcher-done:${watcher.id}`,
+          signature: `done:${result.done.title}`,
+          source: { kind: "watcher", id: watcher.id },
+        });
+        continue;
+      }
       for (const event of fresh) {
         dispatches.push({ watcher: applied, item: event.item });
       }

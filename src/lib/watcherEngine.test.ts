@@ -251,6 +251,55 @@ it("run mode dispatches once per event and honors the cooldown", async () => {
   expect(runAction).toHaveBeenCalledTimes(1);
 });
 
+const donePoll = (title = "PR #42 — merged"): WatcherPoll => ({
+  conditions: [],
+  done: {
+    kind: "pr-done",
+    title,
+    urgency: 2,
+    at: Date.now(),
+    action: { kind: "open-url", url: "https://github.com/acme/app/pull/42" },
+  },
+});
+
+it("removes a watcher whose source reached a terminal state", async () => {
+  const watcher = makeWatcher();
+  poll.mockResolvedValue(result("a"));
+  start();
+  await vi.waitFor(() => expect(rows().length).toBe(1));
+  poll.mockResolvedValue(donePoll());
+  pollWatcherNow(watcher.id);
+  await vi.waitFor(() => expect(loadWatchers().length).toBe(0));
+  // The live condition row resolved; the goodbye row explains the cleanup.
+  expect(rows().map((row) => row.key)).toEqual([`watcher-done:${watcher.id}`]);
+  expect(rows()[0].kind).toBe("pr-done");
+  expect(rows()[0].title).toBe("PR #42 — merged");
+});
+
+it("a terminal poll cleans up every watcher sharing the source", async () => {
+  makeWatcher({ name: "One" });
+  makeWatcher({ name: "Two" });
+  poll.mockResolvedValue(donePoll("PR #42 — closed"));
+  start();
+  await vi.waitFor(() => expect(loadWatchers().length).toBe(0));
+  expect(poll).toHaveBeenCalledTimes(1);
+  expect(rows().length).toBe(2);
+  expect(rows().every((row) => row.key.startsWith("watcher-done:"))).toBe(true);
+});
+
+it("a terminal poll never dispatches the watcher's action", async () => {
+  const runAction = vi.fn().mockResolvedValue(undefined);
+  makeWatcher({
+    mode: "run",
+    actionId: "implement",
+    target: { cwd: "/repo", harness: "claude", model: "" },
+  });
+  poll.mockResolvedValue({ ...donePoll(), conditions: [condition("a")] });
+  start({ runAction });
+  await vi.waitFor(() => expect(loadWatchers().length).toBe(0));
+  expect(runAction).not.toHaveBeenCalled();
+});
+
 it("shared poll keys make one provider call for peer watchers", async () => {
   makeWatcher({ name: "One" });
   makeWatcher({ name: "Two" });

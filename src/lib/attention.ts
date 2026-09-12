@@ -31,6 +31,7 @@ export type AttentionKind =
   | "ci-failure" // failing CI on the user's PR/branch
   | "pr-behind" // PR behind the default branch
   | "pr-conflicts" // PR has merge conflicts
+  | "pr-done" // PR reached a terminal state (merged/closed)
   | "schedule" // scheduled-run outcome (ran/skipped/missed/failed)
   | "watcher"; // watcher lifecycle row: source errors with a reconnect affordance
 
@@ -174,6 +175,7 @@ const KINDS: AttentionKind[] = [
   "ci-failure",
   "pr-behind",
   "pr-conflicts",
+  "pr-done",
   "schedule",
   "watcher",
 ];

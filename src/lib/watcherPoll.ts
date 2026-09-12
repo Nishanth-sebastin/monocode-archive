@@ -45,6 +45,9 @@ export type WatcherPoll = {
   conditions: WatcherCondition[];
   /** Adapter watermark persisted on the watcher. */
   cursor?: string;
+  /** The source reached a terminal state — the engine emits this goodbye
+   * row and removes the watcher instead of polling it forever. */
+  done?: Omit<AttentionItem, "key" | "signature" | "source">;
 };
 
 /** Cap items read into conditions; anything beyond is summarized. */
@@ -112,7 +115,27 @@ async function pollGithubPr(
     // freezes after the first poll.
     githubWorkItemThread(source.cwd, "pr", source.number, { force: true }),
   ]);
-  if (state.state.toUpperCase() !== "OPEN") return { conditions: [] };
+  {
+    const prState = state.state.toUpperCase();
+    if (prState !== "OPEN") {
+      return {
+        conditions: [],
+        done: {
+          kind: "pr-done",
+          title: `PR #${state.number} — ${prState === "MERGED" ? "merged" : "closed"}`,
+          detail: state.title || undefined,
+          urgency: ATTENTION_INFO,
+          at: Date.now(),
+          provider: "github",
+          repo: source.repo,
+          cwd: source.cwd,
+          url: state.url,
+          ...(source.sessionId ? { sessionId: source.sessionId } : {}),
+          action: { kind: "open-url", url: state.url },
+        },
+      };
+    }
+  }
   const conditions: WatcherCondition[] = [];
   const prLabel = `PR #${state.number}`;
   const base = {
@@ -271,7 +294,32 @@ async function pollAzurePr(
   source: Extract<WatcherSource, { kind: "azure-pr" }>,
 ): Promise<WatcherPoll> {
   const { pr, revision } = await readAzurePr(source.target);
-  if (pr.status !== "active") return { conditions: [] };
+  if (pr.status !== "active") {
+    const url = azurePrUrl(source.target);
+    return {
+      conditions: [],
+      done: {
+        kind: "pr-done",
+        title: `PR !${pr.pullRequestId} — ${
+          pr.status === "abandoned"
+            ? "abandoned"
+            : pr.status === "completed"
+              ? "completed"
+              : "closed"
+        }`,
+        detail: pr.title || undefined,
+        urgency: ATTENTION_INFO,
+        at: Date.now(),
+        provider: "azure",
+        account: source.target.accountId,
+        repo: source.target.repository,
+        cwd: source.cwd,
+        url,
+        ...(source.sessionId ? { sessionId: source.sessionId } : {}),
+        action: { kind: "open-url", url },
+      },
+    };
+  }
   const threads = await readAzurePrSection<AzurePrThread>(
     source.target,
     revision,

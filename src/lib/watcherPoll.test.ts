@@ -136,10 +136,20 @@ describe("github-pr adapter", () => {
     });
   });
 
-  it("emits nothing for a closed PR", async () => {
+  it("reports a non-open PR as done so the engine retires the watcher", async () => {
     prState.mockResolvedValue(state({ state: "MERGED" }));
-    const poll = await pollWatcherSource(WATCHER);
-    expect(poll.conditions).toEqual([]);
+    const merged = await pollWatcherSource(WATCHER);
+    expect(merged.conditions).toEqual([]);
+    expect(merged.done?.kind).toBe("pr-done");
+    expect(merged.done?.title).toBe("PR #42 — merged");
+    expect(merged.done?.action).toMatchObject({
+      kind: "open-url",
+      url: "https://github.com/acme/app/pull/42",
+    });
+    prState.mockResolvedValue(state({ state: "CLOSED" }));
+    expect((await pollWatcherSource(WATCHER)).done?.title).toBe(
+      "PR #42 — closed",
+    );
   });
 
   it("binds update-branch to the head branch and the PR base", async () => {
