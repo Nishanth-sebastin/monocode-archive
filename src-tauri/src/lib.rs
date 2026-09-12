@@ -22,6 +22,7 @@ mod macos;
 mod menu;
 mod notes;
 mod notifications;
+mod power;
 mod project_logo;
 mod pty;
 mod rate_limits;
@@ -182,6 +183,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(harness::HarnessHost::new())
+        .manage(power::PowerHost::new())
         .manage(pty::PtyHost::new())
         .manage(window_transfer::WindowTransferState::new())
         .manage(dictation::DictationHost::new())
@@ -345,6 +347,8 @@ pub fn run() {
             harness::harness_resolve_fx,
             harness::harness_resolve_grok,
             harness::harness_resolve_devin,
+            harness::harness_resolve_copilot,
+            harness::harness_resolve_muse,
             harness::harness_free_port,
             harness::harness_spawn,
             harness::harness_write,
@@ -354,6 +358,10 @@ pub fn run() {
             harness::harness_sse_open,
             harness::harness_sse_close,
             harness::harness_exec,
+            power::power_sync,
+            power::power_set_enabled,
+            power::power_status,
+            power::power_retry,
             rate_limits::fetch_claude_usage,
             pty::pty_spawn,
             pty::pty_write,
@@ -442,6 +450,9 @@ pub fn run() {
             event: tauri::WindowEvent::Destroyed,
             ..
         } => {
+            if let Some(host) = handle.try_state::<power::PowerHost>() {
+                host.drop_window(Some(handle), &label);
+            }
             let other_window = handle.webview_windows().keys().any(|name| name != &label);
             if !other_window {
                 reap_harness_children(handle);
@@ -463,6 +474,9 @@ pub fn run() {
             window::request_quit(handle);
         }
         tauri::RunEvent::Exit => {
+            if let Some(host) = handle.try_state::<power::PowerHost>() {
+                host.release(Some(handle));
+            }
             reap_harness_children(handle);
         }
         _ => {}

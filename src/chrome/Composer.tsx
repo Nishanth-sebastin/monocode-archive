@@ -16,6 +16,7 @@ import {
   StickyNote,
   Trash2,
   X,
+  Zap,
 } from "./icons";
 import {
   useCallback,
@@ -189,7 +190,11 @@ type Props = {
   onSubmit: (
     text: string,
     attachments: Attachment[],
-    options?: { intent?: TurnIntent },
+    options?: {
+      intent?: TurnIntent;
+      action?: import("../lib/agentActions").ActionRunRef;
+      followUpBehavior?: import("../lib/settings").FollowUpBehavior;
+    },
   ) => void;
   onStop?: () => void;
   onCompactContext?: () => boolean;
@@ -201,6 +206,9 @@ type Props = {
   onResumeQueue?: () => void;
   onOpenFile?: (path: string) => void;
   onDraftChange?: (text: string) => void;
+  /** Extra control rendered in the toolbar beside the attach button — the
+   * agent-actions menu lives here. */
+  actionsSlot?: ReactNode;
   children?: ReactNode;
 };
 
@@ -307,9 +315,10 @@ function MessageQueue({
         ) : null}
         {messages.map((message, index) => {
           const editing = editingId === message.id;
-          const label =
-            message.text.trim() ||
-            `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
+          const label = message.action
+            ? message.action.name
+            : message.text.trim() ||
+              `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
           return (
             <div
               key={message.id}
@@ -317,7 +326,11 @@ function MessageQueue({
                 index > 0 ? "border-t border-content/10" : ""
               }`}
             >
-              <ListEnd className="size-3.5 shrink-0" />
+              {message.action ? (
+                <Zap className="size-3.5 shrink-0" />
+              ) : (
+                <ListEnd className="size-3.5 shrink-0" />
+              )}
               {editing ? (
                 <>
                   <textarea
@@ -459,6 +472,7 @@ export function Composer({
   onResumeQueue,
   onOpenFile,
   onDraftChange,
+  actionsSlot,
   children,
 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -1629,6 +1643,7 @@ export function Composer({
                 </Popover>
               ) : null}
             </div>
+            {actionsSlot}
             {planSelected ? (
               <button
                 type="button"

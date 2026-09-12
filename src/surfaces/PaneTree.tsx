@@ -133,6 +133,14 @@ type Shared = {
   onMovePane: (fromId: string, toId: string, edge: PaneEdge) => void;
   onNewTerminal: (sessionId: string) => void;
   onTerminalMetaChange?: (fileId: string, patch: TerminalMetaPatch) => void;
+  onRunAgentAction?: (args: {
+    sourceSessionId: string;
+    cwd: string;
+    harness: HarnessId;
+    model: string;
+    text: string;
+    action: import("../lib/agentActions").ActionRunRef;
+  }) => void;
 };
 
 type Props = Shared & { layout: LayoutNode };
@@ -202,6 +210,7 @@ function PaneTreeComponent({
   onMovePane,
   onNewTerminal,
   onTerminalMetaChange,
+  onRunAgentAction,
 }: Props) {
   const treeRef = useRef<HTMLDivElement>(null);
   const layoutRef = useRef(layout);
@@ -420,6 +429,7 @@ function PaneTreeComponent({
                 onHandoff={onHandoff}
                 onNewTerminal={onNewTerminal}
                 onPaneDragStart={onPaneDragStart}
+                onRunAgentAction={onRunAgentAction}
               />
               </SessionSurface>
             ) : null}

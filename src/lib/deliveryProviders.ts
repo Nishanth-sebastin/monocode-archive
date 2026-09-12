@@ -36,6 +36,27 @@ export function repositoryProvider(remotes: { name: string; url: string }[], ups
   });
   return providers.length && providers.every(value => value === providers[0]) ? providers[0] : undefined;
 }
+/**
+ * Splits a PR row's provider into `detected` — what "Auto" resolves to from
+ * the remotes alone — and `effective`, the explicit override when present.
+ * Keeping them separate matters for display: an explicit pick must not
+ * rewrite what Auto claims it will do. `upstream` is `@{upstream}` output
+ * like `origin/feature`; a local upstream (`main`) names no remote, so the
+ * repo's default remote is used instead.
+ */
+export function resolvePrProviders(input: {
+  remotes: { name: string; url: string }[];
+  upstream?: string | null;
+  remote?: string | null;
+  override?: DeliveryProvider;
+}): { detected?: DeliveryProvider; effective?: DeliveryProvider } {
+  const upstreamRemote =
+    input.upstream && input.upstream.includes("/")
+      ? input.upstream.split("/")[0]
+      : (input.remote ?? undefined);
+  const detected = repositoryProvider(input.remotes, upstreamRemote);
+  return { detected, effective: input.override ?? detected };
+}
 export async function openGitHubDelivery(cwd: string, kind: "pr" | "ci", current: () => boolean, prUrl?: string) {
   const url = prUrl ?? (await gitPrStatus(cwd))?.url;
   if (!current()) return;

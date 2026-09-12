@@ -1,5 +1,5 @@
 import { Select } from "./Select";
-import { deliveryProvider, saveDeliveryProvider, repositoryProvider, openGitHubDelivery, DELIVERY_PROVIDERS_CHANGED, type DeliveryProvider } from "../lib/deliveryProviders";
+import { deliveryProvider, saveDeliveryProvider, resolvePrProviders, openGitHubDelivery, DELIVERY_PROVIDERS_CHANGED, type DeliveryProvider } from "../lib/deliveryProviders";
 import { loadAzurePrAssociations, AZURE_PR_ASSOCIATIONS_CHANGED } from "../lib/azureRepos";
 import { loadCiSources, ciState, ciContext, AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
 import type { DeliveryTabSource } from "../lib/layout";
@@ -287,10 +287,12 @@ export function GitChangesPanel({
     deliveryPending.current = false;
     if (enabled && index?.branch) void ciContext(viewCwd).then(context => {
       if (generation === deliveryGeneration.current && context?.branch === index.branch)
-        setRepository({cwd: viewCwd, branch: context.branch, provider: repositoryProvider(context.remotes, index.remote)});
+        // Same detection the PR sheet's "Auto" uses — the branch upstream's
+        // remote wins over the default remote.
+        setRepository({cwd: viewCwd, branch: context.branch, provider: resolvePrProviders({remotes: context.remotes, upstream: index.upstream, remote: index.remote}).detected});
     }).catch(() => { /* Explicit provider selection remains available. */ });
     return () => { deliveryGeneration.current++; };
-  }, [viewCwd, index?.branch, index?.remote, sourceSessionId, enabled]);
+  }, [viewCwd, index?.branch, index?.remote, index?.upstream, sourceSessionId, enabled]);
   const defaultProvider = repository?.cwd === viewCwd && repository.branch === index?.branch ? repository.provider : undefined;
   const providerFor = (kind: "pr" | "ci") => deliveryProvider(viewCwd, index?.branch ?? "", sourceSessionId, kind)
     ?? ((kind === "pr" ? prs.length : pipelines.length) ? "azure" : defaultProvider);

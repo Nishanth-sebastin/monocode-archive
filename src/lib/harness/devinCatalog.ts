@@ -51,8 +51,14 @@ async function discoverViaAcp(projectCwd?: string) {
   const cwd = projectCwd ?? (await homeDir());
   const PROBE_ID = `monocode-devin-probe-${crypto.randomUUID()}`;
   const acp = new AcpClient(PROBE_ID, {
-    onRequest: (id) => {
-      void acp.respond(id, {}).catch(() => undefined);
+    onRequest: (id, method) => {
+      const result =
+        method === "session/request_permission"
+          ? { outcome: { outcome: "cancelled" } }
+          : method === "elicitation/create"
+            ? { action: "cancel" }
+            : {};
+      void acp.respond(id, result).catch(() => undefined);
     },
   });
 

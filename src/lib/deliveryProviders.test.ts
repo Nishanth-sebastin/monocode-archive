@@ -2,7 +2,7 @@
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { gitPrStatus } from "./fs";
-import { deliveryProvider, saveDeliveryProvider, repositoryProvider, openGitHubDelivery } from "./deliveryProviders";
+import { deliveryProvider, saveDeliveryProvider, repositoryProvider, resolvePrProviders, openGitHubDelivery } from "./deliveryProviders";
 vi.mock("@tauri-apps/plugin-opener", () => ({openUrl: vi.fn()}));
 vi.mock("./fs", () => ({gitPrStatus: vi.fn()}));
 beforeEach(() => { const rows = new Map<string, string>(); vi.stubGlobal("localStorage", {getItem:(key:string) => rows.get(key) ?? null, setItem:(key:string,value:string) => rows.set(key,value)}); });
@@ -15,6 +15,26 @@ it("resolves known remotes without choosing between ambiguous providers", () => 
   expect(repositoryProvider([github, azure])).toBeUndefined();
   expect(repositoryProvider([github, azure], "azure")).toBe("azure");
   expect(repositoryProvider([{name:"origin", url:"https://github.com.evil.test/a/b"}])).toBeUndefined();
+});
+it("separates detected auto resolution from an explicit provider override", () => {
+  const github = {name:"origin", url:"git@github.com:team/repo.git"};
+  const azure = {name:"azure", url:"https://dev.azure.com/team/project/_git/repo"};
+  // Auto on a GitHub-only remote set detects github; an azure override stays
+  // effective without rewriting what auto claims.
+  expect(resolvePrProviders({remotes:[github], upstream:"origin/feature"}))
+    .toEqual({detected:"github", effective:"github"});
+  expect(resolvePrProviders({remotes:[github], upstream:"origin/feature", override:"azure"}))
+    .toEqual({detected:"github", effective:"azure"});
+  // A local upstream like `main` names no remote — the default remote is used.
+  expect(resolvePrProviders({remotes:[github], upstream:"main", remote:"origin"}))
+    .toEqual({detected:"github", effective:"github"});
+  // Mixed remotes stay undetectable unless a remote upstream disambiguates.
+  expect(resolvePrProviders({remotes:[github, azure], upstream:"main", remote:"origin"}))
+    .toEqual({detected:"github", effective:"github"});
+  expect(resolvePrProviders({remotes:[github, azure], upstream:"azure/feature", remote:"origin"}))
+    .toEqual({detected:"azure", effective:"azure"});
+  expect(resolvePrProviders({remotes:[github, azure]}))
+    .toEqual({detected:undefined, effective:undefined});
 });
 it("keeps PR and CI choices scoped to checkout, branch and conversation", () => {
   saveDeliveryProvider("/repo", "feature", "owner", "pr", "github");

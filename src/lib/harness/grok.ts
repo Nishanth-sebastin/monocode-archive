@@ -1,6 +1,7 @@
 import { nativeModelId } from "../models";
 import type { RuntimeMode } from "../session";
 import { AcpClient, type AcpHandlers } from "./acp";
+import type { JsonRpcId } from "./jsonRpc";
 import {
   killChild,
   resolveGrokBinary,
@@ -50,8 +51,10 @@ type Live = {
   planning: boolean;
   runtimeMode: RuntimeMode;
   onEvent: (event: HarnessEvent) => void;
-  approvals: Map<number, (decision: ApprovalDecision) => void>;
-  questions: Map<number, (reply: UserQuestionReply) => void>;
+  approvals: Map<string, (decision: ApprovalDecision) => void>;
+  questions: Map<string, (reply: UserQuestionReply) => void>;
+  /** Synthetic requestId source for ACP requests with non-numeric ids. */
+  nextRequestId: number;
   turns: Promise<void>;
 };
 
@@ -153,7 +156,7 @@ export function respondGrokApproval(
   requestId: number,
   decision: ApprovalDecision,
 ) {
-  liveByThread.get(sessionId)?.approvals.get(requestId)?.(decision);
+  liveByThread.get(sessionId)?.approvals.get(String(requestId))?.(decision);
 }
 
 export function respondGrokQuestion(
@@ -161,7 +164,7 @@ export function respondGrokQuestion(
   requestId: number,
   reply: UserQuestionReply,
 ) {
-  liveByThread.get(sessionId)?.questions.get(requestId)?.(reply);
+  liveByThread.get(sessionId)?.questions.get(String(requestId))?.(reply);
 }
 
 export async function cancelGrokTurn(sessionId: string): Promise<void> {
@@ -394,6 +397,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       onEvent: input.onEvent,
       approvals: new Map(),
       questions: new Map(),
+      nextRequestId: 1_000_000_000,
       turns: Promise.resolve(),
     };
     liveRef.current = live;
@@ -514,7 +518,7 @@ function unwrapSessionNotification(params: unknown): unknown {
 
 async function handleRequest(
   live: Live,
-  id: number,
+  id: JsonRpcId,
   method: string,
   params: unknown,
 ) {
@@ -547,7 +551,7 @@ async function handleRequest(
     .catch(() => undefined);
 }
 
-async function handlePermission(live: Live, id: number, params: unknown) {
+async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
   const request = permissionRequestFromAcp(params);
   if (request.callId) {
     live.onEvent({
@@ -583,9 +587,12 @@ async function handlePermission(live: Live, id: number, params: unknown) {
     return;
   }
 
+  // The UI needs a numeric requestId; non-numeric ACP ids get a synthetic
+  // one (large, so it cannot collide with server-chosen numeric ids).
+  const requestId = typeof id === "number" ? id : (live.nextRequestId += 1);
   live.onEvent({
     type: "approval.requested",
-    requestId: id,
+    requestId,
     title: request.title,
     kind: request.kind,
     callId: request.callId,
@@ -593,10 +600,10 @@ async function handlePermission(live: Live, id: number, params: unknown) {
   });
 
   const decision = await new Promise<ApprovalDecision>((resolve) => {
-    live.approvals.set(id, resolve);
+    live.approvals.set(String(requestId), resolve);
   });
-  live.approvals.delete(id);
-  live.onEvent({ type: "approval.resolved", requestId: id, decision });
+  live.approvals.delete(String(requestId));
+  live.onEvent({ type: "approval.resolved", requestId, decision });
 
   await live.acp.respond(id, {
     outcome: {
@@ -606,22 +613,23 @@ async function handlePermission(live: Live, id: number, params: unknown) {
   });
 }
 
-async function handleAskQuestion(live: Live, id: number, params: unknown) {
+async function handleAskQuestion(live: Live, id: JsonRpcId, params: unknown) {
   const questions = askQuestionsFromAcp(params);
+  const requestId = typeof id === "number" ? id : (live.nextRequestId += 1);
   live.onEvent({
     type: "question.asked",
-    requestId: id,
+    requestId,
     title: questionPromptTitle(questions),
     questions,
   });
 
   const reply = await new Promise<UserQuestionReply>((resolve) => {
-    live.questions.set(id, resolve);
+    live.questions.set(String(requestId), resolve);
   });
-  live.questions.delete(id);
+  live.questions.delete(String(requestId));
   live.onEvent({
     type: "question.resolved",
-    requestId: id,
+    requestId,
     decision: reply.kind,
   });
 

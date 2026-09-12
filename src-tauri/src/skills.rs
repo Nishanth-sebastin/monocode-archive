@@ -161,11 +161,15 @@ pub(crate) fn list_skills_from(
             add_root(home.join(dir), "user", source);
         }
     }
+    // Copilot's project skills live under .github/skills; ~/.github/skills is
+    // not a real location, so only the project root is registered.
+    add_root(project.join(".github/skills"), "project", "copilot");
     if let Some(home) = home {
         add_root(home.join(".pi/agent/skills"), "user", "pi");
         add_root(home.join(".omp/agent/skills"), "user", "omp");
         // Devin's documented user skills live under XDG config, not ~/.devin.
         add_root(home.join(".config/devin/skills"), "user", "devin");
+        add_root(home.join(".copilot/skills"), "user", "copilot");
         if crate::wsl::path_location(project).ok().flatten().is_none() {
             for (root, scope, namespace) in claude_plugin_skill_roots(home, project) {
                 add_namespaced_root(
@@ -805,6 +809,37 @@ mod tests {
         let user_skill = skills.iter().find(|s| s.name == "devin-global").unwrap();
         assert_eq!(user_skill.source, "devin");
         assert_eq!(user_skill.scope, "user");
+    }
+
+    #[test]
+    fn discovers_copilot_project_and_user_skills() {
+        let project = tmp("proj-copilot");
+        let home = tmp("home-copilot");
+        write_skill(
+            &project.0.join(".github/skills"),
+            "copilot-review",
+            "---\nname: copilot-review\ndescription: copilot project skill\n---\n",
+        );
+        write_skill(
+            &home.0.join(".copilot/skills"),
+            "copilot-global",
+            "---\nname: copilot-global\ndescription: copilot user skill\n---\n",
+        );
+        // ~/.github/skills is not a real Copilot location — must stay undiscovered.
+        write_skill(
+            &home.0.join(".github/skills"),
+            "copilot-bogus",
+            "---\nname: copilot-bogus\ndescription: not a copilot root\n---\n",
+        );
+
+        let skills = list_skills_from(&project.0, Some(&home.0), None);
+        let project_skill = skills.iter().find(|s| s.name == "copilot-review").unwrap();
+        assert_eq!(project_skill.source, "copilot");
+        assert_eq!(project_skill.scope, "project");
+        let user_skill = skills.iter().find(|s| s.name == "copilot-global").unwrap();
+        assert_eq!(user_skill.source, "copilot");
+        assert_eq!(user_skill.scope, "user");
+        assert!(skills.iter().all(|s| s.name != "copilot-bogus"));
     }
 
     #[test]

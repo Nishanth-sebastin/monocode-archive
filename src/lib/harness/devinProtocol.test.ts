@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  devinAuthError,
   devinAutoOption,
   devinCommandsFromUpdate,
   devinConfigOptions,
@@ -10,11 +11,13 @@ import {
   devinModeId,
   devinModeIdsFromConfig,
   devinModesFromSetup,
+  devinModelSelectionForUid,
   devinModelsFromConfig,
   devinModelsFromOutput,
   devinPermissionOptionId,
   devinPermissionRequest,
   devinPromptBlocks,
+  isDevinAuthMessage,
   sessionIdFromResult,
 } from "./devinProtocol";
 
@@ -39,7 +42,11 @@ const SESSION_NEW = {
           name: "Claude Sonnet 5 Medium",
           _meta: { "cognition.ai/contextWindow": 1_000_000 },
         },
-        { value: "swe-2-high", name: "SWE 2 High" },
+        { value: "claude-sonnet-5-low", name: "Claude Sonnet 5 Low" },
+        { value: "claude-sonnet-5-high", name: "Claude Sonnet 5 High" },
+        { value: "claude-sonnet-5-max", name: "Claude Sonnet 5 Max" },
+        { value: "swe-2-high", name: "SWE-2 High" },
+        { value: "swe-2-medium", name: "SWE-2 Medium" },
       ],
     },
     {
@@ -80,25 +87,198 @@ describe("devinModeId", () => {
 });
 
 describe("devinConfigOptions + models", () => {
-  it("reads the dynamic model select from session/new configOptions", () => {
+  it("groups the model select into one row per model with a reasoning setting", () => {
     const options = devinConfigOptions(SESSION_NEW.configOptions);
     expect(options).toHaveLength(2);
     expect(devinCurrentModelId(options)).toBe("claude-sonnet-5-medium");
     const models = devinModelsFromConfig(options);
     expect(models).toEqual([
       {
-        id: "devin:claude-sonnet-5-medium",
+        id: "devin:claude-sonnet-5",
         harness: "devin",
-        name: "Claude Sonnet 5 Medium",
+        name: "Claude Sonnet 5",
         nativeId: "claude-sonnet-5-medium",
         contextWindow: 1_000_000,
+        settings: [
+          {
+            id: "reasoning",
+            label: "Reasoning",
+            kind: "select",
+            value: "claude-sonnet-5-medium",
+            options: [
+              { value: "claude-sonnet-5-low", label: "Low" },
+              { value: "claude-sonnet-5-medium", label: "Medium" },
+              { value: "claude-sonnet-5-high", label: "High" },
+              { value: "claude-sonnet-5-max", label: "Max" },
+            ],
+          },
+        ],
       },
       {
-        id: "devin:swe-2-high",
+        id: "devin:swe-2",
         harness: "devin",
-        name: "SWE 2 High",
+        name: "SWE-2",
         nativeId: "swe-2-high",
+        settings: [
+          {
+            id: "reasoning",
+            label: "Reasoning",
+            kind: "select",
+            value: "swe-2-high",
+            options: [
+              { value: "swe-2-medium", label: "Medium" },
+              { value: "swe-2-high", label: "High" },
+            ],
+          },
+        ],
       },
+    ]);
+  });
+
+  it("keeps speed, context and sidekick combinations as separate models", () => {
+    const models = devinModelsFromConfig(
+      devinConfigOptions([
+        {
+          id: "model",
+          type: "select",
+          options: [
+            { value: "claude-opus-5-low", name: "Claude Opus 5 Low" },
+            { value: "claude-opus-5-high", name: "Claude Opus 5 High" },
+            { value: "claude-opus-5-low-fast", name: "Claude Opus 5 Low Fast" },
+            {
+              value: "claude-opus-5-high-fast",
+              name: "Claude Opus 5 High Fast",
+            },
+            { value: "glm-5-2", name: "GLM-5.2 High" },
+            { value: "glm-5-2-none-1m", name: "GLM-5.2 No Thinking 1M" },
+            {
+              value: "fusion-a-high-sidekick-b-medium",
+              name: "Fusion (Claude Fable 5.1 High + SWE-2 Medium)",
+            },
+            {
+              value: "fusion-a-low-sidekick-b-medium",
+              name: "Fusion (Claude Fable 5.1 Low + SWE-2 Medium)",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(models.map((model) => model.name)).toEqual([
+      "Claude Opus 5",
+      "Claude Opus 5 Fast",
+      "GLM-5.2",
+      "GLM-5.2 1M",
+      "Fusion (Claude Fable 5.1 + SWE-2 Medium)",
+    ]);
+    // A label like "GLM-5.2 High" still exposes the level even when the uid
+    // itself carries no level suffix.
+    expect(models[2]!.nativeId).toBe("glm-5-2");
+    const fusion = models[4]!;
+    const reasoning = fusion.settings?.find(
+      (setting) => setting.id === "reasoning",
+    );
+    expect(reasoning?.options).toEqual([
+      { value: "fusion-a-low-sidekick-b-medium", label: "Low" },
+      { value: "fusion-a-high-sidekick-b-medium", label: "High" },
+    ]);
+  });
+
+  it("maps a reported model uid back to its group and reasoning value", () => {
+    const options = devinConfigOptions(SESSION_NEW.configOptions);
+    expect(devinModelSelectionForUid(options, "claude-sonnet-5-max")).toEqual({
+      id: "devin:claude-sonnet-5",
+      reasoning: "claude-sonnet-5-max",
+    });
+    expect(
+      devinModelSelectionForUid(options, "claude-sonnet-5-medium"),
+    ).toEqual({ id: "devin:claude-sonnet-5", reasoning: "claude-sonnet-5-medium" });
+    expect(devinModelSelectionForUid(options, "unknown-uid")).toEqual({
+      id: "devin:unknown-uid",
+    });
+  });
+
+  it("keeps 'X Thinking' variants selectable alongside 'X' labels", () => {
+    const models = devinModelsFromConfig(
+      devinConfigOptions([
+        {
+          id: "model",
+          type: "select",
+          options: [
+            { value: "sol-high", name: "Sol High" },
+            { value: "sol-high-thinking", name: "Sol High Thinking" },
+            { value: "sol-max", name: "Sol Max Thinking" },
+          ],
+        },
+      ]),
+    );
+    // "Sol High" and "Sol High Thinking" collapse to the same level word —
+    // both uids stay selectable with a disambiguated label, and "Max
+    // Thinking" folds into the Sol group as Max.
+    expect(models).toHaveLength(1);
+    const reasoning = models[0]!.settings?.find(
+      (setting) => setting.id === "reasoning",
+    );
+    expect(reasoning?.options).toEqual([
+      { value: "sol-high", label: "High (sol-high)" },
+      { value: "sol-high-thinking", label: "High (sol-high-thinking)" },
+      { value: "sol-max", label: "Max" },
+    ]);
+  });
+
+  it("parses spelled-out and lowercase level words, and falls back to the uid", () => {
+    const models = devinModelsFromConfig(
+      devinConfigOptions([
+        {
+          id: "model",
+          type: "select",
+          options: [
+            { value: "a-xhigh", name: "Model A Extra High" },
+            { value: "a-low", name: "model a low" },
+            // Labels without a level word — the uid suffix carries it.
+            { value: "b-medium", name: "Second choice" },
+            { value: "b-high", name: "First choice" },
+          ],
+        },
+      ]),
+    );
+    const a = models.find((model) => model.id === "devin:model-a");
+    expect(
+      a?.settings?.find((setting) => setting.id === "reasoning")?.options,
+    ).toEqual([
+      { value: "a-low", label: "Low" },
+      { value: "a-xhigh", label: "Extra High" },
+    ]);
+    // With no level word in either label, both uids still group under the
+    // uid-derived descriptor.
+    const b = models.find((model) => model.name === "b");
+    expect(
+      b?.settings?.find((setting) => setting.id === "reasoning")?.options,
+    ).toEqual([
+      { value: "b-medium", label: "Medium" },
+      { value: "b-high", label: "High" },
+    ]);
+  });
+
+  it("keeps grouped reasoning options past the raw choice cap", () => {
+    // More raw choices than the old pre-group cap — truncating before
+    // grouping would drop the Tail family entirely.
+    const options = Array.from({ length: 300 }, (_, index) => ({
+      value: `filler-${index}-high`,
+      name: "Filler High",
+    }));
+    options.push(
+      { value: "tail-low", name: "Tail Low" },
+      { value: "tail-max", name: "Tail Max" },
+    );
+    const models = devinModelsFromConfig(
+      devinConfigOptions([{ id: "model", type: "select", options }]),
+    );
+    const tail = models.find((model) => model.name === "Tail");
+    expect(
+      tail?.settings?.find((setting) => setting.id === "reasoning")?.options,
+    ).toEqual([
+      { value: "tail-low", label: "Low" },
+      { value: "tail-max", label: "Max" },
     ]);
   });
 
@@ -133,13 +313,20 @@ describe("devinConfigOptions + models", () => {
         ],
       }),
     );
-    expect(models.map((m) => m.nativeId)).toEqual([
-      "claude-opus-5",
-      "claude-opus-5-medium",
-      "claude-opus-5-low",
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({
+      id: "devin:claude-opus-5",
+      name: "Claude Opus 5",
+      nativeId: "claude-opus-5-medium",
+      contextWindow: 1_000_000,
+    });
+    expect(
+      models[0].settings?.find((setting) => setting.id === "reasoning")
+        ?.options,
+    ).toEqual([
+      { value: "claude-opus-5-low", label: "Low" },
+      { value: "claude-opus-5-medium", label: "Medium" },
     ]);
-    expect(models[1].contextWindow).toBe(1_000_000);
-    expect(models[1].id).toBe("devin:claude-opus-5-medium");
   });
 
   it("returns no models from junk output", () => {
@@ -419,6 +606,54 @@ describe("devin elicitation", () => {
         parsed.fields,
       ),
     ).toEqual({ action: "cancel" });
+  });
+});
+
+describe("isDevinAuthMessage", () => {
+  it("ignores routine stderr logs mentioning login-shell env snapshots", () => {
+    expect(
+      isDevinAuthMessage(
+        "2026-09-11T21:12:24.021390Z  INFO toolbox::tools::exec::login_shell_env: var_count=90 captured login-shell env snapshot from '/bin/zsh'",
+      ),
+    ).toBe(false);
+    expect(isDevinAuthMessage("INFO spawned devin acp")).toBe(false);
+    expect(isDevinAuthMessage("authorizing local port")).toBe(false);
+  });
+
+  it("matches real sign-in failures", () => {
+    expect(isDevinAuthMessage("Error: not signed in")).toBe(true);
+    expect(isDevinAuthMessage("You are not authenticated")).toBe(true);
+    expect(isDevinAuthMessage("authentication required")).toBe(true);
+    expect(isDevinAuthMessage("401 Unauthorized")).toBe(true);
+    expect(isDevinAuthMessage("please run `devin auth login`")).toBe(true);
+    expect(isDevinAuthMessage("Please log in to continue")).toBe(true);
+    // Reversed phrasing and logged-out states count too.
+    expect(isDevinAuthMessage("token expired")).toBe(true);
+    expect(isDevinAuthMessage("session has expired")).toBe(true);
+    expect(isDevinAuthMessage("credentials have expired")).toBe(true);
+    expect(isDevinAuthMessage("signed out — sign in again")).toBe(true);
+  });
+
+  it("ignores unrelated permission and service errors", () => {
+    expect(isDevinAuthMessage("permission denied: /etc/shadow")).toBe(false);
+    expect(isDevinAuthMessage("rm: cannot remove: Permission denied")).toBe(
+      false,
+    );
+    expect(isDevinAuthMessage("sandbox forbidden syscall")).toBe(false);
+    expect(isDevinAuthMessage("upstream 403 on artifact upload")).toBe(false);
+    expect(isDevinAuthMessage("request denied by sandbox policy")).toBe(false);
+  });
+
+  it("devinAuthError appends the auth hint for auth failures and timeouts", () => {
+    expect(
+      devinAuthError(new Error("session/new timed out")).message,
+    ).toContain("devin auth login");
+    expect(devinAuthError(new Error("spawn failed")).message).toBe(
+      "Devin did not start. spawn failed",
+    );
+    expect(devinAuthError(new Error("401 Unauthorized")).message).toContain(
+      "devin auth login",
+    );
   });
 });
 

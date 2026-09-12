@@ -1,9 +1,10 @@
-import { nativeModelId } from "../models";
+import { findModel, nativeModelId } from "../models";
 import { pathKey } from "../paths";
 import type { RuntimeMode } from "../session";
-import type { UserQuestion, UserQuestionReply } from "../userQuestion";
+import type { UserQuestionReply } from "../userQuestion";
 import { questionPromptTitle } from "../userQuestion";
 import { AcpClient, type AcpHandlers } from "./acp";
+import type { JsonRpcId } from "./jsonRpc";
 import {
   killChild,
   resolveDevinBinary,
@@ -27,14 +28,16 @@ import {
   devinModeIdsFromConfig,
   devinModesFromSetup,
   devinModelConfigId,
+  devinModelSelectionForUid,
   devinPermissionOptionId,
   devinPermissionRequest,
   devinPromptBlocks,
   devinSpawnArgs,
+  devinStopReasonMessage,
+  isDevinAuthMessage,
   sessionIdFromResult,
   stringField,
   type DevinConfigOption,
-  type DevinElicitField,
 } from "./devinProtocol";
 import {
   type CommandContext,
@@ -50,12 +53,6 @@ import type {
   SteerTurnInput,
 } from "./types";
 
-type PendingQuestion = {
-  resolve: (reply: UserQuestionReply) => void;
-  questions: UserQuestion[];
-  fields: DevinElicitField[];
-};
-
 type Live = {
   threadId: string;
   acp: AcpClient;
@@ -63,6 +60,8 @@ type Live = {
   cwd: string;
   modelConfigId: string;
   configOptions: DevinConfigOption[];
+  /** Synthetic requestId source for ACP requests with non-numeric ids. */
+  nextRequestId: number;
   modeIds: string[];
   currentModeId?: string;
   commands: NativeCommand[];
@@ -73,8 +72,8 @@ type Live = {
   runtimeMode: RuntimeMode;
   planning: boolean;
   onEvent: (event: HarnessEvent) => void;
-  approvals: Map<number, (decision: ApprovalDecision) => void>;
-  questions: Map<number, PendingQuestion>;
+  approvals: Map<string, (decision: ApprovalDecision) => void>;
+  questions: Map<string, (reply: UserQuestionReply) => void>;
   turns: Promise<void>;
 };
 
@@ -100,6 +99,10 @@ const commandListeners = new Map<
  * Live Devin CLI adapter. Spawns `devin acp` and talks Agent Client Protocol.
  * Devin absorbs a `session/prompt` sent mid-turn as a steer/follow-up, so the
  * steer path writes directly instead of joining the serialized turn queue.
+ *
+ * The session lifecycle, cancel/stop, approval, elicitation, and command
+ * plumbing deliberately mirror copilot.ts — keep fixes to those shared
+ * mechanics in sync between the two files.
  */
 export async function sendDevinTurn(input: SendTurnInput): Promise<void> {
   let live: Live;
@@ -150,8 +153,13 @@ export async function compactDevinContext(
   input: CompactContextInput,
 ): Promise<void> {
   let live = liveByThread.get(input.sessionId);
-  if (!live || live.cwd !== input.cwd) {
-    live = await ensureLive(input);
+  if (!live || pathKey(live.cwd) !== pathKey(input.cwd)) {
+    try {
+      live = await ensureLive(input);
+    } catch (error) {
+      cancelledThreads.delete(input.sessionId);
+      throw error;
+    }
   }
   if (cancelledThreads.delete(input.sessionId)) return;
 
@@ -162,6 +170,8 @@ export async function compactDevinContext(
       live.cancelled = false;
       live.muteUpdates = false;
       try {
+        await applyModelSelection(live, input);
+        if (live.cancelled) return;
         live.onEvent({ type: "status", text: "Compacting context…" });
         live.promptInFlight += 1;
         try {
@@ -201,7 +211,7 @@ export async function compactDevinContext(
  */
 export async function steerDevinTurn(input: SteerTurnInput): Promise<void> {
   const live = liveByThread.get(input.sessionId);
-  if (!live || live.cwd !== input.cwd) {
+  if (!live || pathKey(live.cwd) !== pathKey(input.cwd)) {
     throw new Error("No active Devin session to steer");
   }
   const blocks = devinPromptBlocks(input.text, input.attachments);
@@ -231,7 +241,7 @@ export function respondDevinApproval(
   requestId: number,
   decision: ApprovalDecision,
 ) {
-  liveByThread.get(sessionId)?.approvals.get(requestId)?.(decision);
+  liveByThread.get(sessionId)?.approvals.get(String(requestId))?.(decision);
 }
 
 export function respondDevinQuestion(
@@ -239,7 +249,24 @@ export function respondDevinQuestion(
   requestId: number,
   reply: UserQuestionReply,
 ) {
-  liveByThread.get(sessionId)?.questions.get(requestId)?.resolve(reply);
+  liveByThread.get(sessionId)?.questions.get(String(requestId))?.(reply);
+}
+
+/** Settle parked approvals/questions so handlers can't outlive the child. */
+function settlePending(live: Live) {
+  for (const [, resolve] of live.approvals) resolve("deny");
+  live.approvals.clear();
+  for (const [, resolve] of live.questions) resolve({ kind: "skipped" });
+  live.questions.clear();
+}
+
+/** Push the empty command set so slash menus drop a dead session's commands. */
+function clearCommands(live: Live) {
+  live.commands = [];
+  const listeners = commandListeners.get(
+    commandContextKey({ sessionId: live.threadId, cwd: live.cwd }),
+  );
+  for (const listener of listeners ?? []) listener(live.commands);
 }
 
 export async function cancelDevinTurn(sessionId: string): Promise<void> {
@@ -250,10 +277,7 @@ export async function cancelDevinTurn(sessionId: string): Promise<void> {
   }
   live.cancelled = true;
   live.muteUpdates = true;
-  for (const [, resolve] of live.approvals) resolve("deny");
-  live.approvals.clear();
-  for (const [, pending] of live.questions) pending.resolve({ kind: "skipped" });
-  live.questions.clear();
+  settlePending(live);
   await live.acp
     .notify("session/cancel", { sessionId: live.acpSessionId })
     .catch(() => undefined);
@@ -265,12 +289,12 @@ export async function stopDevinSession(sessionId: string): Promise<void> {
   const live = liveByThread.get(sessionId);
   liveByThread.delete(sessionId);
   if (live) {
+    // Mark the in-flight turn cancelled so an intentional stop does not
+    // surface "Devin exited" as a session error.
+    live.cancelled = true;
     live.muteUpdates = true;
-    for (const [, resolve] of live.approvals) resolve("deny");
-    live.approvals.clear();
-    for (const [, pending] of live.questions)
-      pending.resolve({ kind: "skipped" });
-    live.questions.clear();
+    clearCommands(live);
+    settlePending(live);
   }
   live?.acp.close();
   unwatchChild(sessionId);
@@ -329,12 +353,12 @@ export const devinCommandProvider: NativeCommandProvider = {
 };
 
 function commandContextKey(context: CommandContext): string {
-  return `${context.sessionId ?? ""}${pathKey(context.cwd)}`;
+  return `${context.sessionId ?? ""}\n${pathKey(context.cwd)}`;
 }
 
 async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   const existing = liveByThread.get(input.sessionId);
-  if (existing && existing.cwd === input.cwd) {
+  if (existing && pathKey(existing.cwd) === pathKey(input.cwd)) {
     existing.onEvent = input.onEvent;
     existing.runtimeMode = input.runtimeMode;
     return existing;
@@ -344,8 +368,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   }
 
   const resume = resumeByThread.get(input.sessionId);
-  const canLoad = resume != null && resume.cwd === input.cwd;
-  if (resume && resume.cwd !== input.cwd) {
+  const canLoad = resume != null && pathKey(resume.cwd) === pathKey(input.cwd);
+  if (resume && !canLoad) {
     resumeByThread.delete(input.sessionId);
   }
 
@@ -353,12 +377,20 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   const handlers: AcpHandlers = {};
   const acp = new AcpClient(input.sessionId, handlers);
   const liveRef: { current: Live | null } = { current: null };
-  const muteGate = { current: false };
+  // The server may emit session/update (commands, mode, config, or the
+  // session/load transcript replay) before the live record exists; buffer
+  // everything and replay it once installed — live.muteUpdates then decides
+  // which of the replayed events reach the UI.
+  const earlyNotifications: { method: string; params: unknown }[] = [];
+  /** Dedupes repeated identical auth-error stderr lines into one block. */
+  let lastAuthLine: string | undefined;
 
   handlers.onNotification = (method, params) => {
-    if (muteGate.current) return;
     const live = liveRef.current;
-    if (!live || live.muteUpdates) return;
+    if (!live) {
+      earlyNotifications.push({ method, params });
+      return;
+    }
     handleNotification(live, method, params);
   };
   handlers.onRequest = (id, method, params) => {
@@ -372,7 +404,12 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
         .catch(() => undefined);
       return;
     }
-    void handleRequest(live, id, method, params);
+    void handleRequest(live, id, method, params).catch((err) => {
+      console.debug("[monocode] devin request handler failed", err);
+      void acp
+        .respondError(id, { code: -32603, message: "Internal error" })
+        .catch(() => undefined);
+    });
   };
 
   // These handlers outlive the turn that created them; routing through the
@@ -386,12 +423,19 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     (line) => acp.pushLine(line),
     (code) => {
       acp.close(new Error("Devin exited"));
+      const live = liveByThread.get(input.sessionId);
       liveByThread.delete(input.sessionId);
+      if (live) {
+        live.muteUpdates = true;
+        clearCommands(live);
+        settlePending(live);
+      }
       emit({ type: "session.ended", code });
     },
     (line) => {
       console.debug("[monocode] devin stderr", line);
-      if (/log ?in|sign ?in|not authenticated|unauthori/i.test(line)) {
+      if (isDevinAuthMessage(line) && line !== lastAuthLine) {
+        lastAuthLine = line;
         emit({
           type: "session.error",
           message: `${line.trim()}\n\n${AUTH_HELP}`,
@@ -400,7 +444,12 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     },
   );
 
-  await spawnChild(input.sessionId, path, devinSpawnArgs(), input.cwd);
+  try {
+    await spawnChild(input.sessionId, path, devinSpawnArgs(), input.cwd);
+  } catch (error) {
+    unwatchChild(input.sessionId);
+    throw error;
+  }
 
   try {
     let initResult: unknown;
@@ -425,7 +474,6 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     let didLoad = false;
 
     if (canLoad && resume && supportsLoad) {
-      muteGate.current = true;
       try {
         setup = await acp.request(
           "session/load",
@@ -440,11 +488,12 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
         didLoad = true;
       } catch (loadError) {
         console.debug("[monocode] devin session/load failed", loadError);
+        // The failed load may have replayed the old session's transcript;
+        // drop it so it is not echoed unmuted into the fresh session.
+        earlyNotifications.length = 0;
         setup = undefined;
         acpSessionId = undefined;
         didLoad = false;
-      } finally {
-        muteGate.current = false;
       }
     }
 
@@ -456,7 +505,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
           SESSION_TIMEOUT_MS,
         );
       } catch (error) {
-        throw devinAuthError(error);
+        throw devinAuthError(error, "create a session");
       }
       acpSessionId = sessionIdFromResult(setup);
     }
@@ -471,6 +520,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       cwd: input.cwd,
       modelConfigId: devinModelConfigId(configOptions),
       configOptions,
+      nextRequestId: 1_000_000_000,
       modeIds: modes.availableModeIds.length
         ? modes.availableModeIds
         : devinModeIdsFromConfig(configOptions),
@@ -497,10 +547,16 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       providerSessionId: acpSessionId,
     });
     live.onEvent({ type: "session.started" });
+    for (const early of earlyNotifications) {
+      handleNotification(live, early.method, early.params);
+    }
     return live;
   } catch (error) {
+    // Keep a mid-handshake cancel marker for the caller's consume-check.
+    const wasCancelled = cancelledThreads.has(input.sessionId);
     acp.close(error instanceof Error ? error : new Error(String(error)));
     await stopDevinSession(input.sessionId);
+    if (wasCancelled) cancelledThreads.add(input.sessionId);
     throw error;
   }
 }
@@ -509,7 +565,17 @@ async function applyModelSelection(
   live: Live,
   input: HarnessSessionInput,
 ): Promise<void> {
-  const base = nativeModelId(input.model, input.cwd).trim();
+  // Devin folds the reasoning level into the model uid. The picker's
+  // `reasoning` setting carries the chosen variant's uid — apply it only when
+  // it belongs to the selected model's group.
+  const reasoning = input.modelSettings?.reasoning?.trim();
+  const offered = findModel(input.model, input.cwd)
+    ?.settings?.find((setting) => setting.id === "reasoning")
+    ?.options.some((option) => option.value === reasoning);
+  const base = (reasoning && offered
+    ? reasoning
+    : nativeModelId(input.model, input.cwd)
+  ).trim();
   if (!base) return;
   const current = live.configOptions.find(
     (option) => option.id === live.modelConfigId,
@@ -576,11 +642,11 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
       live.promptInFlight -= 1;
     }
     if (live.cancelled) return;
-    if (stringField(asRecord(result), "stopReason") === "refusal") {
-      live.onEvent({
-        type: "session.error",
-        message: "Devin declined this turn.",
-      });
+    const stopMessage = devinStopReasonMessage(
+      stringField(asRecord(result), "stopReason") ?? "",
+    );
+    if (stopMessage) {
+      live.onEvent({ type: "session.error", message: stopMessage });
     }
     // A folded steer may still be streaming; whichever prompt resolves last
     // closes the blocks.
@@ -593,7 +659,7 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
     const detail = error instanceof Error ? error.message : String(error);
     live.onEvent({
       type: "session.error",
-      message: /log ?in|sign ?in|auth|credential|unauthori/i.test(detail)
+      message: isDevinAuthMessage(detail)
         ? `${detail.trim()}\n\n${AUTH_HELP}`
         : detail,
     });
@@ -611,6 +677,11 @@ function handleNotification(live: Live, method: string, params: unknown) {
   if (method !== "session/update") return;
   const rec = asRecord(params);
   const update = asRecord(rec?.update) ?? rec;
+  // Late stdout from a recycled child can deliver updates for the dead ACP
+  // session; only this session's updates may touch live state.
+  const sessionId =
+    stringField(rec ?? {}, "sessionId") ?? stringField(update ?? {}, "sessionId");
+  if (sessionId && sessionId !== live.acpSessionId) return;
   const kind = String(
     update?.sessionUpdate ?? update?.session_update ?? update?.type ?? "",
   );
@@ -634,22 +705,37 @@ function handleNotification(live: Live, method: string, params: unknown) {
 
   if (kind === "config_option_update") {
     const previous = devinCurrentModelId(live.configOptions);
-    const next = devinConfigOptions(
+    const incoming = devinConfigOptions(
       update?.configOptions ?? update?.config_options,
     );
-    if (next.length) {
-      live.configOptions = next;
-      const current = devinCurrentModelId(next);
-      if (current && current !== previous) {
+    if (incoming.length) {
+      // Merge by option id — Devin may send only the changed options rather
+      // than the whole array, and dropping `model` here would loop writes.
+      const merged = [...live.configOptions];
+      for (const option of incoming) {
+        const at = merged.findIndex((entry) => entry.id === option.id);
+        if (at >= 0) merged[at] = option;
+        else merged.push(option);
+      }
+      live.configOptions = merged;
+      const current = devinCurrentModelId(merged);
+      if (current && current !== previous && !live.muteUpdates) {
+        const selection = devinModelSelectionForUid(merged, current, live.cwd);
         live.onEvent({
           type: "session.configChanged",
-          model: `devin:${current}`,
+          model: selection.id,
+          ...(selection.reasoning
+            ? { modelSettings: { reasoning: selection.reasoning } }
+            : {}),
         });
       }
     }
     return;
   }
 
+  // Replays (session/load) and muted windows still update the state above;
+  // only transcript events are suppressed.
+  if (live.muteUpdates) return;
   for (const event of devinEventsFromUpdate(params)) {
     live.onEvent(event);
   }
@@ -657,7 +743,7 @@ function handleNotification(live: Live, method: string, params: unknown) {
 
 async function handleRequest(
   live: Live,
-  id: number,
+  id: JsonRpcId,
   method: string,
   params: unknown,
 ) {
@@ -677,7 +763,7 @@ async function handleRequest(
     .catch(() => undefined);
 }
 
-async function handlePermission(live: Live, id: number, params: unknown) {
+async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
   const request = devinPermissionRequest(params);
   if (request.callId) {
     live.onEvent({
@@ -712,26 +798,32 @@ async function handlePermission(live: Live, id: number, params: unknown) {
     request.optionIds,
   );
   if (auto) {
-    await live.acp.respond(id, {
-      outcome: { outcome: "selected", optionId: auto },
-    });
+    await live.acp
+      .respond(id, {
+        outcome: { outcome: "selected", optionId: auto },
+      })
+      .catch(() => undefined);
     return;
   }
 
+  // The UI needs a numeric requestId; give non-numeric ACP ids a synthetic
+  // one (large, so it cannot collide with server-chosen numeric ids).
+  const requestId = typeof id === "number" ? id : (live.nextRequestId += 1);
   live.onEvent({
     type: "approval.requested",
-    requestId: id,
+    requestId,
     title: request.title,
     kind: request.kind,
     callId: request.callId,
     preview: request.preview,
   });
 
+  const key = String(requestId);
   const decision = await new Promise<ApprovalDecision>((resolve) => {
-    live.approvals.set(id, resolve);
+    live.approvals.set(key, resolve);
   });
-  live.approvals.delete(id);
-  live.onEvent({ type: "approval.resolved", requestId: id, decision });
+  live.approvals.delete(key);
+  live.onEvent({ type: "approval.resolved", requestId, decision });
 
   const optionId = devinPermissionOptionId(decision, request.optionIds);
   await live.acp
@@ -744,7 +836,7 @@ async function handlePermission(live: Live, id: number, params: unknown) {
     .catch(() => undefined);
 }
 
-async function handleElicitation(live: Live, id: number, params: unknown) {
+async function handleElicitation(live: Live, id: JsonRpcId, params: unknown) {
   const parsed = devinElicitation(params);
   if (!parsed) {
     await live.acp
@@ -752,36 +844,26 @@ async function handleElicitation(live: Live, id: number, params: unknown) {
       .catch(() => undefined);
     return;
   }
+  const requestId = typeof id === "number" ? id : (live.nextRequestId += 1);
   live.onEvent({
     type: "question.asked",
-    requestId: id,
+    requestId,
     title: parsed.title ?? questionPromptTitle(parsed.questions),
     questions: parsed.questions,
   });
 
+  const key = String(requestId);
   const reply = await new Promise<UserQuestionReply>((resolve) => {
-    live.questions.set(id, {
-      resolve,
-      questions: parsed.questions,
-      fields: parsed.fields,
-    });
+    live.questions.set(key, resolve);
   });
-  const pending = live.questions.get(id);
-  live.questions.delete(id);
+  live.questions.delete(key);
   live.onEvent({
     type: "question.resolved",
-    requestId: id,
+    requestId,
     decision: reply.kind === "answered" ? "answered" : "skipped",
   });
 
   await live.acp
-    .respond(
-      id,
-      devinElicitationResult(
-        reply,
-        pending?.questions ?? parsed.questions,
-        pending?.fields ?? parsed.fields,
-      ),
-    )
+    .respond(id, devinElicitationResult(reply, parsed.questions, parsed.fields))
     .catch(() => undefined);
 }

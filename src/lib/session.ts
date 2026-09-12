@@ -20,7 +20,10 @@ export type HarnessId =
   | "pi"
   | "omp"
   | "fx"
-  | "devin";
+  | "devin"
+  | "devin"
+  | "copilot"
+  | "muse";
 
 export const HARNESSES: HarnessId[] = [
   "claude",
@@ -32,6 +35,8 @@ export const HARNESSES: HarnessId[] = [
   "omp",
   "fx",
   "devin",
+  "copilot",
+  "muse",
 ];
 
 export type BlockRole =
@@ -152,6 +157,9 @@ export type QueuedMessage = {
   noteCard?: NoteComposerCard;
   handoffCard?: HandoffComposerCard;
   intent?: TurnIntent;
+  /** Set when the message was produced by an agent action — carries the run
+   * evidence into the user block when the queue dispatches. */
+  action?: import("./agentActions").ActionRunRef;
 };
 
 export type MessageQueueStatus = "active" | "paused" | "resuming";
@@ -193,6 +201,8 @@ export type Block = {
   secondOpinion?: SecondOpinionMeta;
   /** Note chip shown on this user turn. Body is not stored; the harness already received it. */
   noteCard?: NoteCardMeta;
+  /** Agent action that produced this user turn, with its context revision. */
+  action?: import("./agentActions").ActionRunRef;
 };
 
 export type RuntimeMode =
@@ -309,6 +319,8 @@ export const HARNESS_LABEL: Record<HarnessId, string> = {
   omp: "omp",
   fx: "fx",
   devin: "devin",
+  copilot: "copilot",
+  muse: "muse",
 };
 
 export const HARNESS_TITLE: Record<HarnessId, string> = {
@@ -321,6 +333,8 @@ export const HARNESS_TITLE: Record<HarnessId, string> = {
   omp: "omp",
   fx: "fx",
   devin: "Devin",
+  copilot: "GitHub Copilot",
+  muse: "Muse",
 };
 
 /** fx ACP rejects attachment prompt blocks. */

@@ -52,6 +52,26 @@ export type DeliveryTabSource = {
   sourceSessionId?: string;
 };
 
+/** A saved project command bound to a terminal tab. `runId` bumps on each
+ * launch; `launched` records the last run actually written to the PTY, so a
+ * remount or app restart never re-runs it silently. A `steps` command runs
+ * each step as its own process in order — `step.done` resumes an interrupted
+ * run at the next step, and `failed` records a run that stopped on a failing
+ * step so it is not retried silently. */
+export type TerminalCommand = {
+  /** Saved `ProjectCommand`/`ReusableCommand` id the launch came from. */
+  presetId?: string;
+  name: string;
+  text: string;
+  steps?: { command: string; host?: "native" }[];
+  runId: number;
+  launched?: number;
+  /** The runId whose step run stopped on a failing step. */
+  failed?: number;
+  /** Steps completed so far for the given runId. */
+  step?: { runId: number; done: number };
+};
+
 export type FilePaneTab = {
   id: string;
   path: string;
@@ -71,6 +91,8 @@ export type FilePaneTab = {
   terminal?: boolean;
   /** Foreground command when it isn't the shell. Live only — not persisted. */
   foreground?: string;
+  /** Saved command this terminal is bound to. */
+  command?: TerminalCommand;
 };
 
 export type EditorPane = {
@@ -252,13 +274,18 @@ export function updateTerminalTab(
   const panes = tab.terminalPanes ?? [];
   let changed = false;
   const terminalPanes = panes.map((pane) => {
+    let paneChanged = false;
     const files = pane.files.map((file) => {
       if (!file.terminal || file.id !== fileId) return file;
       const next = applyTerminalMeta(file, patch);
-      if (next !== file) changed = true;
+      if (next !== file) paneChanged = true;
       return next;
     });
-    return files === pane.files ? pane : { ...pane, files };
+    // `.map` always allocates — an untouched pane must keep its identity or
+    // downstream referential checks see churn on every patch.
+    if (!paneChanged) return pane;
+    changed = true;
+    return { ...pane, files };
   });
   if (!changed) return tab;
   return withSurfacePanes(tab, "terminal", terminalPanes);

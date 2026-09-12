@@ -122,6 +122,8 @@ impl Drop for PtyHost {
     }
 }
 
+/// `exec` runs one command line instead of an interactive shell — a saved
+/// command step. The PTY's exit event then carries the step's exit code.
 #[tauri::command(async)]
 pub fn pty_spawn(
     app: AppHandle,
@@ -130,6 +132,7 @@ pub fn pty_spawn(
     cwd: String,
     cols: u16,
     rows: u16,
+    exec: Option<String>,
 ) -> Result<(), String> {
     if crate::wsl::location(&cwd)?.is_some() && !cfg!(windows) {
         return Err("WSL terminals require the native Windows app".into());
@@ -145,17 +148,17 @@ pub fn pty_spawn(
 
     #[cfg(unix)]
     {
-        spawn_unix(app, host, id, cwd, cols.max(2), rows.max(2))
+        spawn_unix(app, host, id, cwd, cols.max(2), rows.max(2), exec)
     }
 
     #[cfg(windows)]
     {
-        spawn_windows(app, host, id, cwd, cols.max(2), rows.max(2))
+        spawn_windows(app, host, id, cwd, cols.max(2), rows.max(2), exec)
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (app, cwd, cols, rows);
+        let _ = (app, cwd, cols, rows, exec);
         Err("Terminals are not supported on this platform.".into())
     }
 }
@@ -251,6 +254,7 @@ fn spawn_unix(
     cwd: String,
     cols: u16,
     rows: u16,
+    exec: Option<String>,
 ) -> Result<(), String> {
     use std::fs::File;
     use std::os::unix::io::FromRawFd;
@@ -259,6 +263,16 @@ fn spawn_unix(
 
     let workdir = working_dir(&cwd);
     let (shell, args) = default_shell();
+    let args = match exec {
+        // Login shell so user PATH (nvm, brew, ~/.local) applies; the step
+        // text stays one argument so the shell parses it itself.
+        Some(exec) => login_args(&shell)
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .chain(["-c".to_string(), exec])
+            .collect::<Vec<_>>(),
+        None => args,
+    };
     let (master, slave) = open_pty(cols, rows)?;
 
     let mut cmd = Command::new(&shell);
@@ -380,6 +394,7 @@ fn spawn_windows(
     cwd: String,
     cols: u16,
     rows: u16,
+    exec: Option<String>,
 ) -> Result<(), String> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
@@ -398,7 +413,10 @@ fn spawn_windows(
         // ConPTY hosts wsl.exe; WSL supplies the Linux terminal and job control.
         // Dropping the master closes that terminal, rather than running a
         // Windows shell or walking UNC metadata here.
-        let command = crate::wsl::terminal_command(location)?;
+        let command = match &exec {
+            Some(exec) => crate::wsl::exec_command(location, exec)?,
+            None => crate::wsl::terminal_command(location)?,
+        };
         let mut cmd = CommandBuilder::new(command.get_program());
         cmd.args(command.get_args());
         cmd.env("WSLENV", "");
@@ -406,6 +424,10 @@ fn spawn_windows(
     } else {
         let workdir = working_dir(&cwd);
         let (shell, args) = default_shell();
+        let args = match exec {
+            Some(exec) => windows_exec_args(&shell, &exec),
+            None => args,
+        };
         let mut cmd = CommandBuilder::new(&shell);
         cmd.args(&args);
         cmd.cwd(&workdir);
@@ -511,6 +533,32 @@ fn default_shell() -> (String, Vec<String>) {
             .map(|arg| (*arg).to_string())
             .collect();
         (shell, args)
+    }
+}
+
+/// Flags that make a Windows shell run one command line and exit, matching
+/// whichever shell `default_shell` picked — cmd and PowerShell differ. A
+/// failing step must exit nonzero, and PowerShell `-Command` alone reports
+/// success for non-terminating cmdlet errors, so the exec line is wrapped:
+/// `$ErrorActionPreference='Stop'` makes those throw, and a native exe's own
+/// code still wins via `$LASTEXITCODE`.
+#[cfg(any(windows, test))]
+fn windows_exec_args(shell: &str, exec: &str) -> Vec<String> {
+    let name = shell
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    match name {
+        "powershell" | "pwsh" => vec![
+            "-NoLogo".into(),
+            "-Command".into(),
+            format!(
+                "$ErrorActionPreference='Stop'; & {{ {exec} }}; if ($LASTEXITCODE) {{ exit $LASTEXITCODE }}"
+            ),
+        ],
+        _ => vec!["/c".into(), exec.into()],
     }
 }
 
@@ -807,6 +855,31 @@ mod label_tests {
     fn shell_names_are_ignored() {
         assert!(is_shell_name("zsh"));
         assert!(!is_shell_name("npm"));
+    }
+}
+
+#[cfg(test)]
+mod exec_args_tests {
+    use super::*;
+
+    #[test]
+    fn windows_exec_args_match_the_default_shell() {
+        assert_eq!(
+            windows_exec_args("C:\\Windows\\System32\\cmd.exe", "echo hi"),
+            ["/c", "echo hi"]
+        );
+        assert_eq!(
+            windows_exec_args("C:\\Program Files\\PowerShell\\7\\pwsh.exe", "echo hi"),
+            [
+                "-NoLogo",
+                "-Command",
+                "$ErrorActionPreference='Stop'; & { echo hi }; if ($LASTEXITCODE) { exit $LASTEXITCODE }"
+            ]
+        );
+        assert_eq!(
+            windows_exec_args("powershell.exe", "echo hi")[..2],
+            ["-NoLogo", "-Command"]
+        );
     }
 }
 

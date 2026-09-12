@@ -1,9 +1,11 @@
 import { ensureClaudeRegistered } from "./claudeAdapter";
 import { ensureCodexRegistered } from "./codexAdapter";
+import { ensureCopilotRegistered } from "./copilotAdapter";
 import { ensureCursorRegistered } from "./cursorAdapter";
 import { ensureDevinRegistered } from "./devinAdapter";
 import { ensureFxRegistered } from "./fxAdapter";
 import { ensureGrokRegistered } from "./grokAdapter";
+import { ensureMuseRegistered } from "./museAdapter";
 import { ensureOpenCodeRegistered } from "./opencodeAdapter";
 import { ensureOmpRegistered } from "./ompAdapter";
 import { ensurePiRegistered } from "./piAdapter";
@@ -19,4 +21,6 @@ export function registerBuiltinHarnesses(): void {
   ensureOmpRegistered();
   ensureFxRegistered();
   ensureDevinRegistered();
+  ensureCopilotRegistered();
+  ensureMuseRegistered();
 }
