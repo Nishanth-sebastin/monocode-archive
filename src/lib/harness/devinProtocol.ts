@@ -26,6 +26,19 @@ export const DEVIN_CLIENT_CAPABILITIES = {
 export const AUTH_HELP =
   "Devin CLI is not signed in. Run `devin auth login` in a terminal, then retry.";
 
+/**
+ * True when Devin CLI output reports a real auth problem. Matches explicit
+ * failure phrases rather than any "login"/"auth" substring so routine stderr
+ * logs like `toolbox::tools::exec::login_shell_env` snapshots don't surface a
+ * spurious "not signed in" error while the session works fine.
+ */
+const DEVIN_AUTH_MESSAGE =
+  /not (?:signed|logged) in|not authenticated|unauthori[sz]ed|authentication (?:required|failed|error)|(?:please|then|must) (?:log|sign) ?in|(?:log|sign) ?in (?:required|first|again|to continue)|invalid (?:api key|access token|token|credentials?)|expired (?:token|credentials?|session)|forbidden|permission denied|devin auth login/i;
+
+export function isDevinAuthMessage(text: string): boolean {
+  return DEVIN_AUTH_MESSAGE.test(text);
+}
+
 export type DevinConfigOption = {
   id: string;
   name?: string;
@@ -661,7 +674,7 @@ export function sessionIdFromResult(result: unknown): string | undefined {
 
 export function devinAuthError(error: unknown, verb = "start"): Error {
   const detail = error instanceof Error ? error.message : String(error);
-  if (/log ?in|sign ?in|auth|credential|unauthori|forbidden|permission/i.test(detail)) {
+  if (isDevinAuthMessage(detail)) {
     return new Error(`${detail.trim()}\n\n${AUTH_HELP}`);
   }
   if (/timed out/i.test(detail)) {

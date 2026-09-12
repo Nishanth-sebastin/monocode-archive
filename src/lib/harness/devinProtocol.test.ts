@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  devinAuthError,
   devinAutoOption,
   devinCommandsFromUpdate,
   devinConfigOptions,
@@ -15,6 +16,7 @@ import {
   devinPermissionOptionId,
   devinPermissionRequest,
   devinPromptBlocks,
+  isDevinAuthMessage,
   sessionIdFromResult,
 } from "./devinProtocol";
 
@@ -419,6 +421,39 @@ describe("devin elicitation", () => {
         parsed.fields,
       ),
     ).toEqual({ action: "cancel" });
+  });
+});
+
+describe("isDevinAuthMessage", () => {
+  it("ignores routine stderr logs mentioning login-shell env snapshots", () => {
+    expect(
+      isDevinAuthMessage(
+        "2026-09-11T21:12:24.021390Z  INFO toolbox::tools::exec::login_shell_env: var_count=90 captured login-shell env snapshot from '/bin/zsh'",
+      ),
+    ).toBe(false);
+    expect(isDevinAuthMessage("INFO spawned devin acp")).toBe(false);
+    expect(isDevinAuthMessage("authorizing local port")).toBe(false);
+  });
+
+  it("matches real sign-in failures", () => {
+    expect(isDevinAuthMessage("Error: not signed in")).toBe(true);
+    expect(isDevinAuthMessage("You are not authenticated")).toBe(true);
+    expect(isDevinAuthMessage("authentication required")).toBe(true);
+    expect(isDevinAuthMessage("401 Unauthorized")).toBe(true);
+    expect(isDevinAuthMessage("please run `devin auth login`")).toBe(true);
+    expect(isDevinAuthMessage("Please log in to continue")).toBe(true);
+  });
+
+  it("devinAuthError only appends the auth hint for real auth failures", () => {
+    expect(
+      devinAuthError(new Error("session/new timed out")).message,
+    ).toContain("did not answer initialize");
+    expect(devinAuthError(new Error("spawn failed")).message).toBe(
+      "Devin did not start. spawn failed",
+    );
+    expect(devinAuthError(new Error("401 Unauthorized")).message).toContain(
+      "devin auth login",
+    );
   });
 });
 

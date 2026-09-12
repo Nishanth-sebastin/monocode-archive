@@ -31,6 +31,7 @@ import {
   devinPermissionRequest,
   devinPromptBlocks,
   devinSpawnArgs,
+  isDevinAuthMessage,
   sessionIdFromResult,
   stringField,
   type DevinConfigOption,
@@ -391,7 +392,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     },
     (line) => {
       console.debug("[monocode] devin stderr", line);
-      if (/log ?in|sign ?in|not authenticated|unauthori/i.test(line)) {
+      if (isDevinAuthMessage(line)) {
         emit({
           type: "session.error",
           message: `${line.trim()}\n\n${AUTH_HELP}`,
@@ -593,7 +594,7 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
     const detail = error instanceof Error ? error.message : String(error);
     live.onEvent({
       type: "session.error",
-      message: /log ?in|sign ?in|auth|credential|unauthori/i.test(detail)
+      message: isDevinAuthMessage(detail)
         ? `${detail.trim()}\n\n${AUTH_HELP}`
         : detail,
     });
