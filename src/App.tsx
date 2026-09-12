@@ -735,40 +735,6 @@ export default function App({
   // write instead of parsing localStorage each render.
   const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
   const projectsList = useMemo(() => loadProjects(), [projectsRaw]);
-  // Saved commands resolve their owning project at open: explicit id → rail
-  // path → the active task's project → the current folder's project.
-  const commandsProject = !commandsMenu
-    ? undefined
-    : commandsMenu.projectId
-      ? projectsList.find((entry) => entry.id === commandsMenu.projectId)
-      : commandsMenu.path
-        ? projectForPath(commandsMenu.path)
-        : (() => {
-            const scope = active
-              ? taskForSession(active.id, sessionWorkCwd(active))
-              : null;
-            return (
-              (scope ? projectForTask(scope.task) : undefined) ??
-              projectForPath(projectCwd)
-            );
-          })();
-  const commandsTask = !commandsMenu
-    ? null
-    : commandsMenu.taskId
-      ? (loadTaskWorkspaces().find(
-          (entry) => entry.id === commandsMenu.taskId,
-        ) ?? null)
-      : (() => {
-          const scope = active
-            ? taskForSession(active.id, sessionWorkCwd(active))
-            : null;
-          return scope && scope.task.projectId === commandsProject?.id
-            ? scope.task
-            : null;
-        })();
-  // Reusable commands still need a folder when the rail entry is not a stored
-  // project — the path the menu was opened on, else the current folder.
-  const commandsFallbackCwd = commandsMenu?.path ?? projectCwd;
   const [filesSearchOpen, setFilesSearchOpen] = useState(false);
   const [searchFocusToken, setSearchFocusToken] = useState(0);
   const [searchViewOpen, setSearchViewOpen] = useState(false);
@@ -1122,6 +1088,40 @@ export default function App({
       (session) => activeTab && leafIds(activeTab.layout).includes(session.id),
     );
   const sessionDefaults = active ?? sessions[0];
+  // Saved commands resolve their owning project at open: explicit id → rail
+  // path → the active task's project → the current folder's project.
+  const commandsProject = !commandsMenu
+    ? undefined
+    : commandsMenu.projectId
+      ? projectsList.find((entry) => entry.id === commandsMenu.projectId)
+      : commandsMenu.path
+        ? projectForPath(commandsMenu.path)
+        : (() => {
+            const scope = active
+              ? taskForSession(active.id, sessionWorkCwd(active))
+              : null;
+            return (
+              (scope ? projectForTask(scope.task) : undefined) ??
+              projectForPath(projectCwd)
+            );
+          })();
+  const commandsTask = !commandsMenu
+    ? null
+    : commandsMenu.taskId
+      ? (loadTaskWorkspaces().find(
+          (entry) => entry.id === commandsMenu.taskId,
+        ) ?? null)
+      : (() => {
+          const scope = active
+            ? taskForSession(active.id, sessionWorkCwd(active))
+            : null;
+          return scope && scope.task.projectId === commandsProject?.id
+            ? scope.task
+            : null;
+        })();
+  // Reusable commands still need a folder when the rail entry is not a stored
+  // project — the path the menu was opened on, else the current folder.
+  const commandsFallbackCwd = commandsMenu?.path ?? projectCwd;
   const activeSkillContext = active
     ? nativeSkillContextForSession(active)
     : null;
