@@ -7,6 +7,7 @@ mod azure_inbox;
 mod azure_pipelines;
 mod azure_repos;
 mod chat_background;
+mod checkout;
 mod checkpoint;
 mod confluence;
 mod cursor_store;
@@ -269,6 +270,7 @@ pub fn run() {
             fs::git_github_work_item_comment,
             fs::git_github_pr_state,
             fs::git_github_pr_diff,
+            fs::github_pr_prepare_checkout,
             fs::git_update_from_default,
             fs::git_merge_abort,
             inbox_media::fetch_inbox_media,

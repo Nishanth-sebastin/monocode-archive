@@ -386,8 +386,9 @@ const githubRepoSlug = (url: string) =>
 
 /** Resolve and verify the GitHub PR-head binding for a repair: the checkout
  * must sit at the PR head commit on the PR branch with a remote pointing at
- * the PR's repository. Never silently checks anything out — a mismatch is a
- * visible error, not a fixup. */
+ * the PR's repository. A repair never mutates the user's working copy — a
+ * mismatch reuses a known checkout already at the head, or clones the head
+ * into an isolated checkout like the Azure flow does. */
 async function githubRepairHead(input: {
   cwd: string;
   repo: string;
@@ -398,27 +399,47 @@ async function githubRepairHead(input: {
     throw new Error("The PR is no longer open. Refresh and retry.");
   if (!state.headRefOid || !state.headRefName)
     throw new Error("GitHub did not report the PR head. Refresh and retry.");
-  const checkout = await ciContext(input.cwd);
-  const remote = checkout.remotes.find(
-    (row) => githubRepoSlug(row.url) === input.repo.toLowerCase(),
-  );
-  if (!remote)
-    throw new Error(
-      `This checkout has no remote for ${input.repo}. Open the PR's checkout.`,
+  const matches = (value: CiCheckout) =>
+    value.commit === state.headRefOid &&
+    value.branch === state.headRefName &&
+    value.remotes.some(
+      (row) => githubRepoSlug(row.url) === input.repo.toLowerCase(),
     );
-  if (
-    checkout.commit !== state.headRefOid ||
-    checkout.branch !== state.headRefName
-  )
-    throw new Error(
-      `Checkout is not at the PR head (${state.headRefName} · ${state.headRefOid.slice(0, 8)}). Update the checkout first.`,
-    );
+  let checkout = await ciContext(input.cwd);
+  if (!matches(checkout)) {
+    const paths = [...new Set([
+      ...[...getVerifiedFamilies().values()].flatMap(family => family.worktrees.filter(tree => !tree.missing && !tree.prunable && !tree.locked).map(tree => tree.path)),
+      ...loadRecents().map(project => project.path),
+    ])].filter(path => path !== input.cwd && wslLocation(path)?.distribution === wslLocation(input.cwd)?.distribution).slice(0, 20);
+    for (const path of paths) {
+      const candidate = await ciContext(path).catch(() => null);
+      if (candidate && matches(candidate)) { checkout = candidate; break; }
+    }
+    if (!matches(checkout)) {
+      const requestId = crypto.randomUUID();
+      const path = await invoke<string>("github_pr_prepare_checkout", {
+        cwd: input.cwd,
+        repo: input.repo,
+        number: input.number,
+        expectedRevision: state.headRefOid,
+        requestId,
+      });
+      notifyGitChanged(input.cwd);
+      checkout = await ciContext(path);
+      if (!matches(checkout))
+        throw new Error(
+          "Prepared checkout no longer matches the PR. Refresh and retry.",
+        );
+    }
+  }
   return {
     head: {
       cwd: checkout.cwd,
       branch: checkout.branch,
       commit: checkout.commit,
-      remote: remote.url,
+      remote: checkout.remotes.find(
+        (row) => githubRepoSlug(row.url) === input.repo.toLowerCase(),
+      )!.url,
     },
     state,
   };

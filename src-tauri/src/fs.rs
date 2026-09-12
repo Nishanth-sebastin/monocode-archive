@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::wsl;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::Manager;
 
 use crate::dirs_home;
 
@@ -1216,6 +1217,133 @@ pub struct GitHubPrDiff {
     pub files: Vec<GitHubPrFile>,
     pub patch: String,
     pub truncated: bool,
+}
+
+/// Prepare an isolated checkout at the GitHub PR head — repair evidence must
+/// bind to the exact head commit, and a repair never mutates the user's
+/// working copy. Fetches the head ref over https with the `gh` token; the
+/// clone stores no credentials. One preparation runs at a time, shared with
+/// Azure through the checkout module's request slot.
+#[tauri::command]
+pub async fn github_pr_prepare_checkout(
+    app: tauri::AppHandle,
+    cwd: String,
+    repo: String,
+    number: i64,
+    expected_revision: String,
+    request_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _preparation = crate::checkout::begin_checkout(&request_id)?;
+        if wsl::location(&cwd)?.is_some() {
+            return Err("Automatic cloning requires a local execution host. Open a matching checkout in this WSL distribution to keep the agent on its selected host.".into());
+        }
+        if number <= 0 {
+            return Err("Invalid GitHub PR number".into());
+        }
+        let (owner, name) = split_github_repo(&repo)?;
+        let repo = format!("{owner}/{name}");
+        // `--repo` pins the read — `gh` needs no checkout context, so run it
+        // from home and survive a deleted working copy.
+        let gh_root = dirs_home()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| expand_home(&cwd));
+        let number_arg = number.to_string();
+        let read_head = || -> Result<(String, String, String, bool), String> {
+            let json = gh_checked(
+                &gh_root,
+                &[
+                    "pr",
+                    "view",
+                    &number_arg,
+                    "--repo",
+                    &repo,
+                    "--json",
+                    "state,headRefOid,headRefName,isCrossRepository",
+                ],
+            )?;
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct View {
+                #[serde(default)]
+                state: String,
+                #[serde(default)]
+                head_ref_oid: String,
+                #[serde(default)]
+                head_ref_name: String,
+                #[serde(default)]
+                is_cross_repository: bool,
+            }
+            let view: View = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            Ok((
+                view.state,
+                view.head_ref_oid,
+                view.head_ref_name,
+                view.is_cross_repository,
+            ))
+        };
+        let verified_head = |expected: &str| -> Result<(String, String), String> {
+            let (state, head_oid, head_name, cross) = read_head()?;
+            if !state.eq_ignore_ascii_case("open") || head_oid != expected {
+                return Err(
+                    "PR changed or is no longer open. Refresh before preparing its checkout."
+                        .into(),
+                );
+            }
+            if head_name.is_empty() {
+                return Err("GitHub did not report the PR head. Refresh and retry.".into());
+            }
+            if cross {
+                return Err(
+                    "Fork PR checkouts require opening the source repository explicitly.".into(),
+                );
+            }
+            Ok((head_name, head_oid))
+        };
+        let (branch, commit) = verified_head(&expected_revision)?;
+        let remote = format!("https://github.com/{repo}");
+        let auth = crate::inbox_media::github_auth_token().map(|token| {
+            format!(
+                "Basic {}",
+                base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    format!("x-access-token:{token}"),
+                )
+            )
+        });
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (&repo, number, &branch, &commit).hash(&mut hash);
+        let key = format!("pr-{number}-{:016x}", hash.finish());
+        let base = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "Cannot locate PR checkouts")?
+            .join("checkouts")
+            .join("github");
+        crate::checkout::prepare_checkout(
+            &base,
+            &key,
+            &remote,
+            &branch,
+            &commit,
+            auth.as_deref(),
+            || {
+                if crate::checkout::checkout_cancelled() {
+                    return Err("Checkout preparation cancelled.".into());
+                }
+                let (verified_branch, _) = verified_head(&expected_revision)?;
+                if verified_branch != branch {
+                    return Err(
+                        "PR changed during checkout preparation. Refresh and retry.".into(),
+                    );
+                }
+                Ok(())
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 const MAX_PR_DIFF_BYTES: usize = 2 * 1024 * 1024;
