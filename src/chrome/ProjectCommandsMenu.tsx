@@ -157,12 +157,22 @@ export function ProjectCommandsMenu({
   const groups = project?.commandGroups ?? [];
   const commands = project?.commands ?? [];
   const empty = !groups.length && !commands.length && !reusable.length;
+  // A bare point anchor comes from a rail context menu — open to the right
+  // of the cursor like the other rail menus; an element anchor is the dock
+  // button, which sits at the bottom edge and opens upward.
+  const pointAnchor =
+    anchor != null &&
+    !(anchor instanceof HTMLElement) &&
+    !("current" in anchor) &&
+    !("bottom" in anchor) &&
+    "x" in anchor;
 
   return (
     <Popover
       anchor={anchor}
-      side="top"
-      align="end"
+      {...(pointAnchor
+        ? { side: "right" as const }
+        : { side: "top" as const, align: "end" as const })}
       width={300}
       onDismiss={onClose}
       role="menu"
