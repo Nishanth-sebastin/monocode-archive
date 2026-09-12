@@ -8312,6 +8312,10 @@ export default function App({
             sessions={inboxRelatedSessions}
             onOpenSession={onOpenInboxSession}
             onOpenDelivery={onOpenInboxDelivery}
+            busySessionIds={busySessionIds}
+            needsInputSessionIds={needsInputSessionIds}
+            attentionItems={attentionItems}
+            onAttentionAction={onAttentionAction}
             target={inboxTarget}
             visible={inboxViewOpen}
             conversationId={inboxConversationId}
