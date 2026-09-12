@@ -541,7 +541,7 @@ function GeneralPage({
       </Row>
       <Row
         label="Notifications"
-        description="Notify when an agent finishes or needs input in another session or while MonoCode is in the background. Click the notification to open that session."
+        description="Notify when a reminder is due, or when an agent finishes or needs input in another session or while MonoCode is in the background. Click the notification to open that session."
       >
         {notificationsEnabled && notificationPermission === "denied" ? (
           <NotificationsBlocked />
@@ -597,7 +597,7 @@ function AzureSettings() {
     finally { setBusy(false); }
   };
   return <>
-    <Row stacked={!status.connected || editing} label={status.connected ? `Connected account · ${status.capabilities.join(", ") || "Read access"}` : "Connect your account"} description="One connection for Azure Boards, Repos and Pipelines. Credentials stay on this device; tickets, PRs, Git and CI remain independently selected.">
+    <Row stacked={!status.connected || editing} label={<span className="flex items-center gap-2"><InboxProviderMark provider="azure" className="size-4 shrink-0" />{status.connected ? `Connected account · ${status.capabilities.join(", ") || "Read access"}` : "Connect your account"}</span>} description="One connection for Azure Boards, Repos and Pipelines. Credentials stay on this device; tickets, PRs, Git and CI remain independently selected.">
       {status.connected && !editing ? <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="max-w-56 truncate text-[12px] text-content/50" title={`${status.site} · ${status.account}`}>{status.site} · {status.account}</span>
         <SecondaryButton disabled={busy} onClick={() => setEditing(true)}>Reconnect</SecondaryButton>
@@ -667,7 +667,12 @@ function JiraSettings() {
     <>
       <Row
         stacked={!status.connected}
-        label={status.connected ? "Connected account" : "Connect your account"}
+        label={
+          <span className="flex items-center gap-2">
+            <InboxProviderMark provider="jira" className="size-4 shrink-0" />
+            {status.connected ? "Connected account" : "Connect your account"}
+          </span>
+        }
         description="Browse issues from your Jira Cloud site. Your API token stays on this device."
       >
         {status.connected ? (

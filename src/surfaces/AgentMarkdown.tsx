@@ -1,7 +1,7 @@
 import { languageFromFileName } from "../lib/editorSelection";
 import { code } from "@streamdown/code";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import {
   createContext,
   isValidElement,
@@ -21,6 +21,7 @@ import {
   CodeBlock,
   Streamdown,
   defaultRehypePlugins,
+  defaultRemarkPlugins,
   useIsCodeFenceIncomplete,
   type Components,
 } from "streamdown";
@@ -28,7 +29,13 @@ import type { PluggableList } from "unified";
 import { ExplorerMenu, type ExplorerMenuItem } from "../chrome/ExplorerMenu";
 import { FileTypeIcon } from "../chrome/FileTypeIcon";
 import { createLazyMermaidPlugin } from "./mermaidPlugin";
-import { displayPath, resolveWorkspacePath } from "../lib/paths";
+import {
+  displayPath,
+  isExtensionlessFileName,
+  resolveWorkspaceFileReference,
+} from "../lib/paths";
+import type { EditorNavigation, OpenFileFn } from "../lib/search";
+import { remarkWorkspaceFileLinks } from "../lib/markdownFileLinks";
 import { isAtxHeadingLine } from "../lib/markdownSource";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
@@ -89,12 +96,17 @@ type FileLinkMenu = {
   x: number;
   y: number;
   path: string;
+  navigation?: EditorNavigation;
 };
 
 const FileOpenContext = createContext<{
   cwd?: string;
-  onOpenFile?: (path: string) => void;
-  onFileContextMenu?: (event: ReactMouseEvent, path: string) => void;
+  onOpenFile?: OpenFileFn;
+  onFileContextMenu?: (
+    event: ReactMouseEvent,
+    path: string,
+    navigation?: EditorNavigation,
+  ) => void;
 }>({});
 
 const RemoteMediaContext = createContext(false);
@@ -182,7 +194,7 @@ function MarkdownLink({
 }: MarkdownLinkProps) {
   const allowRemoteMedia = useContext(RemoteMediaContext);
   const { cwd, onOpenFile, onFileContextMenu } = useContext(FileOpenContext);
-  const filePath = href ? resolveWorkspacePath(href, cwd) : undefined;
+  const file = href ? resolveWorkspaceFileReference(href, cwd) : undefined;
   const label = textContent(children);
   if (allowRemoteMedia && href && isInboxMediaUrl(href)) {
     return <InboxMedia src={href} alt={label} />;
@@ -197,19 +209,22 @@ function MarkdownLink({
       onClick={(event) => {
         onClick?.(event);
         if (event.defaultPrevented) return;
-        if (filePath && onOpenFile) {
+        if (file && onOpenFile) {
           event.preventDefault();
-          onOpenFile(filePath);
+          onOpenFile(file.path, file.navigation);
           return;
         }
-        if (!href || !/^https?:\/\//i.test(href)) {
-          event.preventDefault();
+        event.preventDefault();
+        if (href && /^https?:\/\//i.test(href)) {
+          void openUrl(href).catch((error) => {
+            console.error("Failed to open web link:", error);
+          });
         }
       }}
       onContextMenu={(event) => {
         onContextMenu?.(event);
-        if (event.defaultPrevented || !filePath || !onFileContextMenu) return;
-        onFileContextMenu(event, filePath);
+        if (event.defaultPrevented || !file || !onFileContextMenu) return;
+        onFileContextMenu(event, file.path, file.navigation);
       }}
     >
       {children}
@@ -231,11 +246,14 @@ function MarkdownCode({
   if (!block) {
     const text = textContent(children);
     const fileName = inlineFileName(text);
-    const { cwd, onOpenFile, onFileContextMenu } =
-      useContext(FileOpenContext);
-    const filePath = fileName ? resolveWorkspacePath(text, cwd) : undefined;
+    const { cwd, onOpenFile, onFileContextMenu } = useContext(FileOpenContext);
+    const file = fileName
+      ? resolveWorkspaceFileReference(text, cwd)
+      : undefined;
     const open =
-      filePath && onOpenFile ? () => onOpenFile(filePath) : undefined;
+      file && onOpenFile
+        ? () => onOpenFile(file.path, file.navigation)
+        : undefined;
     return (
       <code
         {...props}
@@ -248,8 +266,8 @@ function MarkdownCode({
         onClick={open}
         onContextMenu={(event) => {
           onContextMenu?.(event);
-          if (event.defaultPrevented || !filePath || !onFileContextMenu) return;
-          onFileContextMenu(event, filePath);
+          if (event.defaultPrevented || !file || !onFileContextMenu) return;
+          onFileContextMenu(event, file.path, file.navigation);
         }}
         onKeyDown={
           open
@@ -292,7 +310,9 @@ function MarkdownCode({
           <FileTypeIcon name={iconName} isDir={false} />
         </span>
       ) : null}
-      {fence.filePath ? <MarkdownCodePath path={fence.filePath} /> : null}
+      {fence.filePath ? (
+        <MarkdownCodePath path={fence.filePath} startLine={fence.startLine} />
+      ) : null}
       <CodeCopyButton code={code} />
       <CodeBlock
         className={className}
@@ -425,22 +445,29 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   streaming?: boolean;
   className?: string;
   cwd?: string;
-  onOpenFile?: (path: string) => void;
+  onOpenFile?: OpenFileFn;
   allowRemoteMedia?: boolean;
   textOnly?: boolean;
 }) {
   const [fileMenu, setFileMenu] = useState<FileLinkMenu | null>(null);
   const onFileContextMenu = useCallback(
-    (event: ReactMouseEvent, path: string) => {
+    (event: ReactMouseEvent, path: string, navigation?: EditorNavigation) => {
       event.preventDefault();
       event.stopPropagation();
-      setFileMenu({ x: event.clientX, y: event.clientY, path });
+      setFileMenu({ x: event.clientX, y: event.clientY, path, navigation });
     },
     [],
   );
   const fileOpen = useMemo(
     () => ({ cwd, onOpenFile, onFileContextMenu }),
     [cwd, onOpenFile, onFileContextMenu],
+  );
+  const remarkPlugins = useMemo<PluggableList>(
+    () => [
+      ...Object.values(defaultRemarkPlugins),
+      [remarkWorkspaceFileLinks, { cwd }],
+    ],
+    [cwd],
   );
   const remoteMedia = !!allowRemoteMedia;
 
@@ -450,7 +477,8 @@ export const AgentMarkdown = memo(function AgentMarkdown({
     setFileMenu(null);
 
     if (id === "open-monocode") {
-      onOpenFile?.(path);
+      if (fileMenu.navigation) onOpenFile?.(path, fileMenu.navigation);
+      else onOpenFile?.(path);
       return;
     }
 
@@ -487,6 +515,7 @@ export const AgentMarkdown = memo(function AgentMarkdown({
             dir="auto"
             isAnimating={!!streaming}
             plugins={MARKDOWN_PLUGINS}
+            remarkPlugins={remarkPlugins}
             rehypePlugins={
               remoteMedia ? INBOX_MEDIA_REHYPE_PLUGINS : MARKDOWN_REHYPE_PLUGINS
             }
@@ -518,7 +547,7 @@ export const MarkdownPreview = memo(function MarkdownPreview({
   text: string;
   streaming?: boolean;
   cwd?: string;
-  onOpenFile?: (path: string) => void;
+  onOpenFile?: OpenFileFn;
 }) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
 
@@ -719,19 +748,30 @@ function parseCodeFence(
   return { language: raw, startLine: metaStartLine };
 }
 
-function MarkdownCodePath({ path }: { path: string }) {
+function MarkdownCodePath({
+  path,
+  startLine,
+}: {
+  path: string;
+  startLine?: number;
+}) {
   const { cwd, onOpenFile, onFileContextMenu } = useContext(FileOpenContext);
-  const filePath = resolveWorkspacePath(path, cwd);
-  if (!filePath || !onOpenFile) {
+  const file = resolveWorkspaceFileReference(path, cwd);
+  if (!file || !onOpenFile) {
     return <span className="markdown-code-path">{path}</span>;
   }
+  const navigation =
+    file.navigation ??
+    (startLine && startLine > 0 ? { line: startLine } : undefined);
   return (
     <button
       type="button"
       className="markdown-code-path markdown-code-path-link"
-      title={filePath}
-      onClick={() => onOpenFile(filePath)}
-      onContextMenu={(event) => onFileContextMenu?.(event, filePath)}
+      title={file.path}
+      onClick={() => onOpenFile(file.path, navigation)}
+      onContextMenu={(event) =>
+        onFileContextMenu?.(event, file.path, navigation)
+      }
     >
       {path}
     </button>
@@ -752,19 +792,15 @@ function inlineFileName(value: string): string | undefined {
     "",
   );
   const fileName = withoutLocation.split(/[/\\]/).filter(Boolean).pop();
-  if (!fileName || !/^[\w@+().-]+$/.test(fileName)) return undefined;
+  if (!fileName || !/^[\w%@+().-]+$/.test(fileName)) return undefined;
 
-  const lower = fileName.toLowerCase();
-  if (
-    lower === "dockerfile" ||
-    lower === "makefile" ||
-    lower === "gemfile" ||
-    lower === "license"
-  ) {
+  if (isExtensionlessFileName(fileName)) {
     return fileName;
   }
 
-  const extension = fileName.split(".").pop();
+  const extension = fileName.includes(".")
+    ? fileName.split(".").pop()
+    : undefined;
   return extension && /^[a-z][a-z0-9+-]{0,11}$/i.test(extension)
     ? fileName
     : undefined;

@@ -156,6 +156,13 @@ export type QueuedMessage = {
 
 export type MessageQueueStatus = "active" | "paused" | "resuming";
 
+/** Provider/model provenance captured when a user turn is submitted. */
+export type TurnModel = {
+  harness: HarnessId;
+  id: string;
+  name: string;
+};
+
 export type Block = {
   id: string;
   role: BlockRole;
@@ -166,6 +173,8 @@ export type Block = {
   startedAt?: number;
   /** How long the agent worked on this user turn, in ms. */
   durationMs?: number;
+  /** Stable model label for this turn. Present on newly created user blocks. */
+  turnModel?: TurnModel;
   tool?: {
     callId?: string;
     title?: string;

@@ -7,11 +7,13 @@ import { AgentMarkdown } from "./AgentMarkdown";
 const actions = vi.hoisted(() => ({
   copyText: vi.fn(async () => {}),
   openPath: vi.fn(async () => {}),
+  openUrl: vi.fn(async () => {}),
   revealPath: vi.fn(async () => {}),
 }));
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: actions.openPath,
+  openUrl: actions.openUrl,
 }));
 
 vi.mock("../lib/clipboard", () => ({
@@ -44,8 +46,7 @@ function openMenu(element: Element) {
   );
 }
 
-async function pick(label: string) {
-  const link = container.querySelector("a")!;
+async function pick(label: string, link = container.querySelector("a")!) {
   const menu = openMenu(link)!;
   const item = Array.from(
     menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
@@ -118,6 +119,26 @@ describe("AgentMarkdown file link context menu", () => {
     expect(menu).toBeNull();
   });
 
+  it("opens external web links in the default browser", async () => {
+    props = {
+      text: "[Website](https://example.com/docs)",
+      cwd: "/repo",
+      onOpenFile: vi.fn(),
+    };
+    render();
+
+    const link = container.querySelector<HTMLAnchorElement>("a")!;
+    const event = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => link.dispatchEvent(event));
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.openUrl).toHaveBeenCalledWith("https://example.com/docs");
+    expect(props.onOpenFile).not.toHaveBeenCalled();
+  });
+
   it("also recognizes inline-code file references", () => {
     props = {
       text: "See `src/app.ts`.",
@@ -129,4 +150,40 @@ describe("AgentMarkdown file link context menu", () => {
     const menu = openMenu(container.querySelector("code")!);
     expect(menu?.textContent).toContain("Open in MonoCode");
   });
+
+  it.each([
+    ["[Source](src/main.ts#L12)", "a", { line: 12 }],
+    ["`src/main.ts:12:3`", "code", { line: 12, column: 3 }],
+    [
+      "```12:16:src/main.ts\nexport const answer = 42;\n```",
+      ".markdown-code-path-link",
+      { line: 12 },
+    ],
+  ] as const)(
+    "preserves the source location when opening %s through the menu",
+    async (text, selector, navigation) => {
+      props = { ...props, text };
+      render();
+      const link = container.querySelector(selector)!;
+
+      await pick("Open in MonoCode", link);
+      expect(props.onOpenFile).toHaveBeenCalledWith(
+        "/repo/src/main.ts",
+        navigation,
+      );
+      await pick("Copy Path", link);
+      expect(actions.copyText).toHaveBeenCalledWith("/repo/src/main.ts");
+    },
+  );
+
+  it.each(["currentTime/read", "file://localhost/%2Fhost/share/file.md"])(
+    "does not expose file actions for %s",
+    (value) => {
+      props = { ...props, text: `\`${value}\`` };
+      render();
+      expect(openMenu(container.querySelector("code")!)).toBeNull();
+      expect(props.onOpenFile).not.toHaveBeenCalled();
+      expect(actions.openPath).not.toHaveBeenCalled();
+    },
+  );
 });
