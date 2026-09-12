@@ -144,6 +144,7 @@ export function ScheduleSheet({
       title={existing ? "Edit schedule" : "New schedule"}
       description={`Runs only while MonoCode is open · times are ${scheduleTimezone()}`}
       size="md"
+      className="max-h-[80vh]"
     >
       <div className="space-y-4 p-4">
         <div>
