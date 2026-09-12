@@ -632,7 +632,7 @@ export function ProjectRail({
       onRemoveProject?.(path, { purgeData });
   };
 
-  const onProjectMenuPick = (action: string) => {
+  const onProjectMenuPick = (action: string, itemRect?: DOMRect) => {
     if (!projectMenu) return;
     const { path, projectKey, projectId } = projectMenu;
     const displayName =
@@ -642,7 +642,11 @@ export function ProjectRail({
     else if (action === "new-task") onNewTask?.(path, projectId);
     else if (action === "commands") {
       onOpenCommands?.({
-        anchor: { x: projectMenu.x, y: projectMenu.y },
+        // Anchor at the picked row's edge so the popover reads as a submenu
+        // of the context menu rather than floating at the right-click point.
+        anchor: itemRect
+          ? { x: itemRect.right, y: itemRect.top }
+          : { x: projectMenu.x, y: projectMenu.y },
         path: isProjectRailKey(path) ? undefined : path,
         projectId,
       });
@@ -995,9 +999,10 @@ export function ProjectRail({
                 type="button"
                 role="menuitem"
                 className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
-                onClick={() => {
+                onClick={(event) => {
+                  const itemRect = event.currentTarget.getBoundingClientRect();
                   onOpenCommands({
-                    anchor: { x: taskMenu.x, y: taskMenu.y },
+                    anchor: { x: itemRect.right, y: itemRect.top },
                     projectId: taskMenu.task.projectId,
                     taskId: taskMenu.task.id,
                   });
