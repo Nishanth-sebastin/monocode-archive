@@ -338,6 +338,39 @@ export function findAzurePrs(target: AzurePrTarget, branch: string, skip = 0) {
     }
   >("azure_pr_list", { target, branch, skip });
 }
+export type AzurePrCreateResult = {
+  pr: AzurePr;
+  existing: boolean;
+  revision: string;
+  target: AzurePrTarget;
+  repositoryName: string;
+  projectName: string;
+  account: string;
+};
+/** `target.project`/`target.repository` may be names; the response carries canonical IDs. */
+export function azurePrCreate(
+  target: AzurePrTarget,
+  sourceBranch: string,
+  targetBranch: string,
+  title: string,
+  description: string,
+  draft: boolean,
+) {
+  return invoke<AzurePrCreateResult>("azure_pr_create", {
+    target,
+    sourceBranch,
+    targetBranch,
+    title,
+    description,
+    draft,
+  });
+}
+export function azurePrUpdate(target: AzurePrTarget, description: string) {
+  return invoke<{ pr: AzurePr; revision: string }>("azure_pr_update", {
+    target,
+    description,
+  });
+}
 export function readAzurePr(
   target: AzurePrTarget,
   expectedRevision: string | null = null,

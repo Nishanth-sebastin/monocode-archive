@@ -238,8 +238,11 @@ export type GitRangeContext = {
   diffPatch: string;
 };
 
-export function gitRangeContext(cwd: string): Promise<GitRangeContext> {
-  return invoke<GitRangeContext>("git_range_context", { cwd });
+export function gitRangeContext(
+  cwd: string,
+  base?: string,
+): Promise<GitRangeContext> {
+  return invoke<GitRangeContext>("git_range_context", { cwd, base: base ?? null });
 }
 
 export type GitPr = {
@@ -247,6 +250,7 @@ export type GitPr = {
   title: string;
   url: string;
   state: string;
+  base?: string;
 };
 
 export function gitPrStatus(cwd: string): Promise<GitPr | null> {
@@ -259,8 +263,40 @@ export function gitPrCreate(
   body: string,
   base: string,
   head: string,
+  draft = false,
 ): Promise<string> {
-  return invoke<string>("git_pr_create", { cwd, title, body, base, head });
+  return invoke<string>("git_pr_create", { cwd, title, body, base, head, draft });
+}
+
+export function gitPrUpdate(
+  cwd: string,
+  url: string,
+  body: string,
+): Promise<void> {
+  return invoke<void>("git_pr_update", { cwd, url, body });
+}
+
+export function gitPrBody(cwd: string, url: string): Promise<string> {
+  return invoke<string>("git_pr_body", { cwd, url });
+}
+
+export type GitPrCheck = {
+  branch: string | null;
+  remote: string | null;
+  upstream: string | null;
+  defaultBranch: string | null;
+  dirtyFiles: number;
+  dirtyLimited: boolean;
+  published: boolean;
+  aheadOfRemote: number;
+  targetExists: boolean;
+  ahead: number;
+  behind: number;
+  commits: string[];
+};
+
+export function gitPrCheck(cwd: string, target: string): Promise<GitPrCheck> {
+  return invoke<GitPrCheck>("git_pr_check", { cwd, target });
 }
 
 export type GitBranchInfo = {

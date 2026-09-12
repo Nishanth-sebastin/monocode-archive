@@ -41,6 +41,7 @@ export function generateCommitMessage(
 export function generatePrContent(
   cwd: string,
   preferred?: HarnessId,
+  base?: string,
 ): Promise<(PrContent & { base: string; head: string }) | null> {
-  return generateHarnessPrContent(pickTextHarness(preferred, cwd), cwd);
+  return generateHarnessPrContent(pickTextHarness(preferred, cwd), cwd, base);
 }

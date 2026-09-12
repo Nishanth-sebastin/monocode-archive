@@ -202,6 +202,7 @@ type Props = {
    * over. Purely presentational; never launches work. */
   focusTaskId?: string;
   onEditTask?: (taskId: string) => void;
+  onCreateTaskPrs?: (taskId: string) => void;
   /** Sessions currently needing input (approval or question) — per-child dots. */
   needsInputSessionIds?: ReadonlySet<string>;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
@@ -241,6 +242,7 @@ export function ProjectRail({
   onOpenTask,
   focusTaskId,
   onEditTask,
+  onCreateTaskPrs,
   needsInputSessionIds,
   onRemoveProject,
   liveAgents = [],
@@ -947,6 +949,18 @@ export function ProjectRail({
               }}
             >
               Edit task…
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!onCreateTaskPrs}
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5 disabled:opacity-50"
+              onClick={() => {
+                onCreateTaskPrs?.(taskMenu.task.id);
+                setTaskMenu(null);
+              }}
+            >
+              Create pull requests…
             </button>
             <button
               type="button"

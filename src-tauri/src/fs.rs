@@ -489,10 +489,15 @@ pub struct GitRangeContext {
 
 /// Commits and diff between the default branch and HEAD, for PR text generation.
 #[tauri::command]
-pub async fn git_range_context(cwd: String) -> Result<GitRangeContext, String> {
-    tauri::async_runtime::spawn_blocking(move || git_range_context_for(&expand_home(&cwd)))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn git_range_context(
+    cwd: String,
+    base: Option<String>,
+) -> Result<GitRangeContext, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_range_context_for(&expand_home(&cwd), base.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -502,6 +507,8 @@ pub struct GitPr {
     pub title: String,
     pub url: String,
     pub state: String,
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 /// Latest pull request for the current branch, if `gh` can see one.
@@ -518,6 +525,7 @@ struct GitPrCreateInput {
     body: String,
     base: String,
     head: String,
+    draft: bool,
 }
 
 /// Create a GitHub pull request with `gh` and return its URL.
@@ -528,6 +536,7 @@ pub async fn git_pr_create(
     body: String,
     base: String,
     head: String,
+    draft: bool,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         git_pr_create_for(
@@ -537,11 +546,64 @@ pub async fn git_pr_create(
                 body,
                 base,
                 head,
+                draft,
             },
         )
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Read a GitHub pull request's current description with `gh pr view`.
+#[tauri::command]
+pub async fn git_pr_body(cwd: String, url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let url = url.trim();
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err("Invalid pull request URL".into());
+        }
+        gh_checked(
+            &expand_home(&cwd),
+            &["pr", "view", url, "--json", "body", "--jq", ".body"],
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Replace a GitHub pull request's description with `gh pr edit`.
+#[tauri::command]
+pub async fn git_pr_update(cwd: String, url: String, body: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || git_pr_update_for(&expand_home(&cwd), &url, &body))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPrCheck {
+    pub branch: Option<String>,
+    pub remote: Option<String>,
+    pub upstream: Option<String>,
+    pub default_branch: Option<String>,
+    pub dirty_files: u32,
+    /// True when the dirty-file count hit the scan limit (display "500+").
+    pub dirty_limited: bool,
+    pub published: bool,
+    pub ahead_of_remote: i64,
+    pub target_exists: bool,
+    pub ahead: i64,
+    pub behind: i64,
+    pub commits: Vec<String>,
+}
+
+/// Local state for one PR candidate: branch, publish state, and the range to a
+/// chosen target branch. Local-only; no network.
+#[tauri::command]
+pub async fn git_pr_check(cwd: String, target: String) -> Result<GitPrCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || git_pr_check_for(&expand_home(&cwd), &target))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -1711,19 +1773,17 @@ fn git_sync_changes_for(root: &Path) -> Result<(), String> {
     git_push_for(root)
 }
 
-fn git_range_context_for(root: &Path) -> Result<GitRangeContext, String> {
+fn git_range_context_for(root: &Path, base: Option<&str>) -> Result<GitRangeContext, String> {
     let head = git_branch(root).ok_or_else(|| "Not on a branch".to_string())?;
     let remote = git_remote_name(root);
-    let default_branch = git_default_branch(root, remote.as_deref())
+    let base_name = base
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| git_default_branch(root, remote.as_deref()))
         .ok_or_else(|| "Could not resolve the default branch".to_string())?;
-    let base_ref = match &remote {
-        Some(remote)
-            if git_ref_exists(root, &format!("refs/remotes/{remote}/{default_branch}")) =>
-        {
-            format!("{remote}/{default_branch}")
-        }
-        _ => default_branch.clone(),
-    };
+    let base_ref = git_target_ref(root, &base_name, remote.as_deref())
+        .ok_or_else(|| format!("No such base branch: {base_name}"))?;
     let spec = format!("{base_ref}...HEAD");
     let commit_summary =
         git_run(root, &["log", "--format=%s", &format!("{base_ref}..HEAD")]).unwrap_or_default();
@@ -1733,7 +1793,7 @@ fn git_range_context_for(root: &Path) -> Result<GitRangeContext, String> {
         return Err("No commits to include in a pull request".into());
     }
     Ok(GitRangeContext {
-        base: default_branch,
+        base: base_name,
         head,
         commit_summary,
         diff_summary,
@@ -1753,7 +1813,7 @@ fn git_pr_status_for(root: &Path) -> Option<GitPr> {
             "--head",
             &head,
             "--json",
-            "number,title,url,state",
+            "number,title,url,state,baseRefName",
             "--limit",
             "20",
             "--state",
@@ -2662,6 +2722,8 @@ fn parse_gh_pr_list(json: &str) -> Option<GitPr> {
         title: String,
         url: String,
         state: String,
+        #[serde(default, rename = "baseRefName")]
+        base: Option<String>,
     }
     let rows: Vec<Row> = serde_json::from_str(json).ok()?;
     let mut best: Option<GitPr> = None;
@@ -2671,6 +2733,7 @@ fn parse_gh_pr_list(json: &str) -> Option<GitPr> {
             title: row.title,
             url: row.url,
             state: row.state.to_lowercase(),
+            base: row.base,
         };
         if pr.state == "open" {
             return Some(pr);
@@ -2682,32 +2745,39 @@ fn parse_gh_pr_list(json: &str) -> Option<GitPr> {
     best
 }
 
-fn git_pr_create_for(root: &Path, input: &GitPrCreateInput) -> Result<String, String> {
-    let title = input.title.trim();
-    if title.is_empty() {
-        return Err("Pull request title cannot be empty".into());
-    }
+fn write_pr_body(body: &str) -> Result<PathBuf, String> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let body_path = std::env::temp_dir().join(format!("monocode-pr-{stamp}.md"));
-    std::fs::write(&body_path, input.body.trim()).map_err(|e| e.to_string())?;
-    let result = gh_checked(
-        root,
-        &[
-            "pr",
-            "create",
-            "--title",
-            title,
-            "--body-file",
-            &body_path.to_string_lossy(),
-            "--base",
-            input.base.trim(),
-            "--head",
-            input.head.trim(),
-        ],
-    );
+    std::fs::write(&body_path, body.trim()).map_err(|e| e.to_string())?;
+    Ok(body_path)
+}
+
+fn git_pr_create_for(root: &Path, input: &GitPrCreateInput) -> Result<String, String> {
+    let title = input.title.trim();
+    if title.is_empty() {
+        return Err("Pull request title cannot be empty".into());
+    }
+    let body_path = write_pr_body(&input.body)?;
+    let body_arg = body_path.to_string_lossy().to_string();
+    let mut args = vec![
+        "pr",
+        "create",
+        "--title",
+        title,
+        "--body-file",
+        body_arg.as_str(),
+        "--base",
+        input.base.trim(),
+        "--head",
+        input.head.trim(),
+    ];
+    if input.draft {
+        args.push("--draft");
+    }
+    let result = gh_checked(root, &args);
     let _ = std::fs::remove_file(&body_path);
     result.and_then(|output| {
         output
@@ -2722,6 +2792,135 @@ fn git_pr_create_for(root: &Path, input: &GitPrCreateInput) -> Result<String, St
                     output
                 }
             })
+    })
+}
+
+fn git_pr_update_for(root: &Path, url: &str, body: &str) -> Result<(), String> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Invalid pull request URL".into());
+    }
+    let body_path = write_pr_body(body)?;
+    let body_arg = body_path.to_string_lossy().to_string();
+    let result = gh_checked(root, &["pr", "edit", url, "--body-file", body_arg.as_str()]);
+    let _ = std::fs::remove_file(&body_path);
+    result.map(|_| ())
+}
+
+/// Resolve a target branch name to a base ref usable in `base...HEAD` ranges:
+/// the preferred remote's tracking ref first, then a local branch, then a
+/// uniquely-named remote branch.
+fn git_target_ref(root: &Path, target: &str, remote: Option<&str>) -> Option<String> {
+    let target = target.trim();
+    if target.is_empty() || target.len() > 200 || target.chars().any(|ch| ch.is_control()) {
+        return None;
+    }
+    let name = target.strip_prefix("refs/heads/").unwrap_or(target);
+    if let Some(rest) = name.strip_prefix("refs/remotes/") {
+        return git_ref_exists(root, &format!("refs/remotes/{rest}")).then(|| rest.to_string());
+    }
+    if let Some(remote) = remote {
+        if git_ref_exists(root, &format!("refs/remotes/{remote}/{name}")) {
+            return Some(format!("{remote}/{name}"));
+        }
+    }
+    if git_ref_exists(root, &format!("refs/heads/{name}")) {
+        return Some(name.to_string());
+    }
+    let text = git_run(
+        root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+    )?;
+    let mut found: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.ends_with("/HEAD") {
+            continue;
+        }
+        if line
+            .split_once('/')
+            .map(|(_, n)| n == name)
+            .unwrap_or(false)
+        {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(line.to_string());
+        }
+    }
+    found
+}
+
+fn git_pr_check_for(root: &Path, target: &str) -> Result<GitPrCheck, String> {
+    if !git_is_work_tree(root) {
+        return Err("Not a git repository".into());
+    }
+    let branch = git_head_branch(root);
+    let remote = git_remote_name(root);
+    let upstream = git_stdout(root, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    let default_branch = git_default_branch(root, remote.as_deref());
+    // Cap the scan at 500 dirty files; dirty_limited marks a truncated count.
+    let (dirty_files, dirty_limited) = git_run(root, &["status", "--porcelain", "--", "."])
+        .map(|text| {
+            let mut lines = text.lines();
+            let count = lines.by_ref().take(501).count();
+            (count.min(500) as u32, count > 500)
+        })
+        .unwrap_or((0, false));
+
+    let remote_ref = branch.as_deref().and_then(|name| {
+        upstream
+            .clone()
+            // A local branch can be the upstream — only a `remote/branch`
+            // upstream means the source exists on a remote.
+            .filter(|value| value.contains('/'))
+            .or_else(|| {
+                remote.as_deref().and_then(|remote| {
+                    git_ref_exists(root, &format!("refs/remotes/{remote}/{name}"))
+                        .then(|| format!("{remote}/{name}"))
+                })
+            })
+    });
+    let published = remote_ref.is_some();
+    let ahead_of_remote = remote_ref
+        .as_deref()
+        .map(|base| git_ahead_behind(root, base).0)
+        .unwrap_or(0);
+
+    let target_ref = git_target_ref(root, target, remote.as_deref());
+    let (target_exists, ahead, behind, commits) = match target_ref.as_deref() {
+        Some(base) => {
+            let (ahead, behind) = git_ahead_behind(root, base);
+            let commits = git_run(
+                root,
+                &["log", "--format=%s", "-n", "50", &format!("{base}..HEAD")],
+            )
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+            (true, ahead, behind, commits)
+        }
+        None => (false, 0, 0, Vec::new()),
+    };
+
+    Ok(GitPrCheck {
+        branch,
+        remote,
+        upstream,
+        default_branch,
+        dirty_files,
+        dirty_limited,
+        published,
+        ahead_of_remote,
+        target_exists,
+        ahead,
+        behind,
+        commits,
     })
 }
 
@@ -5408,7 +5607,7 @@ mod tests {
         assert_eq!(index.upstream, None);
         assert_eq!(index.ahead, 1);
         assert_eq!(index.ahead_of_default, 1);
-        let range = git_range_context_for(&repo.0).unwrap();
+        let range = git_range_context_for(&repo.0, None).unwrap();
         assert_eq!(range.base, "main");
         assert_eq!(range.head, "feature");
         assert!(range.commit_summary.contains("feature work"));
@@ -6064,5 +6263,177 @@ mod tests {
             "feature"
         );
         assert_eq!(git_head_branch(&repo.0).as_deref(), Some("feature"));
+    }
+
+    fn init_bare(dir: &Path) -> bool {
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(dir)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn git_target_ref_resolves_remote_local_and_qualified_names() {
+        let repo = tmp("pr-target-repo");
+        let origin = tmp("pr-target-origin");
+        if !init_git_commit(&repo.0, &[("a.txt", "alpha\n")]) || !init_bare(&origin.0) {
+            return;
+        }
+        let origin_url = origin.0.to_string_lossy().into_owned();
+        if !git(&repo.0, &["remote", "add", "origin", &origin_url])
+            || !git(&repo.0, &["push", "origin", "main"])
+            || !git(&repo.0, &["push", "origin", "main:dev"])
+            || !git(&repo.0, &["branch", "local-only"])
+        {
+            return;
+        }
+        assert_eq!(
+            git_target_ref(&repo.0, "dev", Some("origin")).as_deref(),
+            Some("origin/dev")
+        );
+        assert_eq!(
+            git_target_ref(&repo.0, "refs/heads/dev", Some("origin")).as_deref(),
+            Some("origin/dev")
+        );
+        assert_eq!(
+            git_target_ref(&repo.0, "refs/remotes/origin/dev", Some("origin")).as_deref(),
+            Some("origin/dev")
+        );
+        assert_eq!(
+            git_target_ref(&repo.0, "local-only", Some("origin")).as_deref(),
+            Some("local-only")
+        );
+        assert_eq!(git_target_ref(&repo.0, "missing", Some("origin")), None);
+        for bad in ["", " ", "bad\nname"] {
+            assert_eq!(git_target_ref(&repo.0, bad, Some("origin")), None);
+        }
+        assert_eq!(
+            git_target_ref(&repo.0, &"x".repeat(201), Some("origin")),
+            None
+        );
+    }
+
+    #[test]
+    fn git_target_ref_rejects_ambiguous_remote_matches() {
+        let repo = tmp("pr-target-ambig-repo");
+        let one = tmp("pr-target-ambig-one");
+        let two = tmp("pr-target-ambig-two");
+        if !init_git_commit(&repo.0, &[("a.txt", "alpha\n")])
+            || !init_bare(&one.0)
+            || !init_bare(&two.0)
+        {
+            return;
+        }
+        for (name, dir) in [("one", &one), ("two", &two)] {
+            let url = dir.0.to_string_lossy().into_owned();
+            if !git(&repo.0, &["remote", "add", name, &url])
+                || !git(&repo.0, &["push", name, "main:shared"])
+            {
+                return;
+            }
+        }
+        // `one/shared` and `two/shared` both exist — no preferred remote means
+        // the base ref is ambiguous and must not be guessed.
+        assert_eq!(git_target_ref(&repo.0, "shared", None), None);
+        assert_eq!(
+            git_target_ref(&repo.0, "shared", Some("one")).as_deref(),
+            Some("one/shared")
+        );
+        // Branch names with slashes must match the full remote ref name.
+        if !git(&repo.0, &["push", "one", "main:feature/shared"]) {
+            return;
+        }
+        assert_eq!(
+            git_target_ref(&repo.0, "feature/shared", Some("one")).as_deref(),
+            Some("one/feature/shared")
+        );
+        // Unique across remotes — the sole `feature/shared` still resolves.
+        assert_eq!(
+            git_target_ref(&repo.0, "feature/shared", None).as_deref(),
+            Some("one/feature/shared")
+        );
+    }
+
+    #[test]
+    fn git_pr_check_reports_range_to_chosen_target() {
+        let repo = tmp("pr-check-repo");
+        let origin = tmp("pr-check-origin");
+        if !init_git_commit(&repo.0, &[("a.txt", "alpha\n")]) || !init_bare(&origin.0) {
+            return;
+        }
+        let origin_url = origin.0.to_string_lossy().into_owned();
+        if !git(&repo.0, &["remote", "add", "origin", &origin_url])
+            || !git(&repo.0, &["push", "-u", "origin", "main"])
+            || !git(&repo.0, &["push", "origin", "main:dev"])
+            || !git(&repo.0, &["checkout", "-b", "feature"])
+        {
+            return;
+        }
+        std::fs::write(repo.0.join("b.txt"), "beta\n").unwrap();
+        git_stage_file_for(&repo.0, "b.txt").unwrap();
+        git_commit_for(&repo.0, "feature work").unwrap();
+
+        let check = git_pr_check_for(&repo.0, "dev").unwrap();
+        assert_eq!(check.branch.as_deref(), Some("feature"));
+        assert_eq!(check.remote.as_deref(), Some("origin"));
+        assert_eq!(check.default_branch.as_deref(), Some("main"));
+        assert!(check.target_exists);
+        assert_eq!(check.ahead, 1);
+        assert_eq!(check.behind, 0);
+        assert_eq!(check.commits, vec!["feature work".to_string()]);
+        assert!(!check.published);
+        assert_eq!(check.dirty_files, 0);
+
+        std::fs::write(repo.0.join("dirty.txt"), "x\n").unwrap();
+        assert_eq!(git_pr_check_for(&repo.0, "dev").unwrap().dirty_files, 1);
+
+        let missing = git_pr_check_for(&repo.0, "nonexistent").unwrap();
+        assert!(!missing.target_exists);
+        assert_eq!(missing.ahead, 0);
+    }
+
+    #[test]
+    fn git_pr_check_reports_detached_head() {
+        let repo = tmp("pr-check-detached");
+        if !init_git_commit(&repo.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo.0)
+            .output();
+        let Ok(output) = output else { return };
+        if !output.status.success() {
+            return;
+        }
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !git(&repo.0, &["checkout", &sha]) {
+            return;
+        }
+        let check = git_pr_check_for(&repo.0, "main").unwrap();
+        assert_eq!(check.branch, None);
+        assert!(!check.published);
+    }
+
+    #[test]
+    fn git_range_context_uses_requested_base() {
+        let repo = tmp("pr-range-base");
+        if !init_git_commit(&repo.0, &[("a.txt", "alpha\n")])
+            || !git(&repo.0, &["branch", "dev"])
+            || !git(&repo.0, &["checkout", "-b", "feature"])
+        {
+            return;
+        }
+        std::fs::write(repo.0.join("b.txt"), "beta\n").unwrap();
+        git_stage_file_for(&repo.0, "b.txt").unwrap();
+        git_commit_for(&repo.0, "feature work").unwrap();
+
+        let range = git_range_context_for(&repo.0, Some("dev")).unwrap();
+        assert_eq!(range.base, "dev");
+        assert_eq!(range.head, "feature");
+        assert!(range.commit_summary.contains("feature work"));
+        assert!(git_range_context_for(&repo.0, Some("missing")).is_err());
     }
 }
