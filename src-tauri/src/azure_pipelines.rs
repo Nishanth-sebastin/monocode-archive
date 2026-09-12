@@ -316,7 +316,7 @@ pub async fn azure_ci_lookup(app: AppHandle, input: CiLookup) -> Result<Value, S
     }).await.map_err(|_| "Pipeline lookup failed")?
 }
 
-fn sanitize_log(raw: &str) -> String {
+pub(crate) fn sanitize_log(raw: &str) -> String {
     let mut clean = String::new();
     let mut chars = raw.chars().peekable();
     while let Some(c) = chars.next() {

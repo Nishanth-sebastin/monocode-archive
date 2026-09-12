@@ -10,6 +10,7 @@ import {
   type AzureStatus,
 } from "../lib/azure";
 import { contextFromText, requestAgentContext } from "../lib/agentContext";
+import { openWatchSheet } from "../lib/watchers";
 import { buildUnifiedFile, formatUnifiedHunk } from "../lib/unifiedDiff";
 import { UnifiedDiffView } from "../surfaces/UnifiedDiffView";
 import {
@@ -838,6 +839,29 @@ function AzurePrDetails({
             ? "Refresh comments"
             : "Load comments"}
       </button>
+      {association.pr.status === "active" ? (
+        <button
+          className={button}
+          onClick={() =>
+            openWatchSheet({
+              source: {
+                kind: "azure-pr",
+                target: association.target,
+                projectName: association.projectName,
+                repositoryName: association.repositoryName,
+                cwd: association.cwd,
+                branch: association.branch,
+                ...(association.sourceSessionId
+                  ? { sessionId: association.sourceSessionId }
+                  : {}),
+              },
+              name: `Reviews · ${association.repositoryName} !${association.target.number}`,
+            })
+          }
+        >
+          Watch reviews
+        </button>
+      ) : null}
       {busy && preparation.current ? <button className={button} onClick={() => preparation.current?.abort()}>Cancel preparation</button> : null}
       {error ? <p role="alert">{error}</p> : null}
       {threads?.items.length === 0 ? <p>No review threads.</p> : null}

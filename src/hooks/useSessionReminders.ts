@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { message } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   loadNotificationsEnabled,
   NOTIFICATIONS_CHANGE_EVENT,
@@ -181,13 +181,14 @@ export function useSessionReminders(
     }
   }, []);
 
-  return {
-    reminders,
-    due: reminders.filter((reminder) => reminder.dueAt <= now),
-    error,
-    refresh,
-    schedule,
-    cancel,
-    open,
-  };
+  // Stable identities — consumers memo derived work on this object, so a
+  // fresh `.filter()`/object per render would defeat every memo downstream.
+  const due = useMemo(
+    () => reminders.filter((reminder) => reminder.dueAt <= now),
+    [reminders, now],
+  );
+  return useMemo(
+    () => ({ reminders, due, error, refresh, schedule, cancel, open }),
+    [reminders, due, error, refresh, schedule, cancel, open],
+  );
 }

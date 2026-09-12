@@ -3,7 +3,11 @@ import { getVerifiedFamilies } from "./repositoryFamilies";
 import { loadRecents } from "./recents";
 import { wslLocation } from "./paths";
 import { notifyGitChanged } from "./fs";
-import { boundAgentContext, type AgentContext } from "./agentContext";
+import {
+  boundAgentContext,
+  contextFromText,
+  type AgentContext,
+} from "./agentContext";
 import {
   azurePrContext,
   azurePrKey,
@@ -25,6 +29,13 @@ import {
   type CiJob,
   type CiLog,
 } from "./azurePipelines";
+import {
+  FAILING_CHECK_CONCLUSIONS,
+  githubPrState,
+  githubWorkItemThread,
+  type GithubPrState,
+  type GithubWorkItemComment,
+} from "./githubTasks";
 import { sessionWorkCwd, type Session } from "./session";
 import { isLiveHarness } from "./harness/registry";
 import { isPreparingHandoff } from "./handoff";
@@ -48,6 +59,34 @@ export type RepairEvidence = {
         CiLog,
         "startLine" | "endLine" | "attempt" | "logId" | "recordId"
       >;
+    }
+  | {
+      kind: "github-comments";
+      /** owner/repo the PR lives in — the checkout remote must match. */
+      repo: string;
+      number: number;
+      comments: {
+        id: string;
+        digest: string;
+        entry: string;
+        kind: string;
+        author: string;
+        text: string;
+        file?: string;
+        line?: number;
+      }[];
+    }
+  | {
+      kind: "github-ci";
+      repo: string;
+      number: number;
+      checks: {
+        name: string;
+        digest: string;
+        entry: string;
+        conclusion: string;
+        url: string;
+      }[];
     }
 );
 export type RepairDelivery = {
@@ -337,6 +376,181 @@ export function ciRepair(
     context,
   };
 }
+/** owner/repo tail of a GitHub remote URL, e.g. "acme/app" from any
+ * transport form (https, ssh, .git suffix). */
+const githubRepoSlug = (url: string) =>
+  url
+    .trim()
+    .match(/[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/)?.[1]
+    ?.toLowerCase();
+
+/** Resolve and verify the GitHub PR-head binding for a repair: the checkout
+ * must sit at the PR head commit on the PR branch with a remote pointing at
+ * the PR's repository. Never silently checks anything out — a mismatch is a
+ * visible error, not a fixup. */
+async function githubRepairHead(input: {
+  cwd: string;
+  repo: string;
+  number: number;
+}): Promise<{ head: CiHead; state: GithubPrState }> {
+  const state = await githubPrState(input.cwd, input.number);
+  if (state.state.toUpperCase() !== "OPEN")
+    throw new Error("The PR is no longer open. Refresh and retry.");
+  if (!state.headRefOid || !state.headRefName)
+    throw new Error("GitHub did not report the PR head. Refresh and retry.");
+  const checkout = await ciContext(input.cwd);
+  const remote = checkout.remotes.find(
+    (row) => githubRepoSlug(row.url) === input.repo.toLowerCase(),
+  );
+  if (!remote)
+    throw new Error(
+      `This checkout has no remote for ${input.repo}. Open the PR's checkout.`,
+    );
+  if (
+    checkout.commit !== state.headRefOid ||
+    checkout.branch !== state.headRefName
+  )
+    throw new Error(
+      `Checkout is not at the PR head (${state.headRefName} · ${state.headRefOid.slice(0, 8)}). Update the checkout first.`,
+    );
+  return {
+    head: {
+      cwd: checkout.cwd,
+      branch: checkout.branch,
+      commit: checkout.commit,
+      remote: remote.url,
+    },
+    state,
+  };
+}
+
+/** "Address comments" for a GitHub PR — bounded review evidence digested so a
+ * changed thread blocks dispatch instead of replaying stale comments. */
+export async function githubCommentsRepair(input: {
+  cwd: string;
+  repo: string;
+  number: number;
+  comments: GithubWorkItemComment[];
+}) {
+  const comments = input.comments.slice(0, 20);
+  if (!comments.length) throw new Error("Select review comments first.");
+  const { head, state } = await githubRepairHead(input);
+  const origin = `${state.url} · repository ${input.repo} · head ${state.headRefOid} · checkout ${head.cwd}`;
+  const built = comments.map((comment) => {
+    const where = comment.path
+      ? `File: ${comment.path}${comment.line != null ? `, line ${comment.line}` : ""}`
+      : "General discussion";
+    const replies = (comment.replies ?? [])
+      .slice(0, 20)
+      .map((reply) => `${reply.author}:\n${reply.body}`)
+      .join("\n\n");
+    const context = contextFromText(
+      `GitHub PR #${input.number}: ${state.title} · ${comment.author}`,
+      [
+        `Review comment (${comment.kind || "comment"}), state: ${comment.state || "unknown"}.`,
+        where,
+        `${comment.author}:\n${comment.body}`,
+        replies ? `Replies:\n${replies}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      origin,
+    );
+    return { comment, entry: context.entries[0] };
+  });
+  const evidence: RepairEvidence = {
+    kind: "github-comments",
+    scope: `github-pr:${input.repo}#${input.number}`,
+    head,
+    repo: input.repo,
+    number: input.number,
+    comments: await Promise.all(
+      built.map(async ({ comment, entry }) => ({
+        id: comment.id,
+        digest: await digest(comment),
+        entry: entry.id,
+        kind: comment.kind,
+        author: comment.author,
+        text: (comment.body ?? "").slice(0, 2000),
+        ...(comment.path ? { file: comment.path } : {}),
+        ...(comment.line != null ? { line: comment.line } : {}),
+      })),
+    ),
+  };
+  return {
+    evidence,
+    context: boundAgentContext({
+      id: crypto.randomUUID(),
+      entries: built.map(({ entry }) => entry),
+      attachments: [],
+      instruction:
+        "Address the selected review comments in this checkout. Run relevant checks and summarize changes. Do not reply, resolve threads, push or merge.",
+    }),
+  };
+}
+
+/** "Fix CI" for a GitHub PR — failing check runs on the PR head, bounded and
+ * digested for freshness validation at dispatch. */
+export async function githubCiRepair(input: {
+  cwd: string;
+  repo: string;
+  number: number;
+}) {
+  const { head, state } = await githubRepairHead(input);
+  const failing = state.checks
+    .filter((check) => FAILING_CHECK_CONCLUSIONS.includes(check.conclusion))
+    .slice(0, 20);
+  if (!failing.length)
+    throw new Error("No failing checks on this PR head. Refresh and retry.");
+  const origin = `${state.url} · repository ${input.repo} · head ${state.headRefOid} · checkout ${head.cwd}`;
+  const built = failing.map((check) => {
+    const context = contextFromText(
+      `GitHub check · ${check.name}`,
+      [
+        `Check "${check.name}" on ${state.headRefName} (${state.headRefOid.slice(0, 8)}): ${check.conclusion}.`,
+        check.outputTitle ? `Output: ${check.outputTitle}` : "",
+        check.outputText
+          ? `Bounded check output; common secret patterns and terminal controls removed. Review before sending.\n\n${check.outputText}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      check.url ? `${origin} · check ${check.url}` : origin,
+    );
+    return { check, entry: context.entries[0] };
+  });
+  const evidence: RepairEvidence = {
+    kind: "github-ci",
+    scope: `github-ci:${input.repo}#${input.number}`,
+    head,
+    repo: input.repo,
+    number: input.number,
+    checks: await Promise.all(
+      built.map(async ({ check, entry }) => ({
+        name: check.name,
+        digest: await digest({
+          name: check.name,
+          conclusion: check.conclusion,
+          output: `${check.outputTitle}\n${check.outputText}`,
+        }),
+        entry: entry.id,
+        conclusion: check.conclusion,
+        url: check.url,
+      })),
+    ),
+  };
+  return {
+    evidence,
+    context: boundAgentContext({
+      id: crypto.randomUUID(),
+      entries: built.map(({ entry }) => entry),
+      attachments: [],
+      instruction:
+        "Fix the failing checks on this PR in this checkout. Run relevant checks and summarize changes. Do not rerun workflows, push or merge.",
+    }),
+  };
+}
+
 export async function validateRepair(
   evidence: RepairEvidence,
   context: AgentContext,
@@ -374,6 +588,61 @@ export async function validateRepair(
       throw new Error(
         "Log evidence changed. Close this draft and Refresh evidence.",
       );
+  } else if (evidence.kind === "github-comments") {
+    const state = await githubPrState(evidence.head.cwd, evidence.number);
+    if (state.state.toUpperCase() !== "OPEN")
+      throw new Error("PR is no longer open. Refresh evidence.");
+    // The remote head may have moved after evidence was captured — a local
+    // checkout still matching the old head is not enough.
+    if (
+      state.headRefOid !== evidence.head.commit ||
+      state.headRefName !== evidence.head.branch
+    )
+      throw new Error(
+        "The PR head moved. Close this draft and Refresh evidence.",
+      );
+    const thread = await githubWorkItemThread(
+      evidence.head.cwd,
+      "pr",
+      evidence.number,
+      { force: true },
+    );
+    for (const selected of evidence.comments.filter((row) =>
+      context.entries.some((entry) => entry.id === row.entry),
+    )) {
+      const comment = thread.comments.find((row) => row.id === selected.id);
+      if (!comment || (await digest(comment)) !== selected.digest)
+        throw new Error(
+          "Selected comments changed. Close this draft and Refresh evidence.",
+        );
+    }
+  } else if (evidence.kind === "github-ci") {
+    const state = await githubPrState(evidence.head.cwd, evidence.number);
+    if (state.state.toUpperCase() !== "OPEN")
+      throw new Error("PR is no longer open. Refresh evidence.");
+    if (
+      state.headRefOid !== evidence.head.commit ||
+      state.headRefName !== evidence.head.branch
+    )
+      throw new Error(
+        "The PR head moved. Close this draft and Refresh evidence.",
+      );
+    for (const selected of evidence.checks.filter((row) =>
+      context.entries.some((entry) => entry.id === row.entry),
+    )) {
+      const check = state.checks.find((row) => row.name === selected.name);
+      if (
+        !check ||
+        (await digest({
+          name: check.name,
+          conclusion: check.conclusion,
+          output: `${check.outputTitle}\n${check.outputText}`,
+        })) !== selected.digest
+      )
+        throw new Error(
+          "Check output changed. Close this draft and Refresh evidence.",
+        );
+    }
   } else {
     const pr = await readAzurePr(
       evidence.association.target,

@@ -25,6 +25,7 @@ import {
   RefreshCw,
   Search,
   Task,
+  Zap,
   type IconComponent,
 } from "../chrome/icons";
 import {
@@ -177,6 +178,7 @@ import {
   type InboxSessionPortal,
 } from "./InboxDiscussionPanel";
 import { inboxAskKey } from "../lib/inboxAsk";
+import { openWatchSheet } from "../lib/watchers";
 import {
   JIRA_CHANGE_EVENT,
   atlassianCapable,
@@ -857,6 +859,56 @@ export function InboxView({
     [inboxSeenTick, sourceEntries],
   );
 
+  /** "Watch this query" (#23) — binds a watcher to the current source tab's
+   * filter. GitHub queries span repos, so the sheet asks which repository. */
+  const watchRepos = useMemo(
+    () =>
+      [
+        ...new Map(
+          items
+            .filter((item) => item.provider === "github" && item.repo)
+            .map((item) => [
+              `${item.projectPath}|${item.repo}`,
+              { cwd: item.projectPath, repo: item.repo },
+            ]),
+        ).values(),
+      ],
+    [items],
+  );
+  const canWatch =
+    (source === "jira" && connections.jira && !!jiraSite) ||
+    (source === "azure" && !!azureSite) ||
+    (source === "github" && watchRepos.length > 0);
+  const onWatchQuery = () => {
+    if (source === "jira" && jiraSite) {
+      openWatchSheet({
+        source: { kind: "jira-items", site: jiraSite, filter: jiraFilter },
+        name: `Jira · ${jiraFilter.project || "Assigned to me"}`,
+      });
+    } else if (source === "azure" && azureSite) {
+      openWatchSheet({
+        source: {
+          kind: "azure-boards",
+          site: azureSite,
+          project: azureFilter.project,
+          filter: azureFilter,
+        },
+        name: `Azure Boards · ${azureFilter.project || "Assigned to me"}`,
+      });
+    } else if (source === "github" && watchRepos.length) {
+      openWatchSheet({
+        source: {
+          kind: "github-items",
+          cwd: watchRepos[0].cwd,
+          repo: watchRepos[0].repo,
+          itemKind: "issue",
+        },
+        name: `GitHub · ${watchRepos[0].repo}`,
+        repos: watchRepos,
+      });
+    }
+  };
+
   const searchNarrowed = searchInput.trim().length > 0;
   const narrowedByUser = searchNarrowed || filtersActive;
   const sourceError = providerErrors[source] ?? null;
@@ -1003,6 +1055,17 @@ export function InboxView({
         >
           <ListFilter className="size-3" strokeWidth={1.75} />
         </button>
+        {canWatch ? (
+          <button
+            type="button"
+            title="Watch this query — poll it while MonoCode is open"
+            aria-label="Watch this query"
+            onClick={onWatchQuery}
+            className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content"
+          >
+            <Zap className="size-3.5" strokeWidth={1.75} />
+          </button>
+        ) : null}
         {onSendToTask ? <button type="button" aria-label="Select tickets" title="Select tickets" onClick={() => { setSelectingTickets(true); setFilterMenu(null); setSelectionError(""); }} className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content"><Check className="size-3.5" strokeWidth={1.75} /></button> : null}
         <button
           type="button"
@@ -2020,6 +2083,26 @@ export function InboxDetail({
             <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask agent
           </button>
           {isPr ? <button type="button" className={ACTION_OUTLINE} onClick={() => setTab("code")}>Review PR</button> : null}
+          {item.provider === "github" && item.kind === "pr" && item.repo ? (
+            <button
+              type="button"
+              className={ACTION_GHOST}
+              title="Watch reviews and checks on this PR"
+              onClick={() =>
+                openWatchSheet({
+                  source: {
+                    kind: "github-pr",
+                    cwd: item.projectPath,
+                    repo: item.repo,
+                    number: item.number,
+                  },
+                  name: `Reviews · ${item.repo}#${item.number}`,
+                })
+              }
+            >
+              <Zap className="size-3.5" strokeWidth={1.75} /> Watch
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => void openUrl(item.url)}
