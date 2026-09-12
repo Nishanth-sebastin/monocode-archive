@@ -128,6 +128,10 @@ import { ProjectCommandsMenu } from "./chrome/ProjectCommandsMenu";
 import { ProjectCommandsSheet } from "./chrome/ProjectCommandsSheet";
 import type { PopoverAnchor } from "./chrome/Popover";
 import {
+  OPEN_BOUND_PROCESS,
+  type BoundProcess,
+} from "./lib/worktreeRemoval";
+import {
   applyGroupedReorder,
   insertTabBesideActive,
   removeTabFromGroup,
@@ -673,8 +677,43 @@ export default function App({
     () => subscribeRemovedWorktree(({ path, replacement }) => {
       setRecents(loadRecents());
       setProjectCwd((current) =>
-        sameProjectPath(current, path) ? replacement : current,
+        isEqualOrInside(current, path) ? replacement : current,
       );
+      // The removed checkout's dock detaches: terminals spawned inside it
+      // were bound processes — stopped, or they blocked the removal. A
+      // terminal running elsewhere keeps running and moves to the
+      // replacement dock instead of losing its only UI.
+      setProjectTerminals((current) => {
+        let touched = false;
+        let survivors: FilePaneTab[] = [];
+        const docks = current.filter((dock) => {
+          if (!isEqualOrInside(dock.projectPath, path)) return true;
+          touched = true;
+          survivors = dock.pane.files.filter(
+            (file) =>
+              file.terminal &&
+              !!file.cwd &&
+              !isEqualOrInside(file.cwd, path),
+          );
+          return false;
+        });
+        if (!touched) return current;
+        if (survivors.length === 0) return docks;
+        const index = docks.findIndex((dock) =>
+          sameProjectPath(dock.projectPath, replacement),
+        );
+        if (index < 0) {
+          const [first, ...rest] = survivors;
+          let dock = createProjectTerminal(replacement, first);
+          for (const file of rest) dock = addTerminalToDock(dock, file);
+          return [...docks, dock];
+        }
+        docks[index] = survivors.reduce(
+          (dock, file) => addTerminalToDock(dock, file),
+          docks[index],
+        );
+        return docks;
+      });
     }),
     [],
   );
@@ -4762,6 +4801,55 @@ export default function App({
     window.addEventListener(OPEN_REPAIR, open);
     return () => window.removeEventListener(OPEN_REPAIR, open);
   }, [onSelectHistorySession]);
+
+  // "Open" on a removal blocker row: focus the bound session or terminal.
+  useEffect(() => {
+    const open = (event: Event) => {
+      const process = (event as CustomEvent<BoundProcess>).detail;
+      if (!process?.id) return;
+      if (process.kind === "terminal") {
+        for (const tab of tabsRef.current) {
+          for (const pane of tab.terminalPanes ?? []) {
+            if (!pane.files.some((file) => file.id === process.id)) continue;
+            setTabs((current) =>
+              current.map((entry) =>
+                entry.id === tab.id
+                  ? {
+                      ...entry,
+                      terminalPanes: (entry.terminalPanes ?? []).map(
+                        (item) =>
+                          item.id === pane.id
+                            ? { ...item, activeFileId: process.id }
+                            : item,
+                      ),
+                    }
+                  : entry,
+              ),
+            );
+            activateTab(tab.id, pane.id);
+            return;
+          }
+        }
+        const dock = projectTerminalsRef.current.find((entry) =>
+          entry.pane.files.some((file) => file.id === process.id),
+        );
+        if (dock) {
+          setProjectCwd(dock.projectPath);
+          setProjectTerminals((prev) =>
+            mapProjectTerminal(prev, dock.projectPath, (entry) =>
+              withDockOpen(selectDockTerminal(entry, process.id), true),
+            ),
+          );
+          focusProjectTerminal();
+        }
+        return;
+      }
+      setInboxViewOpen(false);
+      void onSelectHistorySession(process.id);
+    };
+    window.addEventListener(OPEN_BOUND_PROCESS, open);
+    return () => window.removeEventListener(OPEN_BOUND_PROCESS, open);
+  }, [activateTab, focusProjectTerminal, onSelectHistorySession]);
 
   // The task just created — the rail's "current" task until a task session
   // takes over. Never launches work on its own.

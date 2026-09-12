@@ -11,7 +11,7 @@ use tauri::{Manager, State};
 // Serializes removal against process startup, not against running agents.
 pub(crate) static LIFECYCLE: RwLock<()> = RwLock::new(());
 
-fn path_to_js(path: &Path) -> String {
+pub(crate) fn path_to_js(path: &Path) -> String {
     let text = super::path_to_js(path);
     // Rust canonicalization uses extended Windows paths; Git's inventory does not.
     if cfg!(windows) {
@@ -23,7 +23,7 @@ fn path_to_js(path: &Path) -> String {
     text
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Worktree {
     path: String,
@@ -436,8 +436,11 @@ fn removal_entry(root: &Path, path: &str) -> Result<(String, Worktree), String> 
     Ok((family.common_dir, entry))
 }
 
-// Force review is deliberately bounded and on demand. Large trees must be cleaned
-// explicitly with Git; never trade incomplete evidence for a destructive action.
+// Force review fingerprints metadata — name, type, mode, size and mtime per
+// entry — so trees of any byte size review in stat time. A write between
+// review and removal changes mtime or size, so the token still binds the
+// reviewed tree to the destructive call; only the entry count and walk time
+// are bounded.
 fn removal_preview(root: &Path, path: &str, include_files: bool) -> Result<RemovalPreview, String> {
     use std::hash::{Hash, Hasher};
     let (common_dir, entry) = removal_entry(root, path)?;
@@ -465,12 +468,11 @@ fn removal_preview(root: &Path, path: &str, include_files: bool) -> Result<Remov
     let start = Instant::now();
     let mut pending = vec![std::path::PathBuf::from(path)];
     let mut count = 0;
-    let mut bytes = 0u64;
     let mut files = Vec::new();
     while let Some(current) = pending.pop() {
-        if start.elapsed() > Duration::from_secs(30) || count >= 10_000 {
+        if start.elapsed() > Duration::from_secs(30) || count >= 250_000 {
             return Err(
-                "Force review exceeds 10,000 entries or 30 seconds. Clean up with Git instead."
+                "Force review exceeds 250,000 entries or 30 seconds. Clean up with Git instead."
                     .into(),
             );
         }
@@ -500,9 +502,9 @@ fn removal_preview(root: &Path, path: &str, include_files: bool) -> Result<Remov
                 if current == Path::new(path) && child.file_name() == ".git" {
                     continue;
                 }
-                if children.len() + pending.len() + count >= 10_000 {
+                if children.len() + pending.len() + count >= 250_000 {
                     return Err(
-                        "Force review exceeds 10,000 entries. Clean up with Git instead.".into(),
+                        "Force review exceeds 250,000 entries. Clean up with Git instead.".into(),
                     );
                 }
                 children.push(child.path());
@@ -510,22 +512,7 @@ fn removal_preview(root: &Path, path: &str, include_files: bool) -> Result<Remov
             children.sort();
             pending.extend(children);
         } else if meta.is_file() {
-            bytes = bytes
-                .checked_add(meta.len())
-                .ok_or("Force review is too large")?;
-            if bytes > 64 * 1024 * 1024 {
-                return Err("Force review exceeds 64 MiB. Clean up with Git instead.".into());
-            }
-            let mut data = Vec::new();
-            std::fs::File::open(&current)
-                .map_err(|e| e.to_string())?
-                .take(64 * 1024 * 1024 + 1)
-                .read_to_end(&mut data)
-                .map_err(|e| e.to_string())?;
-            if data.len() as u64 != meta.len() {
-                return Err("Files changed during review; refresh".into());
-            }
-            data.hash(&mut digest);
+            meta.len().hash(&mut digest);
         } else {
             return Err(
                 "Special files cannot be reviewed safely. Clean up with Git instead.".into(),
@@ -557,17 +544,17 @@ pub fn git_worktree_removal_preview(
     removal_preview(&expand_home(&cwd), &path, include_files)
 }
 
-fn remove(root: &Path, path: &str, head: &str) -> Result<(), String> {
-    remove_reviewed(root, path, head, None)
-}
-
-fn remove_reviewed(
+/// Every check that must pass before the destructive call. Returns the
+/// family's common Git dir — it outlives removal of any member, so execution
+/// and the post-remove confirmation run through a context that survives even
+/// when the caller was sitting inside the removed checkout.
+fn removal_checks(
     root: &Path,
     path: &str,
     head: &str,
     reviewed: Option<&str>,
-) -> Result<(), String> {
-    let (_, entry) = removal_entry(root, path)?;
+) -> Result<String, String> {
+    let (common_dir, entry) = removal_entry(root, path)?;
     if entry.head != head {
         return Err("Worktree HEAD changed; refresh and review again".into());
     }
@@ -594,17 +581,38 @@ fn remove_reviewed(
             "Worktree has modified, untracked or ignored files; all files are preserved.".into(),
         );
     }
-    let target = git_path(root, path)?;
-    let result = if reviewed.is_some() {
-        git(root, &["worktree", "remove", "--force", "--", &target])
+    Ok(common_dir)
+}
+
+fn execute_removal(common_dir: &str, path: &str, force: bool) -> Result<(), String> {
+    let context = Path::new(common_dir);
+    let target = git_path(context, path)?;
+    let result = if force {
+        git(context, &["worktree", "remove", "--force", "--", &target])
     } else {
-        git(root, &["worktree", "remove", "--", &target])
+        git(context, &["worktree", "remove", "--", &target])
     };
-    if !inventory(root)?.iter().any(|e| e.path == path) {
+    if !inventory(context)?.iter().any(|e| e.path == path) {
         return Ok(());
     }
     result?;
     Err("Removal could not be confirmed; refresh before retrying".into())
+}
+
+#[cfg(test)]
+fn remove(root: &Path, path: &str, head: &str) -> Result<(), String> {
+    remove_reviewed(root, path, head, None)
+}
+
+#[cfg(test)]
+fn remove_reviewed(
+    root: &Path,
+    path: &str,
+    head: &str,
+    reviewed: Option<&str>,
+) -> Result<(), String> {
+    let common_dir = removal_checks(root, path, head, reviewed)?;
+    execute_removal(&common_dir, path, reviewed.is_some())
 }
 
 #[tauri::command(async)]
@@ -614,29 +622,61 @@ pub fn git_worktree_remove(
     path: String,
     head: String,
     reviewed: Option<String>,
+    stop_processes: Option<bool>,
 ) -> Result<(), String> {
     let _guard = LIFECYCLE
         .try_write()
         .map_err(|_| "Another worktree operation or process startup is in progress")?;
-    // ponytail: conservatively block all live processes; add scoped leases if cross-repo cleanup is needed.
-    if app
-        .state::<crate::harness::HarnessHost>()
-        .has_live_processes()
-        || app.state::<crate::pty::PtyHost>().has_live_processes()
-    {
-        return Err("Close running agents and terminals before removing a worktree. No processes were stopped.".into());
+    let root = expand_home(&cwd);
+    // Everything that can still fail is checked before any process is stopped.
+    let mut common_dir = removal_checks(&root, &path, &head, reviewed.as_deref())?;
+    let bound = super::occupancy::bound_processes(&app, &path);
+    if !bound.is_empty() {
+        if !stop_processes.unwrap_or(false) {
+            return Err(format!(
+                "Work is still running in this worktree: {}. Open it or choose Stop and remove; nothing was removed.",
+                bound
+                    .iter()
+                    .map(|process| process.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        super::occupancy::stop_bound(&app, &bound)?;
+        // Fail closed: anything still bound after the stop — a process that
+        // refused to die or one a future host reports — blocks removal.
+        let remaining = super::occupancy::bound_processes(&app, &path);
+        if !remaining.is_empty() {
+            return Err(format!(
+                "Work is still running in this worktree: {}. Review it, then retry; nothing was removed.",
+                remaining
+                    .iter()
+                    .map(|process| process.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        // Stopped work may have written during shutdown; the earlier snapshot
+        // cannot be trusted for the destructive call.
+        common_dir = removal_checks(&root, &path, &head, reviewed.as_deref())?;
     }
-    match reviewed {
-        Some(token) => remove_reviewed(&expand_home(&cwd), &path, &head, Some(&token)),
-        None => remove(&expand_home(&cwd), &path, &head),
-    }
+    execute_removal(&common_dir, &path, reviewed.is_some())
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeSafety {
+    /// Execution host of this repository family: `macos`/`windows`/`linux` or
+    /// `wsl:<distribution>`.
+    host: String,
+    /// Fresh inventory entry for the reviewed target, with recorded use.
+    entry: Worktree,
     dirty: bool,
-    running: bool,
+    /// Agents and terminals bound to the target checkout at preflight time.
+    processes: Vec<super::occupancy::BoundProcess>,
+    /// Usable alternative checkouts for the switch-away fallback, in
+    /// inventory order; the frontend ranks them by recorded use.
+    siblings: Vec<Worktree>,
 }
 
 /// On-demand detail only; deletion always performs its own fresh safety checks.
@@ -646,10 +686,19 @@ pub fn git_worktree_safety(
     cwd: String,
     path: String,
 ) -> Result<WorktreeSafety, String> {
-    let entries = inventory(&expand_home(&cwd))?;
+    let root = expand_home(&cwd);
+    let host = crate::wsl::path_location(&root)?
+        .map(|location| format!("wsl:{}", location.distribution))
+        .unwrap_or_else(|| std::env::consts::OS.into());
+    let mut entries = inventory(&root)?;
+    add_session_activity(
+        &mut entries,
+        &app.state::<crate::session_store::SessionStore>(),
+    )?;
     let entry = entries
         .iter()
         .find(|entry| entry.path == path)
+        .cloned()
         .ok_or("Worktree is no longer registered. Refresh.")?;
     if entry.missing || entry.prunable.is_some() {
         return Err("This working copy is unavailable. Restore its original location or repair its Git registration, then retry.".into());
@@ -666,11 +715,14 @@ pub fn git_worktree_safety(
     .trim()
     .is_empty();
     Ok(WorktreeSafety {
+        host,
         dirty,
-        running: app
-            .state::<crate::harness::HarnessHost>()
-            .has_live_processes()
-            || app.state::<crate::pty::PtyHost>().has_live_processes(),
+        processes: super::occupancy::bound_processes(&app, &path),
+        siblings: entries
+            .into_iter()
+            .filter(|entry| entry.path != path && !entry.missing && entry.prunable.is_none())
+            .collect(),
+        entry,
     })
 }
 
@@ -981,20 +1033,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn force_review_bounds_large_files_and_never_follows_symlinks() {
+    fn force_review_handles_large_files_and_never_follows_symlinks() {
         let repo = Repo::new();
         let path = repo.target("bounded");
         create(&repo.0, "refs/heads/main", &repo.head(), "bounded", &path).unwrap();
+        // Byte size is not bounded: the fingerprint is metadata, so a sparse
+        // file larger than the old 64 MiB cap still reviews.
         let file = Path::new(&path).join("large");
         std::fs::File::create(&file)
             .unwrap()
             .set_len(64 * 1024 * 1024 + 1)
             .unwrap();
-        assert!(removal_preview(&repo.0, &path, false)
-            .err()
-            .unwrap()
-            .contains("64 MiB"));
-        std::fs::remove_file(file).unwrap();
+        let reviewed = removal_preview(&repo.0, &path, false).unwrap();
+        // A post-review write moves size/mtime — the reviewed token no longer
+        // matches and removal refuses.
+        std::fs::write(&file, "changed same-slot write").unwrap();
+        assert!(remove_reviewed(&repo.0, &path, &repo.head(), Some(&reviewed.token)).is_err());
+        std::fs::remove_file(&file).unwrap();
         #[cfg(unix)]
         {
             let outside = repo.0.join("outside");
@@ -1030,6 +1085,80 @@ pub(crate) mod tests {
         assert!(!Path::new(&path).exists());
         assert!(git(&repo.0, &["show-ref", "--verify", "refs/heads/keep-branch"]).is_ok());
         assert_eq!(inventory(&repo.0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn removal_runs_through_a_surviving_context() {
+        let repo = Repo::new();
+        let head = repo.head();
+        let path = repo.target("self-context");
+        create(&repo.0, "refs/heads/main", &head, "self", &path).unwrap();
+        // The caller may be sitting inside the removed checkout; the common
+        // Git dir carries the removal and the post-remove confirmation.
+        remove(Path::new(&path), &path, &head).unwrap();
+        assert!(!Path::new(&path).exists());
+        assert!(git(&repo.0, &["show-ref", "--verify", "refs/heads/self"]).is_ok());
+        assert_eq!(inventory(&repo.0).unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn switch_away_removal_stops_only_bound_work_on_a_real_repo() {
+        // The `git_worktree_remove` command sequence, exercised at the owning
+        // boundary: fresh checks, scoped occupancy evidence, explicit stop,
+        // re-check, then removal through the surviving common Git dir.
+        let repo = Repo::new();
+        let head = repo.head();
+        let path = repo.target("busy target");
+        let sibling = repo.target("healthy sibling");
+        create(&repo.0, "refs/heads/main", &head, "busy", &path).unwrap();
+        create(&repo.0, "refs/heads/main", &head, "sibling", &sibling).unwrap();
+
+        let harness = crate::harness::HarnessHost::new();
+        let pty = crate::pty::PtyHost::new();
+        let mut inside = harness.add_test_child("agent-in-target", &path);
+        let mut outside = harness.add_test_child("agent-in-sibling", &sibling);
+        // Real children are reaped by their owner threads; an unwaited test
+        // child would stay a zombie and answer kill(pid, 0) during the wait.
+        std::thread::spawn(move || {
+            let _ = inside.wait();
+        });
+
+        let common_dir = removal_checks(&repo.0, &path, &head, None).unwrap();
+        let bound = crate::fs::occupancy::collect(&harness, &pty, None, &path);
+        assert_eq!(
+            bound.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["agent-in-target"]
+        );
+
+        crate::fs::occupancy::stop_processes(&harness, &pty, &bound).unwrap();
+        assert!(harness
+            .live_cwds()
+            .iter()
+            .all(|(id, _)| id != "agent-in-target"));
+
+        // Stopped work may have changed files, so checks run again before
+        // the destructive call — the same order the command enforces.
+        let common_dir = removal_checks(&repo.0, &path, &head, None).unwrap_or_else(|_| {
+            panic!("clean tree still passes after stop; first context {common_dir}")
+        });
+        execute_removal(&common_dir, &path, false).unwrap();
+
+        assert!(!Path::new(&path).exists());
+        assert!(Path::new(&sibling).exists());
+        assert_eq!(inventory(&repo.0).unwrap().len(), 2);
+        assert!(git(&repo.0, &["show-ref", "--verify", "refs/heads/busy"]).is_ok());
+        assert_eq!(
+            harness
+                .live_cwds()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-in-sibling"]
+        );
+
+        let _ = outside.kill();
+        let _ = outside.wait();
     }
 
     #[test]

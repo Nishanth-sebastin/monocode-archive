@@ -69,6 +69,8 @@ struct LiveChild {
     stdin: Mutex<ChildStdin>,
     pid: u32,
     linux: Option<crate::wsl::LinuxProcess>,
+    /// Spawn-time working directory — worktree-removal binding evidence.
+    cwd: String,
 }
 
 impl LiveChild {
@@ -98,14 +100,6 @@ pub struct HarnessHost {
 }
 
 impl HarnessHost {
-    pub(crate) fn has_live_processes(&self) -> bool {
-        !self.lock_inner().children.is_empty()
-            || !self
-                .sse
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_empty()
-    }
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HarnessInner {
@@ -164,6 +158,40 @@ impl HarnessHost {
             let _ = prev.terminate();
         }
         None
+    }
+
+    /// (session id, spawn cwd) of every live agent child — removal binding
+    /// evidence at the owning boundary.
+    pub(crate) fn live_cwds(&self) -> Vec<(String, String)> {
+        self.lock_inner()
+            .children
+            .iter()
+            .map(|(id, live)| (id.clone(), live.cwd.clone()))
+            .collect()
+    }
+
+    /// Sessions with a live SSE reader but possibly no local child — their
+    /// binding is resolved through the saved session's checkout.
+    pub(crate) fn sse_sessions(&self) -> Vec<String> {
+        self.sse
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// `harness_kill` by id — also stops only the agent proven to belong to a
+    /// reviewed worktree. Returns the stopped child's pid so callers can wait
+    /// out the TERM→KILL escalation and report survivors.
+    pub(crate) fn kill_id(&self, session_id: &str) -> Result<Option<u32>, String> {
+        self.stop_sse(session_id);
+        if let Some(live) = self.kill_session(session_id) {
+            live.terminate()?;
+            self.remove_if_pid(session_id, live.pid);
+            return Ok(Some(live.pid));
+        }
+        Ok(None)
     }
 
     fn kill_session(&self, session_id: &str) -> Option<Arc<LiveChild>> {
@@ -234,6 +262,43 @@ impl HarnessHost {
         for live in streams {
             live.stop.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// A real child recorded with its spawn cwd, for tests that exercise
+    /// scoped ownership and stopping without a frontend.
+    #[cfg(all(test, unix))]
+    pub(crate) fn add_test_child(&self, session_id: &str, cwd: &str) -> std::process::Child {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test process");
+        let pid = child.id();
+        let stdin = child.stdin.take().expect("test child stdin");
+        self.lock_inner().children.insert(
+            session_id.into(),
+            Arc::new(LiveChild {
+                stdin: Mutex::new(stdin),
+                pid,
+                linux: None,
+                cwd: cwd.into(),
+            }),
+        );
+        child
+    }
+
+    /// A live SSE entry without a child, for tests covering stream-only
+    /// session attribution.
+    #[cfg(all(test, unix))]
+    pub(crate) fn add_test_sse(&self, session_id: &str) {
+        self.insert_sse(
+            session_id.into(),
+            Arc::new(LiveSse {
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+        );
     }
 }
 
@@ -468,6 +533,7 @@ pub fn harness_spawn(
         stdin: Mutex::new(stdin),
         pid,
         linux,
+        cwd,
     });
     if let Some(rejected) = host.install_spawn(session_id.clone(), epoch, kill_all, live.clone()) {
         // A kill, or a newer spawn, won the race while this one was forking.
@@ -563,12 +629,7 @@ pub fn harness_write(
 
 #[tauri::command(async)]
 pub fn harness_kill(host: State<HarnessHost>, session_id: String) -> Result<(), String> {
-    host.stop_sse(&session_id);
-    if let Some(live) = host.kill_session(&session_id) {
-        live.terminate()?;
-        host.remove_if_pid(&session_id, live.pid);
-    }
-    Ok(())
+    host.kill_id(&session_id).map(|_| ())
 }
 
 const MAX_HARNESS_LINE_BYTES: u64 = 32 * 1024 * 1024;
@@ -684,6 +745,11 @@ pub fn harness_sse_open(
     headers: Option<HashMap<String, String>>,
 ) -> Result<(), String> {
     assert_loopback(&url)?;
+    // A stream-only session is removal-binding evidence; registration must
+    // not slip between a removal's occupancy check and its stop.
+    let _worktree_guard = crate::fs::worktrees::LIFECYCLE
+        .try_read()
+        .map_err(|_| "Worktree operation in progress; retry startup after it completes")?;
     host.stop_sse(&session_id);
     let stop = Arc::new(AtomicBool::new(false));
     host.insert_sse(
@@ -870,6 +936,9 @@ pub async fn harness_exec(
     .map_err(|e| e.to_string())?
 }
 
+// Deliberately not registered and not serialized against worktree removal:
+// allowlisted ≤15s read-only probes only. A long-lived process host must
+// take LIFECYCLE.try_read() and record its cwd like harness_spawn does.
 fn exec_capture(command: &str, args: &[String], cwd: Option<&str>) -> Result<String, String> {
     let mut cmd = Command::new(command);
     cmd.args(args)
@@ -1029,6 +1098,27 @@ fn wait_until_dead(pids: &[u32], until: Instant) {
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Bounded wait for just-signaled trees — outlasts the TERM→KILL escalation,
+/// then reports the pids still answering so callers can fail closed instead
+/// of removing a directory under a live process.
+#[cfg(not(windows))]
+pub(crate) fn await_stopped(pids: &[u32]) -> Vec<u32> {
+    wait_until_dead(
+        pids,
+        Instant::now() + KILL_ESCALATE + Duration::from_millis(500),
+    );
+    pids.iter()
+        .copied()
+        .filter(|pid| tree_alive(*pid))
+        .collect()
+}
+
+/// `taskkill /F` is synchronous — nothing to wait on.
+#[cfg(windows)]
+pub(crate) fn await_stopped(_pids: &[u32]) -> Vec<u32> {
+    Vec::new()
 }
 
 enum TreeSignal {
@@ -2577,6 +2667,7 @@ mod tests {
                 linux: None,
                 stdin: Mutex::new(stdin),
                 pid,
+                cwd: String::new(),
             }),
             child,
         )
@@ -2743,6 +2834,7 @@ mod tests {
                 linux: None,
                 stdin: Mutex::new(stdin),
                 pid,
+                cwd: String::new(),
             }),
             child,
         )
