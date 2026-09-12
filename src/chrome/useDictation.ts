@@ -104,8 +104,16 @@ export function useDictation({
   commitRef.current = commitDraft;
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
-  const catalogRef = useRef(catalog);
-  catalogRef.current = catalog;
+  /** Authoritative catalog — patched by progress events even while the menu
+   * is closed so a mic press never starts from stale install flags. */
+  const catalogRef = useRef<DictationModelInfo[] | null>(null);
+  const setCatalogLive = useCallback(
+    (next: DictationModelInfo[] | null) => {
+      catalogRef.current = next;
+      setCatalog(next);
+    },
+    [],
+  );
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
   const menuOpenRef = useRef(menuOpen);
@@ -197,13 +205,13 @@ export function useDictation({
 
   const refreshCatalog = useCallback(async () => {
     try {
-      setCatalog(await dictationCatalog());
+      setCatalogLive(await dictationCatalog());
       setCatalogFailed(false);
     } catch {
       // Leave the stale snapshot; the menu offers a retry when empty.
       setCatalogFailed(true);
     }
-  }, []);
+  }, [setCatalogLive]);
 
   const applySessionEvent = useCallback(
     (event: DictationSessionEvent) => {
@@ -282,13 +290,16 @@ export function useDictation({
 
     track(
       listenDictationModelProgress((event) => {
+        // Keep the ref fresh even with the menu closed — a mic press or a
+        // later menu open must see the finished install, not stale flags.
+        if (catalogRef.current) {
+          catalogRef.current = applyModelProgress(catalogRef.current, event);
+        }
         // Progress fires every ~250 ms during a download — only re-render
         // while the menu can show it; opening the menu refetches anyway.
         if (!menuOpenRef.current) return;
+        if (catalogRef.current) setCatalog(catalogRef.current);
         setProgress((prev) => ({ ...prev, [event.modelId]: event }));
-        setCatalog((prev) =>
-          prev ? applyModelProgress(prev, event) : prev,
-        );
         if (event.phase === "failed" && event.error) {
           setError(event.error);
         }
@@ -327,13 +338,14 @@ export function useDictation({
   }, [menuOpen]);
 
   const begin = useCallback(async () => {
-    let models = catalogRef.current;
-    if (!models) {
-      models = await dictationCatalog();
-      setCatalog(models);
+    // Always refetch — install state can change while the menu is closed
+    // (a download finishing in the background is exactly that case).
+    const models = await dictationCatalog().catch(() => catalogRef.current);
+    if (models) {
+      setCatalogLive(models);
       setCatalogFailed(false);
     }
-    const model = resolveDictationModel(models, prefsRef.current.modelId);
+    const model = resolveDictationModel(models ?? [], prefsRef.current.modelId);
     if (!model?.installed) {
       // First use: no model on disk — open the menu to pick/download one
       // rather than kicking off a surprise multi-hundred-MB download.
@@ -394,7 +406,7 @@ export function useDictation({
     if (pending) applySessionEvent(pending);
     // Stay "starting" until the worker's recording event — engine load for
     // the larger models can take seconds.
-  }, [textareaRef, applySessionEvent, refreshCatalog]);
+  }, [textareaRef, applySessionEvent, refreshCatalog, setCatalogLive]);
 
   const start = useCallback(async () => {
     if (phaseRef.current !== "idle") return;

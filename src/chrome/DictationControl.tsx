@@ -128,9 +128,10 @@ function ModelRow({
   );
 }
 
-/** ⌘⇧D / Ctrl+Shift+D — press toggles in "toggle" mode, hold dictates in
- * "hold" mode. Uses `code` so the shortcut is layout-independent. */
-const DICTATION_HOTKEY_CODE = "KeyD";
+/** ⌘⇧M / Ctrl+Shift+M — press toggles in "toggle" mode, hold dictates in
+ * "hold" mode. Listed in Settings → Keybindings; `code` keeps it
+ * layout-independent. */
+const DICTATION_HOTKEY_CODE = "KeyM";
 
 function inBlockingUi(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
@@ -186,7 +187,7 @@ export function DictationControl({
   const translateDisabled =
     selected != null && !selected.supportsTranslate;
 
-  // ⌘⇧D dictates — toggle mode presses start/stop; hold mode runs while the
+  // ⌘⇧M dictates — toggle mode presses start/stop; hold mode runs while the
   // chord is held. Window-level so it works wherever focus sits in the pane.
   const dictationRef = useRef(dictation);
   dictationRef.current = dictation;
@@ -219,8 +220,8 @@ export function DictationControl({
   }, [hotkeys, hold]);
 
   const micTitle = hold
-    ? "Hold to dictate (⌘⇧D)"
-    : "Dictate (⌘⇧D)";
+    ? "Hold to dictate (⌘⇧M)"
+    : "Dictate (⌘⇧M)";
 
   return (
     <div ref={anchor} className="flex shrink-0 items-center gap-1">
@@ -389,7 +390,7 @@ export function DictationControl({
               );
             })}
           </div>
-          <p className={SECTION_LABEL}>Trigger · ⌘⇧D</p>
+          <p className={SECTION_LABEL}>Trigger · ⌘⇧M</p>
           <div className="flex gap-1 px-0.5 pb-0.5">
             {(
               [
