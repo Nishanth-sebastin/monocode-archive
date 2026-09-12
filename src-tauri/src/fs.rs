@@ -200,6 +200,10 @@ pub struct GitDiffStats {
     pub files: i64,
     pub additions: i64,
     pub deletions: i64,
+    /// Head branch (or short HEAD when detached) — same value as
+    /// `GitDiffIndex.branch`, kept here so stats-only callers avoid the
+    /// heavier index call.
+    pub branch: Option<String>,
 }
 
 /// Uncommitted line counts for the opened folder: staged + unstaged vs HEAD,
@@ -872,6 +876,7 @@ fn git_diff_stats_for(root: &Path) -> GitDiffStats {
         files: files.len() as i64,
         additions,
         deletions,
+        branch: git_branch(root),
     }
 }
 
@@ -4660,7 +4665,8 @@ mod tests {
             GitDiffStats {
                 files: 0,
                 additions: 0,
-                deletions: 0
+                deletions: 0,
+                branch: None
             }
         );
     }
@@ -4681,6 +4687,7 @@ mod tests {
         assert_eq!(stats.files, 3);
         assert_eq!(stats.additions, 4);
         assert_eq!(stats.deletions, 1);
+        assert_eq!(stats.branch.as_deref(), Some("main"));
     }
 
     #[test]
@@ -4694,7 +4701,8 @@ mod tests {
             GitDiffStats {
                 files: 0,
                 additions: 0,
-                deletions: 0
+                deletions: 0,
+                branch: Some("main".to_string())
             }
         );
     }

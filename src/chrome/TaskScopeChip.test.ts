@@ -12,7 +12,18 @@ import {
   updateTaskChild,
 } from "../lib/taskWorkspaces";
 import { ensureProjectForPath } from "../lib/projects";
+import { saveCiSources } from "../lib/azurePipelines";
 import type { RepositoryFamily } from "../lib/repositoryFamilies";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async (command: string, args?: { cwd?: string }) =>
+    command === "git_diff_stats"
+      ? args?.cwd === "/tmp/lib-wt"
+        ? { files: 2, additions: 5, deletions: 1, branch: "feat/lib" }
+        : { files: 0, additions: 0, deletions: 0, branch: "main" }
+      : null,
+  ),
+}));
 
 /** A task whose own session is rooted in `first` while lastActiveChildId
  * points at `second` — the chip should follow the cwd, not the click. */
@@ -117,6 +128,81 @@ describe("TaskScopeChip", () => {
     } finally {
       unmarkTaskChildLaunching(taskId, secondId);
     }
+  });
+
+  it("shows branch, change stats and delivery badges per child", async () => {
+    const { taskId, secondId } = seedTask();
+    await act(async () =>
+      updateTaskChild(taskId, secondId, {
+        branch: "feat/lib",
+        launch: { state: "ready" },
+      }),
+    );
+    // A failed pipeline linked to the second child under the task session.
+    const target = {
+      site: "https://dev.azure.com/team",
+      accountId: "ada",
+      project: "project",
+      definition: 7,
+      repositoryId: "team/lib",
+      repositoryType: "TfsGit",
+      repositoryUrl: "https://dev.azure.com/team/project/_git/lib",
+    };
+    saveCiSources(
+      [
+        {
+          target,
+          cwd: "/tmp/lib-wt",
+          branch: "feat/lib",
+          session: "task-session",
+          remote: target.repositoryUrl,
+          definitionName: "Unit tests",
+          projectName: "Project",
+          last: {
+            commit: "abc",
+            checkedAt: 1,
+            run: {
+              id: 9,
+              number: "1",
+              status: "completed",
+              result: "failed",
+              branch: "refs/heads/feat/lib",
+              commit: "abc",
+              queuedAt: "2024-01-01T00:00:00Z",
+              revision: "abc",
+              match: "exact" as const,
+            },
+          },
+        },
+      ],
+      "/tmp/lib-wt",
+      "feat/lib",
+      "task-session",
+    );
+    await act(async () => {
+      root.render(
+        createElement(TaskScopeChip, {
+          sessionId: "task-session",
+          cwd: "/tmp/app-wt",
+        }),
+      );
+    });
+    // The collapsed chip flags the failing pipeline even before opening.
+    expect(host.querySelector(".bg-red-400")).toBeTruthy();
+    const chip = host.querySelector("button");
+    await act(async () => {
+      chip!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const body = document.body.textContent ?? "";
+    // Branch comes from live stats or the recorded child branch.
+    expect(body).toContain("feat/lib");
+    // Diff stats for the prepared child.
+    expect(body).toContain("+5");
+    expect(body).toContain("−1");
+    // Failing-CI badge on the child's row.
+    expect(
+      document.body.querySelector('[title="A linked pipeline failed"]'),
+    ).toBeTruthy();
   });
 
   it("renders nothing for a session no task owns", async () => {

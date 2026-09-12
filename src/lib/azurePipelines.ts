@@ -221,11 +221,9 @@ export function ciLogContext(
   return context;
 }
 const KEY = "monocode.azureCiSources.v1";
-export function loadCiSources(
-  cwd: string,
-  branch: string,
-  session?: string,
-): CiSource[] {
+/** Every saved CI source, validated — one storage read for callers that
+ * aggregate several scopes (e.g. a task's repository children). */
+export function allCiSources(): CiSource[] {
   try {
     const rows: unknown = JSON.parse(localStorage.getItem(KEY) ?? "[]");
     if (!Array.isArray(rows)) return [];
@@ -235,8 +233,6 @@ export function loadCiSources(
         try {
           ciUrl(row.target);
           return (
-            ciScope(row.cwd, row.branch, row.session) ===
-              ciScope(cwd, branch, session) &&
             typeof row.target.accountId === "string" &&
             [
               row.remote,
@@ -264,6 +260,17 @@ export function loadCiSources(
   } catch {
     return [];
   }
+}
+export function loadCiSources(
+  cwd: string,
+  branch: string,
+  session?: string,
+): CiSource[] {
+  return allCiSources().filter(
+    (row) =>
+      ciScope(row.cwd, row.branch, row.session) ===
+      ciScope(cwd, branch, session),
+  );
 }
 export function saveCiSources(
   sources: CiSource[],
