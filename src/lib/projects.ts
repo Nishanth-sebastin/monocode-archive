@@ -79,7 +79,7 @@ const MAX_REPOSITORIES = 50;
 const MAX_SETS = 50;
 const MAX_COMMANDS = 100;
 const MAX_COMMAND_GROUPS = 50;
-const MAX_COMMAND_TEXT = 4_000;
+export const MAX_COMMAND_TEXT = 4_000;
 
 function normalizePath(path: string): string {
   return slash(path).replace(/\/+$/, "") || "/";
@@ -124,7 +124,7 @@ function sanitizeSet(value: unknown): SavedRepositorySet | null {
   return { id: record.id.slice(0, 128), name: record.name.slice(0, 200), repositoryIds };
 }
 
-const MAX_STEPS = 12;
+export const MAX_COMMAND_STEPS = 12;
 
 /** One step of a sequential command. `host: "native"` runs the step in the
  * OS host shell instead of the resolved target — the distinction that lets a
@@ -135,7 +135,9 @@ export type CommandStep = {
   host?: "native";
 };
 
-function sanitizeSteps(value: unknown): CommandStep[] | undefined {
+/** Shared by project commands, reusable commands and snapshot restore so a
+ * step is sanitized identically everywhere it can appear. */
+export function sanitizeSteps(value: unknown): CommandStep[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const steps = value
     .map((step): CommandStep | null => {
@@ -150,7 +152,7 @@ function sanitizeSteps(value: unknown): CommandStep[] | undefined {
       };
     })
     .filter((step): step is CommandStep => !!step)
-    .slice(0, MAX_STEPS);
+    .slice(0, MAX_COMMAND_STEPS);
   return steps.length ? steps : undefined;
 }
 
@@ -669,7 +671,7 @@ export function saveProjectCommand(
       ...(step.host === "native" ? { host: "native" as const } : {}),
     }))
     .filter((step) => step.command)
-    .slice(0, MAX_STEPS);
+    .slice(0, MAX_COMMAND_STEPS);
   if (draft.steps && !steps?.length)
     return { error: "Add a step or turn steps off." };
   if (!command) return { error: "Enter the command to run." };

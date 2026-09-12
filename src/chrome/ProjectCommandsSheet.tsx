@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
+  MAX_COMMAND_STEPS,
   deleteProjectCommand,
   deleteProjectCommandGroup,
   loadProjects,
@@ -288,12 +289,23 @@ export function ProjectCommandsSheet({
                       label="Run as sequential steps"
                       className="mt-0"
                       checked={!!editingCommand.draft.steps}
-                      onChange={() =>
+                      onChange={() => {
+                        const steps = editingCommand.draft.steps;
+                        // Turning steps off keeps the edits as a line-per-step
+                        // command instead of discarding them — but an all-empty
+                        // step list must not wipe an existing command.
+                        const joined = steps
+                          ?.map((step) => step.command.trim())
+                          .filter(Boolean)
+                          .join("\n");
                         setEditing({
                           ...editingCommand,
                           draft: {
                             ...editingCommand.draft,
-                            steps: editingCommand.draft.steps
+                            ...(steps?.length && joined
+                              ? { command: joined }
+                              : {}),
+                            steps: steps
                               ? undefined
                               : [
                                   {
@@ -301,8 +313,8 @@ export function ProjectCommandsSheet({
                                   },
                                 ],
                           },
-                        })
-                      }
+                        });
+                      }}
                     />
                     Run as sequential steps
                   </label>
@@ -389,6 +401,10 @@ export function ProjectCommandsSheet({
                     ))}
                     <button
                       type="button"
+                      disabled={
+                        (editingCommand.draft.steps?.length ?? 0) >=
+                        MAX_COMMAND_STEPS
+                      }
                       onClick={() =>
                         setEditing({
                           ...editingCommand,
@@ -401,7 +417,7 @@ export function ProjectCommandsSheet({
                           },
                         })
                       }
-                      className="flex h-7 items-center gap-1.5 self-start rounded-md px-2 text-[13px] text-content/70 hover:bg-content/10 hover:text-content"
+                      className="flex h-7 items-center gap-1.5 self-start rounded-md px-2 text-[13px] text-content/70 hover:bg-content/10 hover:text-content disabled:opacity-40"
                     >
                       <Plus className="size-3.5" strokeWidth={1.75} />
                       Add step

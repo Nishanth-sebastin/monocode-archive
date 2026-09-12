@@ -143,11 +143,24 @@ pub fn terminal_command(location: &Location) -> Result<Command, String> {
 
 #[cfg(any(windows, test))]
 fn exec_args(location: &Location, exec: &str) -> Vec<String> {
+    // Mirror the interactive terminal: terminal env vars, then the user's
+    // login shell — `/bin/sh -lc` alone lands in dash with no `.bashrc` PATH
+    // (nvm, ~/.local/bin), so bashisms and user tools would fail a step that
+    // works interactively. `sh -c '…' name arg` makes the exec line `$1`.
     wsl_args(
         &location.distribution,
         &location.path,
-        "/bin/sh",
-        &["-lc".into(), exec.into()],
+        "/usr/bin/env",
+        &[
+            "TERM=xterm-256color".into(),
+            "COLORTERM=truecolor".into(),
+            "TERM_PROGRAM=MonoCode".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            "exec \"${SHELL:-/bin/sh}\" -l -c \"$1\"".into(),
+            "monocode-exec".into(),
+            exec.into(),
+        ],
     )
 }
 
@@ -1106,8 +1119,14 @@ with tempfile.TemporaryDirectory(prefix='monocode-env-') as directory:
                 "--cd",
                 "/home/me/Zażółć repo/Case",
                 "--exec",
+                "/usr/bin/env",
+                "TERM=xterm-256color",
+                "COLORTERM=truecolor",
+                "TERM_PROGRAM=MonoCode",
                 "/bin/sh",
-                "-lc",
+                "-c",
+                "exec \"${SHELL:-/bin/sh}\" -l -c \"$1\"",
+                "monocode-exec",
                 "docker system prune -f"
             ]
         );

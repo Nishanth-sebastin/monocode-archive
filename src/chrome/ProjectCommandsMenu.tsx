@@ -9,7 +9,6 @@ import {
   subscribeReusableCommands,
   type ReusableCommand,
 } from "../lib/projectCommands";
-import type { ProjectTerminalDock } from "../lib/projectTerminal";
 import type { FilePaneTab } from "../lib/layout";
 import type { TaskWorkspace } from "../lib/taskWorkspaces";
 import { Play, SlidersHorizontal, Square } from "./icons";
@@ -29,7 +28,7 @@ export function ProjectCommandsMenu({
   anchor,
   project,
   task,
-  dock,
+  boundFiles,
   fallbackCwd,
   onRun,
   onStop,
@@ -39,7 +38,8 @@ export function ProjectCommandsMenu({
   anchor: PopoverAnchor;
   project?: ProjectRecord;
   task?: TaskWorkspace | null;
-  dock?: ProjectTerminalDock;
+  /** Bound terminal per preset id, resolved across every project's dock. */
+  boundFiles?: ReadonlyMap<string, FilePaneTab>;
   /** Folder reusable commands fall back to when no stored project resolves. */
   fallbackCwd?: string;
   /** Resolves to an error string when the command could not be launched. */
@@ -58,14 +58,25 @@ export function ProjectCommandsMenu({
   );
 
   const bound = (presetId: string): FilePaneTab | undefined =>
-    dock?.pane.files.find((file) => file.command?.presetId === presetId);
+    boundFiles?.get(presetId);
+
+  const errorText = (error: unknown) =>
+    error instanceof Error ? error.message : String(error);
 
   const run = (command: CommandLike) => {
-    void Promise.resolve(onRun(command)).then((error) => {
-      if (typeof error === "string" && error)
-        setFailures([{ name: command.name, error }]);
-      else onClose();
-    });
+    // `onRun` can reject (or even throw synchronously) — both must surface as
+    // a failure row rather than an unhandled rejection.
+    void Promise.resolve()
+      .then(() => onRun(command))
+      .then(
+        (error) => {
+          if (typeof error === "string" && error)
+            setFailures([{ name: command.name, error }]);
+          else onClose();
+        },
+        (error) =>
+          setFailures([{ name: command.name, error: errorText(error) }]),
+      );
   };
 
   const runGroup = (groupId: string) => {
@@ -84,11 +95,18 @@ export function ProjectCommandsMenu({
     // runner — both kinds keep the menu open and are reported by name.
     void Promise.all(
       runs.map((entry) =>
-        Promise.resolve(onRun(entry.command)).then((error) =>
-          typeof error === "string" && error
-            ? { name: entry.command.name, error }
-            : null,
-        ),
+        Promise.resolve()
+          .then(() => onRun(entry.command))
+          .then(
+            (error) =>
+              typeof error === "string" && error
+                ? { name: entry.command.name, error }
+                : null,
+            (error) => ({
+              name: entry.command.name,
+              error: errorText(error),
+            }),
+          ),
       ),
     ).then((launchFailures) => {
       const all = [
@@ -121,7 +139,7 @@ export function ProjectCommandsMenu({
           <div className="truncate text-[13px] text-content">
             {command.name}
             {failed ? (
-              <span className="text-red-400"> · step failed</span>
+              <span className="text-red-400"> · failed</span>
             ) : null}
           </div>
           <div className="truncate text-[11px] text-content/40">
@@ -236,8 +254,11 @@ export function ProjectCommandsMenu({
       ) : null}
       {failures.length ? (
         <div className="mx-2 mt-1 rounded-lg bg-red-500/10 px-2 py-1.5">
-          {failures.map((failure) => (
-            <p key={failure.name} className="text-[11px] text-red-400">
+          {failures.map((failure, index) => (
+            <p
+              key={`${index}:${failure.name}`}
+              className="text-[11px] text-red-400"
+            >
               {failure.name}: {failure.error}
             </p>
           ))}

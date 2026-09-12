@@ -265,4 +265,41 @@ describe("reusable commands", () => {
     );
     expect(loadReusableCommands().map((item) => item.id)).toEqual(["ok"]);
   });
+
+  it("saves sequential steps and drops malformed ones on load", () => {
+    const { error } = saveReusableCommand({
+      name: "Maintenance",
+      command: "docker system prune -f\nwsl --shutdown",
+      steps: [
+        { command: "docker system prune -f" },
+        { command: "wsl --shutdown", host: "native" },
+      ],
+    });
+    expect(error).toBeUndefined();
+    expect(loadReusableCommands()[0].steps).toEqual([
+      { command: "docker system prune -f" },
+      { command: "wsl --shutdown", host: "native" },
+    ]);
+    // A stored host that is not "native" is sanitized away.
+    localStorage.setItem(
+      "monocode.projectCommands.v1",
+      JSON.stringify([
+        {
+          id: "c1",
+          name: "X",
+          command: "x",
+          steps: [{ command: "a", host: "wsl" }, { command: " " }],
+        },
+      ]),
+    );
+    expect(loadReusableCommands()[0].steps).toEqual([{ command: "a" }]);
+    // Steps mode with nothing to run is an error, not a silent plain save.
+    expect(
+      saveReusableCommand({
+        name: "Empty",
+        command: "x",
+        steps: [{ command: " " }],
+      }).error,
+    ).toBeTruthy();
+  });
 });

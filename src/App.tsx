@@ -826,6 +826,9 @@ export default function App({
   dirtyFilesRef.current = dirtyFiles;
   const projectTerminalsRef = useRef(projectTerminals);
   projectTerminalsRef.current = projectTerminals;
+  /** Saved-command ids with a launch still awaiting its cwd check — a fast
+   * second click must not queue a duplicate terminal. */
+  const commandLaunchRef = useRef(new Set<string>());
   const projectTerminalFocusedRef = useRef(projectTerminalFocused);
   projectTerminalFocusedRef.current = projectTerminalFocused;
   const activeTabIdRef = useRef(activeTabId);
@@ -1122,6 +1125,18 @@ export default function App({
   // Reusable commands still need a folder when the rail entry is not a stored
   // project — the path the menu was opened on, else the current folder.
   const commandsFallbackCwd = commandsMenu?.path ?? projectCwd;
+  // A command's bound terminal can live in any project's dock — the menu
+  // resolves running/failed state across all of them, not just the visible
+  // one, or a run bound elsewhere would look like a fresh Play button.
+  const boundCommandFiles = useMemo(() => {
+    const map = new Map<string, FilePaneTab>();
+    for (const dock of projectTerminals) {
+      for (const file of dock.pane.files) {
+        if (file.command?.presetId) map.set(file.command.presetId, file);
+      }
+    }
+    return map;
+  }, [projectTerminals]);
   const activeSkillContext = active
     ? nativeSkillContextForSession(active)
     : null;
@@ -5766,6 +5781,33 @@ export default function App({
       const projectPath = projectCwdRef.current;
       if (!looksLikeProject(projectPath))
         return "Open a project folder to run commands.";
+      // A launch already in flight (still awaiting the cwd check) must not
+      // let a fast second click queue a duplicate.
+      if (commandLaunchRef.current.has(command.id)) return;
+      commandLaunchRef.current.add(command.id);
+      try {
+        return await runProjectCommand(command, target, projectPath);
+      } finally {
+        commandLaunchRef.current.delete(command.id);
+      }
+    },
+    [focusProjectTerminal],
+  );
+
+  /** Body of `onRunProjectCommand`, split out so the in-flight guard can wrap
+   * every await uniformly. */
+  const runProjectCommand = async (
+    command: {
+      id: string;
+      name: string;
+      command: string;
+      repositoryId?: string;
+      relativeCwd?: string;
+      steps?: { command: string; host?: "native" }[];
+    },
+    target: { cwd: string },
+    projectPath: string,
+  ): Promise<string | undefined> => {
       // The bound terminal can live in another project's dock — dedupe has
       // to search everywhere, not just the visible dock.
       let boundPath: string | undefined;
@@ -5781,6 +5823,11 @@ export default function App({
         }
       }
       if (bound && boundPath) {
+        // A terminal bound to a different project's dock can't be focused or
+        // re-fired from here — mutating it would run invisible work.
+        if (!sameProjectPath(boundPath, projectPath)) {
+          return `"${command.name}" is bound to a terminal in ${prettyCwd(boundPath)}.`;
+        }
         const fileId = bound.id;
         const dockPath = boundPath;
         const focus = () => {
@@ -5790,8 +5837,11 @@ export default function App({
           withDockOpen(selectDockTerminal(entry, fileId), true);
         // runId > launched means a launch is queued but the PTY write hasn't
         // landed — treat as running so a fast second click can't double-fire.
+        // A failed run is over even when `launched` never landed, so it stays
+        // re-runnable instead of wedging the terminal.
         const launchPending =
-          (bound.command?.runId ?? 0) > (bound.command?.launched ?? 0);
+          (bound.command?.runId ?? 0) > (bound.command?.launched ?? 0) &&
+          bound.command?.failed !== bound.command?.runId;
         if (bound.foreground || launchPending) {
           setProjectTerminals((prev) =>
             mapProjectTerminal(prev, dockPath, reveal),
@@ -5842,6 +5892,8 @@ export default function App({
           mapProjectTerminal(prev, dockPath, (entry) =>
             reveal(
               patchDockTerminal(entry, fileId, {
+                // Tab label follows an edited command name.
+                title: command.name,
                 command: {
                   name: command.name,
                   text: command.command,
@@ -5881,9 +5933,7 @@ export default function App({
           : [...prev, createProjectTerminal(projectPath, file)],
       );
       focusProjectTerminal();
-    },
-    [focusProjectTerminal],
-  );
+  };
 
   const onStopProjectCommand = useCallback((fileId: string) => {
     // Ctrl-C — stops the foreground process, keeps the terminal and its
@@ -6997,7 +7047,7 @@ export default function App({
           anchor={commandsMenu.anchor}
           project={commandsProject}
           task={commandsTask}
-          dock={currentProjectDock}
+          boundFiles={boundCommandFiles}
           fallbackCwd={commandsFallbackCwd}
           onRun={(command) =>
             onRunProjectCommand(
@@ -7009,14 +7059,18 @@ export default function App({
           }
           onStop={onStopProjectCommand}
           onManage={() => {
-            const project =
-              commandsProject ??
-              (commandsMenu.path && looksLikeProject(commandsMenu.path)
-                ? ensureProjectForPath(commandsMenu.path)
-                : undefined) ??
-              (looksLikeProject(projectCwd)
-                ? ensureProjectForPath(projectCwd)
-                : undefined);
+            // A menu opened on an explicit project whose record no longer
+            // resolves was deleted — don't silently edit another project's
+            // commands.
+            const project = commandsMenu.projectId
+              ? commandsProject
+              : (commandsProject ??
+                (commandsMenu.path && looksLikeProject(commandsMenu.path)
+                  ? ensureProjectForPath(commandsMenu.path)
+                  : undefined) ??
+                (looksLikeProject(projectCwd)
+                  ? ensureProjectForPath(projectCwd)
+                  : undefined));
             if (project) setCommandsSheet(project.id);
           }}
           onClose={() => setCommandsMenu(null)}

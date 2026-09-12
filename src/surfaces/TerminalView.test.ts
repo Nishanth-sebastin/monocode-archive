@@ -176,15 +176,17 @@ describe("TerminalView bound commands", () => {
     host.remove();
   });
 
-  it("does not mark a command launched when the write fails", async () => {
+  it("marks a command failed when the write cannot land", async () => {
     mocks.writePty.mockRejectedValue(new Error("Terminal is not running"));
     const { host, root, onMetaChange, run } = render(command());
     await act(async () => run());
     await flush();
     expect(mocks.writePty).toHaveBeenCalledWith("t1", "npm run dev\r");
-    expect(onMetaChange).not.toHaveBeenCalledWith(
-      expect.objectContaining({ command: expect.anything() }),
-    );
+    // The run is over — `launched` closes launchPending so the terminal is
+    // never wedged, and `failed` keeps a remount from silently retrying.
+    expect(onMetaChange).toHaveBeenCalledWith({
+      command: { failed: 1, launched: 1 },
+    });
     await act(async () => root.unmount());
     host.remove();
   });
@@ -326,7 +328,7 @@ describe("TerminalView step commands", () => {
     host.remove();
   });
 
-  it("stops the sequence when a step fails and does not mark it launched", async () => {
+  it("stops the sequence on a failed step, ends the run and hands a shell back", async () => {
     const { host, root, onMetaChange, run } = render(
       stepsCommand([{ command: "step one" }, { command: "step two" }]),
     );
@@ -334,13 +336,71 @@ describe("TerminalView step commands", () => {
     await flush();
     await act(async () => exitHandler?.(1));
     await flush();
-    expect(mocks.spawnPty).toHaveBeenCalledTimes(1);
+    // `launched` lands with `failed`: the run is over, so `runId > launched`
+    // cannot pin the launch-pending guard forever.
     expect(onMetaChange).toHaveBeenCalledWith({
-      command: { failed: 1, step: { runId: 1, done: 0 } },
+      command: { failed: 1, launched: 1, step: { runId: 1, done: 0 } },
     });
-    expect(onMetaChange).not.toHaveBeenCalledWith({
-      command: { launched: 1 },
+    // The failed run leaves an interactive shell — step two never spawns.
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(2);
+    expect(mocks.spawnPty).toHaveBeenNthCalledWith(
+      2,
+      "t1",
+      "/repo",
+      expect.any(Number),
+      expect.any(Number),
+      undefined,
+    );
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("fails a native-host step whose home directory is unavailable instead of running it in the target", async () => {
+    mocks.homeDir.mockRejectedValue(new Error("no home"));
+    const { host, root, onMetaChange, run } = render(
+      stepsCommand([
+        { command: "wsl --shutdown", host: "native" },
+        { command: "after" },
+      ]),
+    );
+    await act(async () => run());
+    await flush();
+    expect(onMetaChange).toHaveBeenCalledWith({
+      command: { failed: 1, launched: 1, step: { runId: 1, done: 0 } },
     });
+    // The step never spawned at the target cwd — that could be WSL, the host
+    // it explicitly means to avoid. The shell respawn is the only spawn.
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(1);
+    expect(mocks.spawnPty).toHaveBeenCalledWith(
+      "t1",
+      "/repo",
+      expect.any(Number),
+      expect.any(Number),
+      undefined,
+    );
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("fails a step whose spawn rejects and still hands a shell back", async () => {
+    mocks.spawnPty.mockRejectedValueOnce(new Error("pty spawn failed"));
+    const { host, root, onMetaChange, run } = render(
+      stepsCommand([{ command: "step one" }, { command: "step two" }]),
+    );
+    await act(async () => run());
+    await flush();
+    expect(onMetaChange).toHaveBeenCalledWith({
+      command: { failed: 1, launched: 1, step: { runId: 1, done: 0 } },
+    });
+    expect(mocks.spawnPty).toHaveBeenCalledTimes(2);
+    expect(mocks.spawnPty).toHaveBeenNthCalledWith(
+      2,
+      "t1",
+      "/repo",
+      expect.any(Number),
+      expect.any(Number),
+      undefined,
+    );
     await act(async () => root.unmount());
     host.remove();
   });

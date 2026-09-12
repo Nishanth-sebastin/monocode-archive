@@ -2,8 +2,8 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { FilePaneTab } from "../lib/layout";
 import type { ProjectRecord } from "../lib/projects";
-import type { ProjectTerminalDock } from "../lib/projectTerminal";
 import type { TaskWorkspace } from "../lib/taskWorkspaces";
 import { ProjectCommandsMenu } from "./ProjectCommandsMenu";
 
@@ -37,13 +37,8 @@ const task = (overrides: Partial<TaskWorkspace> = {}): TaskWorkspace => ({
   ...overrides,
 });
 
-const dock = (files: ProjectTerminalDock["pane"]["files"]): ProjectTerminalDock => ({
-  projectPath: "/repo",
-  pane: { id: "pane1", files, activeFileId: files[0]?.id ?? "" },
-  side: "bottom",
-  size: 220,
-  open: true,
-});
+const boundFile = (file: FilePaneTab): ReadonlyMap<string, FilePaneTab> =>
+  new Map([[file.command!.presetId, file]]);
 
 function render(props: Partial<Parameters<typeof ProjectCommandsMenu>[0]>) {
   const host = document.createElement("div");
@@ -143,22 +138,20 @@ describe("ProjectCommandsMenu", () => {
         ],
       }),
       task: task(),
-      dock: dock([
-        {
-          id: "f1",
-          path: "terminal",
-          cwd: "/repo-wt/big-task",
-          terminal: true,
-          foreground: "npm run dev",
-          command: {
-            presetId: "cmd1",
-            name: "Dev server",
-            text: "npm run dev",
-            runId: 1,
-            launched: 1,
-          },
+      boundFiles: boundFile({
+        id: "f1",
+        path: "terminal",
+        cwd: "/repo-wt/big-task",
+        terminal: true,
+        foreground: "npm run dev",
+        command: {
+          presetId: "cmd1",
+          name: "Dev server",
+          text: "npm run dev",
+          runId: 1,
+          launched: 1,
         },
-      ]),
+      }),
     });
     try {
       await act(async () => run());

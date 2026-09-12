@@ -274,13 +274,18 @@ export function updateTerminalTab(
   const panes = tab.terminalPanes ?? [];
   let changed = false;
   const terminalPanes = panes.map((pane) => {
+    let paneChanged = false;
     const files = pane.files.map((file) => {
       if (!file.terminal || file.id !== fileId) return file;
       const next = applyTerminalMeta(file, patch);
-      if (next !== file) changed = true;
+      if (next !== file) paneChanged = true;
       return next;
     });
-    return files === pane.files ? pane : { ...pane, files };
+    // `.map` always allocates — an untouched pane must keep its identity or
+    // downstream referential checks see churn on every patch.
+    if (!paneChanged) return pane;
+    changed = true;
+    return { ...pane, files };
   });
   if (!changed) return tab;
   return withSurfacePanes(tab, "terminal", terminalPanes);

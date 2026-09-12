@@ -20,6 +20,7 @@ import {
 } from "./projectTerminal";
 import { normalizeProjectPath } from "./recents";
 import { pathKey } from "./paths";
+import { sanitizeSteps } from "./projects";
 import { reconcileProjectReturn, type ProjectReturnMemory } from "./projectReturn";
 import type { InboxAskContext } from "./inboxAsk";
 import {
@@ -564,34 +565,21 @@ function sanitizeTerminalCommand(
     value.runId < 1
   )
     return undefined;
-  const steps = Array.isArray(value.steps)
-    ? value.steps
-        .map((step) => {
-          if (!step || typeof step !== "object") return null;
-          const entry = step as Record<string, unknown>;
-          const stepCommand =
-            typeof entry.command === "string" ? entry.command.trim() : "";
-          if (!stepCommand) return null;
-          return {
-            command: stepCommand.slice(0, 4_000),
-            ...(entry.host === "native" ? { host: "native" as const } : {}),
-          };
-        })
-        .filter(
-          (step): step is { command: string; host?: "native" } => !!step,
-        )
-        .slice(0, 12)
-    : undefined;
+  const steps = sanitizeSteps(value.steps);
+  // Progress only means something for this run's step list — a `step` left
+  // over from an older runId, or with no steps at all, is dropped rather
+  // than restored as stale state.
   const stepProgress =
+    steps?.length &&
     value.step &&
     typeof value.step === "object" &&
-    Number.isInteger((value.step as Record<string, unknown>).runId) &&
+    (value.step as Record<string, unknown>).runId === value.runId &&
     Number.isInteger((value.step as Record<string, unknown>).done)
       ? {
-          runId: (value.step as { runId: number }).runId,
+          runId: value.runId,
           // A done beyond the step list would silently skip the whole run.
           done: Math.min(
-            steps?.length ?? 0,
+            steps.length,
             Math.max(0, (value.step as { done: number }).done),
           ),
         }

@@ -425,10 +425,7 @@ fn spawn_windows(
         let workdir = working_dir(&cwd);
         let (shell, args) = default_shell();
         let args = match exec {
-            Some(exec) => windows_exec_args(&shell)
-                .into_iter()
-                .chain([exec])
-                .collect::<Vec<_>>(),
+            Some(exec) => windows_exec_args(&shell, &exec),
             None => args,
         };
         let mut cmd = CommandBuilder::new(&shell);
@@ -540,9 +537,13 @@ fn default_shell() -> (String, Vec<String>) {
 }
 
 /// Flags that make a Windows shell run one command line and exit, matching
-/// whichever shell `default_shell` picked — cmd and PowerShell differ.
+/// whichever shell `default_shell` picked — cmd and PowerShell differ. A
+/// failing step must exit nonzero, and PowerShell `-Command` alone reports
+/// success for non-terminating cmdlet errors, so the exec line is wrapped:
+/// `$ErrorActionPreference='Stop'` makes those throw, and a native exe's own
+/// code still wins via `$LASTEXITCODE`.
 #[cfg(any(windows, test))]
-fn windows_exec_args(shell: &str) -> Vec<String> {
+fn windows_exec_args(shell: &str, exec: &str) -> Vec<String> {
     let name = shell
         .rsplit(['/', '\\'])
         .next()
@@ -550,8 +551,14 @@ fn windows_exec_args(shell: &str) -> Vec<String> {
         .to_ascii_lowercase();
     let name = name.strip_suffix(".exe").unwrap_or(&name);
     match name {
-        "powershell" | "pwsh" => vec!["-NoLogo".into(), "-Command".into()],
-        _ => vec!["/c".into()],
+        "powershell" | "pwsh" => vec![
+            "-NoLogo".into(),
+            "-Command".into(),
+            format!(
+                "$ErrorActionPreference='Stop'; & {{ {exec} }}; if ($LASTEXITCODE) {{ exit $LASTEXITCODE }}"
+            ),
+        ],
+        _ => vec!["/c".into(), exec.into()],
     }
 }
 
@@ -857,12 +864,22 @@ mod exec_args_tests {
 
     #[test]
     fn windows_exec_args_match_the_default_shell() {
-        assert_eq!(windows_exec_args("C:\\Windows\\System32\\cmd.exe"), ["/c"]);
         assert_eq!(
-            windows_exec_args("C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
+            windows_exec_args("C:\\Windows\\System32\\cmd.exe", "echo hi"),
+            ["/c", "echo hi"]
+        );
+        assert_eq!(
+            windows_exec_args("C:\\Program Files\\PowerShell\\7\\pwsh.exe", "echo hi"),
+            [
+                "-NoLogo",
+                "-Command",
+                "$ErrorActionPreference='Stop'; & { echo hi }; if ($LASTEXITCODE) { exit $LASTEXITCODE }"
+            ]
+        );
+        assert_eq!(
+            windows_exec_args("powershell.exe", "echo hi")[..2],
             ["-NoLogo", "-Command"]
         );
-        assert_eq!(windows_exec_args("powershell.exe"), ["-NoLogo", "-Command"]);
     }
 }
 

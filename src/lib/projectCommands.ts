@@ -1,6 +1,9 @@
 import { slash } from "./paths";
 import {
+  MAX_COMMAND_STEPS,
+  MAX_COMMAND_TEXT,
   repositoryDisplayName,
+  sanitizeSteps,
   type CommandStep,
   type ProjectCommand,
   type ProjectRecord,
@@ -25,30 +28,9 @@ export type ReusableCommand = {
 const KEY = "monocode.projectCommands.v1";
 const EVENT = "monocode:project-commands-changed";
 const MAX_COMMANDS = 50;
-const MAX_COMMAND_TEXT = 4_000;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
-
-const MAX_STEPS = 12;
-
-function sanitizeSteps(value: unknown): CommandStep[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const steps = value
-    .map((step): CommandStep | null => {
-      if (!isRecord(step)) return null;
-      const command =
-        typeof step.command === "string" ? step.command.trim() : "";
-      if (!command) return null;
-      return {
-        command: command.slice(0, MAX_COMMAND_TEXT),
-        ...(step.host === "native" ? { host: "native" as const } : {}),
-      };
-    })
-    .filter((step): step is CommandStep => !!step)
-    .slice(0, MAX_STEPS);
-  return steps.length ? steps : undefined;
-}
 
 function sanitizeReusable(value: unknown): ReusableCommand | null {
   if (!isRecord(value)) return null;
@@ -131,7 +113,7 @@ export function saveReusableCommand(
       ...(step.host === "native" ? { host: "native" as const } : {}),
     }))
     .filter((step) => step.command)
-    .slice(0, MAX_STEPS);
+    .slice(0, MAX_COMMAND_STEPS);
   if (draft.steps && !steps?.length)
     return { error: "Add a step or turn steps off." };
   if (!command) return { error: "Enter the command to run." };
