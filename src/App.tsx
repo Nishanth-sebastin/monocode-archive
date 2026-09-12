@@ -6907,10 +6907,10 @@ export default function App({
       try {
         switch (action.kind) {
           case "open-session":
-            onSelectLiveAgent(action.sessionId);
+            onOpenApprovalSession(action.sessionId);
             return;
           case "open-changes":
-            onSelectLiveAgent(action.sessionId);
+            onOpenApprovalSession(action.sessionId);
             setSidebarTab("changes");
             return;
           case "open-item":
@@ -7080,7 +7080,7 @@ export default function App({
       }
     },
     [
-      onSelectLiveAgent,
+      onOpenApprovalSession,
       onOpenLinkedWorkItem,
       onStartItemToTask,
       onOpenInboxDelivery,
