@@ -30,6 +30,7 @@ import {
   type CiLog,
 } from "./azurePipelines";
 import {
+  FAILING_CHECK_CONCLUSIONS,
   githubPrState,
   githubWorkItemThread,
   type GithubPrState,
@@ -383,14 +384,6 @@ const githubRepoSlug = (url: string) =>
     .match(/[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/)?.[1]
     ?.toLowerCase();
 
-const FAILING_CHECK_CONCLUSIONS = [
-  "failure",
-  "timed_out",
-  "action_required",
-  "startup_failure",
-  "cancelled",
-];
-
 /** Resolve and verify the GitHub PR-head binding for a repair: the checkout
  * must sit at the PR head commit on the PR branch with a remote pointing at
  * the PR's repository. Never silently checks anything out — a mismatch is a
@@ -599,6 +592,15 @@ export async function validateRepair(
     const state = await githubPrState(evidence.head.cwd, evidence.number);
     if (state.state.toUpperCase() !== "OPEN")
       throw new Error("PR is no longer open. Refresh evidence.");
+    // The remote head may have moved after evidence was captured — a local
+    // checkout still matching the old head is not enough.
+    if (
+      state.headRefOid !== evidence.head.commit ||
+      state.headRefName !== evidence.head.branch
+    )
+      throw new Error(
+        "The PR head moved. Close this draft and Refresh evidence.",
+      );
     const thread = await githubWorkItemThread(
       evidence.head.cwd,
       "pr",
@@ -618,6 +620,13 @@ export async function validateRepair(
     const state = await githubPrState(evidence.head.cwd, evidence.number);
     if (state.state.toUpperCase() !== "OPEN")
       throw new Error("PR is no longer open. Refresh evidence.");
+    if (
+      state.headRefOid !== evidence.head.commit ||
+      state.headRefName !== evidence.head.branch
+    )
+      throw new Error(
+        "The PR head moved. Close this draft and Refresh evidence.",
+      );
     for (const selected of evidence.checks.filter((row) =>
       context.entries.some((entry) => entry.id === row.entry),
     )) {

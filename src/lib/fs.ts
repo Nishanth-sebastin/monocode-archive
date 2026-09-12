@@ -238,20 +238,20 @@ export type GitUpdateResult = {
   outcome: string;
   branch: string;
   updatedFrom: string;
-  before: string;
-  after: string;
   conflicts: string[];
 };
 
 /**
- * Fetch the remote default branch and merge or rebase it into the checkout.
- * Refuses a dirty tree; conflicts stay in progress for explicit resolution.
+ * Fetch `base` (the PR's target branch, or the remote default when absent)
+ * and merge or rebase it into the checkout. Refuses a dirty tree; conflicts
+ * stay in progress for explicit resolution.
  */
 export function gitUpdateFromDefault(
   cwd: string,
   mode: "merge" | "rebase",
+  base?: string,
 ): Promise<GitUpdateResult> {
-  return invoke<GitUpdateResult>("git_update_from_default", { cwd, mode });
+  return invoke<GitUpdateResult>("git_update_from_default", { cwd, mode, base });
 }
 
 /** Abort an in-progress merge or rebase, leaving the checkout clean. */

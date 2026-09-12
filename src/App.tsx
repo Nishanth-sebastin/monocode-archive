@@ -18,7 +18,6 @@ import {
   attentionStoreFromSnapshot,
   attentionSnapshot,
   dismissAttention,
-  removeAttention,
   snoozeAttention,
   subscribeAttention,
   visibleAttention,
@@ -6548,7 +6547,7 @@ export default function App({
     [],
   );
 
-  /** Fetch + merge/rebase the remote default branch into the bound checkout.
+  /** Fetch + merge/rebase the PR's base branch into the bound checkout.
    * Confirm-gated; conflicts stay in the tree and can be sent to the owning
    * agent or aborted explicitly. */
   const onAttentionUpdateBranch = useCallback(
@@ -6556,23 +6555,38 @@ export default function App({
       item: AttentionItem,
       action: Extract<AttentionAction, { kind: "update-branch" }>,
     ) => {
+      // The binding names the branch this row was emitted for — merging into
+      // a checkout that has since moved would corrupt the wrong branch.
+      if (action.branch) {
+        const checkout = await ciContext(action.cwd);
+        if (checkout.branch !== action.branch) {
+          await message(
+            `Checkout is on ${checkout.branch || "detached HEAD"}, not ${action.branch}. Switch back or dismiss the row.`,
+            { title: item.title, kind: "warning" },
+          );
+          return;
+        }
+      }
+      const baseLabel = action.base
+        ? `the ${action.base} branch`
+        : "the remote default branch";
       let mode: "merge" | "rebase" = "merge";
       if (
         !(await ask(
-          "Fetch the remote default branch and merge it into this checkout? The tree must be clean; conflicts stay in place for you to resolve.",
+          `Fetch ${baseLabel} and merge it into this checkout? The tree must be clean; conflicts stay in place for you to resolve.`,
           { title: item.title, kind: "info", okLabel: "Merge", cancelLabel: "Cancel" },
         ))
       ) {
         if (
           !(await ask(
-            "Rebase onto the remote default branch instead?",
+            `Rebase onto ${baseLabel} instead?`,
             { title: "Update branch", kind: "info", okLabel: "Rebase", cancelLabel: "Cancel" },
           ))
         )
           return;
         mode = "rebase";
       }
-      const result = await gitUpdateFromDefault(action.cwd, mode);
+      const result = await gitUpdateFromDefault(action.cwd, mode, action.base);
       notifyGitChanged(action.cwd);
       if (result.outcome === "conflicts") {
         const session = action.sessionId
@@ -6606,13 +6620,16 @@ export default function App({
         }
         return;
       }
-      // The condition the row described is handled — drop it; the next poll
-      // re-verifies and re-emits if the branch is still behind.
-      removeAttention(item.key);
+      // The condition the row described is handled locally — mute it by
+      // signature so the next poll (still-behind remote state) doesn't
+      // immediately resurface it; a real state change re-emits it.
+      dismissAttention(item.key, item.signature);
       await message(
         result.outcome === "up-to-date"
           ? `${result.branch} is already up to date with ${result.updatedFrom}.`
-          : `Merged ${result.updatedFrom} into ${result.branch}. Nothing was pushed.`,
+          : mode === "rebase"
+            ? `Rebased ${result.branch} onto ${result.updatedFrom}. Nothing was pushed.`
+            : `Merged ${result.updatedFrom} into ${result.branch}. Nothing was pushed.`,
         { title: item.title },
       );
     },
@@ -6697,14 +6714,20 @@ export default function App({
               action.number,
               { force: true },
             );
-            const open = thread.comments.filter(
-              (comment) => comment.kind === "review" && !comment.resolved,
+            // Only inline review threads carry a real resolution flag —
+            // "review" submissions can never resolve.
+            const threads = thread.comments.filter(
+              (comment) => comment.kind === "review_comment",
             );
+            const open = threads.filter((comment) => !comment.resolved);
+            const comments = open.length ? open : threads.slice(-10);
+            if (!comments.length)
+              throw new Error("No review comments on this PR.");
             const draft = await githubCommentsRepair({
               cwd: action.cwd,
               repo: action.repo,
               number: action.number,
-              comments: open.length ? open : thread.comments.slice(-10),
+              comments,
             });
             dispatchRepairDraft(draft, action.sessionId);
             return;
@@ -6825,23 +6848,32 @@ export default function App({
   const watcherHooksRef = useRef<WatcherEngineHooks>({});
   watcherHooksRef.current = {
     prepareDraft: (watcher, item) => {
-      const action = item.action;
-      if (
-        action &&
-        (action.kind === "azure-pr-comments" ||
-          action.kind === "github-pr-comments" ||
-          action.kind === "azure-ci-fix" ||
-          action.kind === "github-ci-fix")
-      ) {
-        void onAttentionAction(item);
-        return;
-      }
+      // Draft mode prefills the context picker with the saved action's
+      // instructions — it never builds repair evidence or prepares checkouts
+      // unattended; the row's quick action does that on an explicit click.
+      const action = loadAgentActions().find(
+        (entry) => entry.id === watcher.actionId,
+      );
+      const { text } = composeActionPrompt({
+        name: action?.name ?? watcher.name,
+        instructions: action?.instructions ?? "",
+        sections: [
+          {
+            title: item.title,
+            text: [
+              item.detail,
+              item.url,
+              item.revision && `Revision: ${item.revision}`,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          },
+        ],
+      });
       requestAgentContext({
         context: contextFromText(
-          item.title,
-          [item.detail, item.url, item.revision && `Revision: ${item.revision}`]
-            .filter(Boolean)
-            .join("\n\n"),
+          action?.name ?? item.title,
+          text,
           item.repo ?? item.cwd ?? "",
         ),
         cwd: item.cwd,
@@ -6853,14 +6885,23 @@ export default function App({
       const action = loadAgentActions().find(
         (entry) => entry.id === watcher.actionId,
       );
-      if (!action) return "The saved action is gone — edit the watcher.";
+      if (!action)
+        return { error: "The saved action is gone — edit the watcher." };
       const target = watcher.target;
-      if (!target?.cwd) return "No target checkout — edit the watcher.";
+      if (!target?.cwd)
+        return { error: "No target checkout — edit the watcher." };
       const bound = target.sessionId
         ? sessionsRef.current.find((row) => row.id === target.sessionId)
         : undefined;
+      // An explicit session binding that no longer resolves must not silently
+      // spawn a new conversation — the user chose that conversation.
+      if (target.sessionId && !bound)
+        return {
+          error:
+            "The bound conversation is gone — edit the watcher's target.",
+        };
       if (bound && (bound.busy || sessionNeedsInput(bound)))
-        return "The bound agent is busy — run skipped.";
+        return { skipped: "The bound agent is busy — run skipped." };
       const { text, revision } = composeActionPrompt({
         name: action.name,
         instructions: action.instructions,
@@ -6884,7 +6925,7 @@ export default function App({
           followUpBehavior: "queue",
         });
         return accepted === false
-          ? "The destination conversation refused the run."
+          ? { error: "The destination conversation refused the run." }
           : undefined;
       }
       const session = {
@@ -6894,14 +6935,15 @@ export default function App({
       sessionsRef.current = [...sessionsRef.current, session];
       setSessions(sessionsRef.current);
       const tab = newTab(session.id);
+      // Unattended runs must not steal focus — the attention row is the
+      // entry point to review what ran.
       appendTab(tab, target.cwd);
-      setActiveTabId(tab.id);
       const accepted = await onSubmit(session.id, text, [], {
         action: ref,
         followUpBehavior: "queue",
       });
       return accepted === false
-        ? "The destination conversation refused the run."
+        ? { error: "The destination conversation refused the run." }
         : undefined;
     },
   };
@@ -6912,7 +6954,7 @@ export default function App({
           watcherHooksRef.current.prepareDraft?.(watcher, item),
         runAction: (watcher, item) =>
           watcherHooksRef.current.runAction?.(watcher, item) ??
-          Promise.resolve("No run handler."),
+          Promise.resolve({ error: "No run handler." }),
       }),
     [],
   );

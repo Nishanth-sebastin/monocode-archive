@@ -269,7 +269,12 @@ export function WatchSheet({
                 id="watch-target-cwd"
                 className={inputClass}
                 value={targetCwd}
-                onChange={(event) => setTargetCwd(event.target.value)}
+                onChange={(event) => {
+                  setTargetCwd(event.target.value);
+                  // A session bound to the old checkout must not follow the
+                  // target to a different repository.
+                  setTargetSessionId("");
+                }}
                 placeholder="/path/to/checkout"
               />
             </div>

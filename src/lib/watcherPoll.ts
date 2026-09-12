@@ -4,6 +4,7 @@ import {
   type AttentionItem,
 } from "./attention";
 import {
+  FAILING_CHECK_CONCLUSIONS,
   githubPrState,
   githubWorkItemThread,
   listGithubWorkItems,
@@ -18,12 +19,7 @@ import {
   type AzurePrThread,
 } from "./azureRepos";
 import { unresolvedThread } from "./repair";
-import {
-  ciContext,
-  ciLookup,
-  ciMatches,
-  type CiSource,
-} from "./azurePipelines";
+import { ciContext, ciLookup, ciMatches } from "./azurePipelines";
 import { linkedWorkItemFromInboxItem } from "./sessionWorkItem";
 import type { Watcher, WatcherSource } from "./watchers";
 
@@ -112,7 +108,9 @@ async function pollGithubPr(
 ): Promise<WatcherPoll> {
   const [state, thread] = await Promise.all([
     githubPrState(source.cwd, source.number),
-    githubWorkItemThread(source.cwd, "pr", source.number),
+    // The thread cache has no TTL — force a fresh read or comment detection
+    // freezes after the first poll.
+    githubWorkItemThread(source.cwd, "pr", source.number, { force: true }),
   ]);
   if (state.state.toUpperCase() !== "OPEN") return { conditions: [] };
   const conditions: WatcherCondition[] = [];
@@ -127,14 +125,12 @@ async function pollGithubPr(
   };
 
   const failing = state.checks.filter((check) =>
-    ["failure", "timed_out", "action_required", "startup_failure", "cancelled"].includes(
-      check.conclusion,
-    ),
+    FAILING_CHECK_CONCLUSIONS.includes(check.conclusion),
   );
   if (failing.length) {
     conditions.push({
       key: `gh-ci:${source.repo}#${state.number}`,
-      signature: `${state.headRefOid}:${failing.map((c) => `${c.name}=${c.conclusion}`).join(",")}`,
+      signature: `${state.headRefOid}:${failing.map((c) => `${c.name}=${c.conclusion}`).sort().join(",")}`,
       item: {
         kind: "ci-failure",
         title: `${prLabel} — ${failing.length} failing check${failing.length === 1 ? "" : "s"}`,
@@ -156,12 +152,14 @@ async function pollGithubPr(
     });
   }
 
+  // The backend emits three kinds: "comment" (conversation), "review"
+  // (top-level review submissions — `resolved` is always false on these),
+  // and "review_comment" (inline threads with a real resolution flag).
+  // Only review_comment can resolve, so it drives the condition.
   const comments = thread.comments.filter(
-    (comment) => comment.kind === "review" || comment.kind === "comment",
+    (comment) => comment.kind === "review_comment",
   );
-  const openReview = comments.filter(
-    (comment) => comment.kind === "review" && !comment.resolved,
-  );
+  const openReview = comments.filter((comment) => !comment.resolved);
   const newest = comments[comments.length - 1];
   const changesRequested =
     state.reviewDecision.toUpperCase() === "CHANGES_REQUESTED";
@@ -171,7 +169,9 @@ async function pollGithubPr(
       signature: `${openReview.length}:${newest?.id ?? ""}:${state.reviewDecision}:${state.headRefOid}`,
       item: {
         kind: "pr-comments",
-        title: `${prLabel} — ${openReview.length} unresolved review thread${openReview.length === 1 ? "" : "s"}`,
+        title: openReview.length
+          ? `${prLabel} — ${openReview.length} unresolved review comment${openReview.length === 1 ? "" : "s"}`
+          : `${prLabel} — changes requested`,
         detail: changesRequested ? "Changes requested" : undefined,
         urgency: ATTENTION_ACTION,
         at: Date.parse(newest?.createdAt ?? "") || Date.now(),
@@ -187,6 +187,13 @@ async function pollGithubPr(
     });
   }
 
+  const updateBranch = {
+    kind: "update-branch" as const,
+    cwd: source.cwd,
+    branch: state.headRefName,
+    ...(state.baseRefName ? { base: state.baseRefName } : {}),
+    ...(source.sessionId ? { sessionId: source.sessionId } : {}),
+  };
   const mergeState = state.mergeStateStatus.toUpperCase();
   if (mergeState === "DIRTY") {
     conditions.push({
@@ -199,7 +206,7 @@ async function pollGithubPr(
         urgency: ATTENTION_ACTION,
         at: Date.now(),
         ...base,
-        action: { kind: "update-branch", cwd: source.cwd, ...(source.sessionId ? { sessionId: source.sessionId } : {}) },
+        action: updateBranch,
       },
     });
   } else if (mergeState === "BEHIND") {
@@ -212,7 +219,7 @@ async function pollGithubPr(
         urgency: ATTENTION_INFO,
         at: Date.now(),
         ...base,
-        action: { kind: "update-branch", cwd: source.cwd, ...(source.sessionId ? { sessionId: source.sessionId } : {}) },
+        action: updateBranch,
       },
     });
   }
@@ -301,7 +308,7 @@ async function pollAzurePr(
       signature: `${unresolved}:${newestComment}:${revision}`,
       item: {
         kind: "pr-comments",
-        title: `${prLabel} — ${unresolved} unresolved thread${unresolved === 1 ? "" : "s"}`,
+        title: `${prLabel} — ${unresolved} unresolved comment${unresolved === 1 ? "" : "s"}`,
         urgency: ATTENTION_ACTION,
         at: Date.now(),
         ...base,
@@ -318,6 +325,13 @@ async function pollAzurePr(
     });
   }
 
+  const updateBranch = {
+    kind: "update-branch" as const,
+    cwd: source.cwd,
+    branch: source.branch,
+    base: pr.targetRefName.replace(/^refs\/heads\//, ""),
+    ...(source.sessionId ? { sessionId: source.sessionId } : {}),
+  };
   const mergeStatus = (pr.mergeStatus ?? "").toLowerCase();
   if (mergeStatus === "conflicts") {
     conditions.push({
@@ -329,7 +343,7 @@ async function pollAzurePr(
         urgency: ATTENTION_ACTION,
         at: Date.now(),
         ...base,
-        action: { kind: "update-branch", cwd: source.cwd, ...(source.sessionId ? { sessionId: source.sessionId } : {}) },
+        action: updateBranch,
       },
     });
   } else if (
@@ -346,7 +360,7 @@ async function pollAzurePr(
         urgency: ATTENTION_INFO,
         at: Date.now(),
         ...base,
-        action: { kind: "update-branch", cwd: source.cwd, ...(source.sessionId ? { sessionId: source.sessionId } : {}) },
+        action: updateBranch,
       },
     });
   }
@@ -374,22 +388,13 @@ async function pollAzureCi(
   );
   const conditions: WatcherCondition[] = [];
   for (const run of failed.slice(0, 5)) {
-    const ciSource: CiSource = {
-      target: source.target,
-      definitionName: page.definitionName || source.definitionName,
-      projectName: page.projectName,
-      remote: source.remote,
-      cwd: source.cwd,
-      branch: source.branch,
-      ...(source.sessionId ? { session: source.sessionId } : {}),
-    };
     conditions.push({
       key: `azure-ci:${source.target.definition}:${run.id}`,
       signature: `${run.id}:${run.revision}:${run.result}`,
       item: {
         kind: "ci-failure",
         title: `${source.definitionName || "Pipeline"} run ${run.number} failed`,
-        detail: `commit ${run.commit.slice(0, 8)}`,
+        detail: run.commit ? `commit ${run.commit.slice(0, 8)}` : undefined,
         urgency: ATTENTION_ACTION,
         at: Date.parse(run.queuedAt) || Date.now(),
         provider: "azure",
@@ -401,7 +406,7 @@ async function pollAzureCi(
         action: {
           kind: "azure-ci-fix",
           target: source.target,
-          definitionName: ciSource.definitionName,
+          definitionName: page.definitionName || source.definitionName,
           remote: source.remote,
           cwd: source.cwd,
           branch: source.branch,

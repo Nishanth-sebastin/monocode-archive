@@ -4,7 +4,12 @@ import {
   emittedAttention,
   emittedAttention as rows,
 } from "./attention";
-import { loadWatchers, saveWatcher, updateWatcher } from "./watchers";
+import {
+  loadWatchers,
+  saveWatcher,
+  setWatcherEnabled,
+  updateWatcher,
+} from "./watchers";
 import type { WatcherPoll } from "./watcherPoll";
 import {
   pollWatcherNow,
@@ -95,10 +100,12 @@ it("dedupes replayed conditions — a second identical poll emits nothing new", 
   await vi.waitFor(() => expect(rows().length).toBe(1));
   const firstAt = emittedAttention()[0].at;
   pollWatcherNow(watcher.id);
-  await vi.waitFor(() => expect(poll).toHaveBeenCalledTimes(2));
+  // Waiting on the applied streak also guarantees the second poll landed —
+  // the poll mock resolves before its result is written back.
+  await vi.waitFor(() => expect(loadWatchers()[0].idleStreak).toBe(1));
+  expect(poll).toHaveBeenCalledTimes(2);
   expect(rows().length).toBe(1);
   expect(emittedAttention()[0].at).toBe(firstAt);
-  expect(loadWatchers()[0].idleStreak).toBe(1);
 });
 
 it("resolves rows for conditions that disappeared from the poll", async () => {
@@ -129,11 +136,80 @@ it("backs off and surfaces a lifecycle row after a failed poll", async () => {
   expect(errorRow?.action?.kind).toBe("open-automations");
 });
 
+it("clears the error row when the watcher recovers", async () => {
+  const watcher = makeWatcher();
+  poll.mockRejectedValueOnce(new Error("offline"));
+  poll.mockResolvedValue(result("a"));
+  start();
+  await vi.waitFor(() =>
+    expect(rows().some((row) => row.key === `watcher-error:${watcher.id}`)).toBe(true),
+  );
+  pollWatcherNow(watcher.id);
+  await vi.waitFor(() =>
+    expect(rows().some((row) => row.key === `watcher-error:${watcher.id}`)).toBe(false),
+  );
+  expect(rows().map((row) => row.key)).toEqual([`watcher:${watcher.id}:a`]);
+});
+
+it("cooldown applies within a single poll — N fresh events run once", async () => {
+  const runAction = vi.fn().mockResolvedValue(undefined);
+  makeWatcher({
+    mode: "run",
+    actionId: "implement",
+    target: { cwd: "/repo", harness: "claude", model: "" },
+  });
+  poll.mockResolvedValue(result("a", "b", "c"));
+  start({ runAction });
+  await vi.waitFor(() => expect(rows().length).toBe(3));
+  await vi.waitFor(() =>
+    expect(
+      loadWatchers()[0].history.filter(
+        (entry) => entry.kind === "skip" && /Cooldown/.test(entry.text),
+      ).length,
+    ).toBe(2),
+  );
+  expect(runAction).toHaveBeenCalledTimes(1);
+});
+
+it("a moved signature re-dispatches — the condition changed, not replayed", async () => {
+  const prepareDraft = vi.fn();
+  const watcher = makeWatcher({ mode: "draft", actionId: "triage" });
+  poll.mockResolvedValue({ conditions: [condition("a", "sig-1")] });
+  start({ prepareDraft });
+  await vi.waitFor(() => expect(prepareDraft).toHaveBeenCalledTimes(1));
+  poll.mockResolvedValue({ conditions: [condition("a", "sig-2")] });
+  pollWatcherNow(watcher.id);
+  await vi.waitFor(() => expect(prepareDraft).toHaveBeenCalledTimes(2));
+  // Same key — the row updated in place rather than duplicating.
+  expect(rows().filter((row) => row.key === `watcher:${watcher.id}:a`).length).toBe(1);
+  expect(rows()[0].signature).toBe("sig-2");
+});
+
+it("a poll result cannot resurrect a watcher paused mid-flight", async () => {
+  const watcher = makeWatcher();
+  let release: (value: WatcherPoll) => void = () => {};
+  poll.mockImplementation(
+    () => new Promise<WatcherPoll>((resolve) => (release = resolve)),
+  );
+  start();
+  await vi.waitFor(() => expect(poll).toHaveBeenCalledTimes(1));
+  setWatcherEnabled(watcher.id, false);
+  release(result("a"));
+  await vi.waitFor(() =>
+    expect(loadWatchers()[0].seen).toContain("a"),
+  );
+  expect(loadWatchers()[0].enabled).toBe(false);
+});
+
 it("stretches the interval on consecutive idle polls", async () => {
   const watcher = makeWatcher();
   poll.mockResolvedValue(result("a"));
   start();
-  await vi.waitFor(() => expect(loadWatchers()[0].idleStreak).toBe(0));
+  // idleStreak starts at 0 — wait for the first poll to actually apply so
+  // pollWatcherNow doesn't queue a flag mid-flight.
+  await vi.waitFor(() =>
+    expect(loadWatchers()[0].lastPollAt).toBeGreaterThan(0),
+  );
   // The stretch factor is 1 + floor(idleStreak / 4), computed from the
   // pre-poll streak — the fifth idle poll is the first that stretches.
   for (let streak = 1; streak <= 5; streak += 1) {

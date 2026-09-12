@@ -871,7 +871,7 @@ export function InboxView({
     [items],
   );
   const canWatch =
-    (source === "jira" && !!jiraSite) ||
+    (source === "jira" && connections.jira && !!jiraSite) ||
     (source === "azure" && !!azureSite) ||
     (source === "github" && watchRepos.length > 0);
   const onWatchQuery = () => {
