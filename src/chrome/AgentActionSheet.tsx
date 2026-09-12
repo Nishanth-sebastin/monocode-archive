@@ -322,7 +322,7 @@ export function AgentActionSheet({
             type="button"
             disabled={!valid || running || queued}
             onClick={() => void run()}
-            className="flex h-7 items-center gap-1.5 rounded-md bg-accent px-3 text-[13px] font-medium text-white hover:brightness-110 disabled:opacity-40"
+            className="flex h-7 items-center gap-1.5 rounded-md bg-content px-3 text-[13px] font-medium text-background-base hover:bg-content/80 disabled:opacity-40"
           >
             {running ? (
               <Loader className="size-3.5 animate-spin" />
@@ -540,7 +540,7 @@ export function AgentActionsSheet({
               <button
                 type="button"
                 onClick={save}
-                className="flex h-7 items-center gap-1.5 rounded-md bg-accent px-3 text-[13px] font-medium text-white hover:brightness-110"
+                className="flex h-7 items-center gap-1.5 rounded-md bg-content px-3 text-[13px] font-medium text-background-base hover:bg-content/80"
               >
                 <Check className="size-3.5" strokeWidth={1.75} />
                 Save action

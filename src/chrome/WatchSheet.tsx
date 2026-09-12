@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Modal } from "./Modal";
 import { Select } from "./Select";
+import { Toggle } from "./Toggle";
 import { loadAgentActions } from "../lib/agentActions";
 import { displayPath } from "../lib/paths";
 import {
@@ -328,14 +329,10 @@ export function WatchSheet({
           </div>
         ) : null}
 
-        <label className="flex items-center gap-2 text-[13px] text-content/80">
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(event) => setEnabled(event.target.checked)}
-          />
+        <div className="flex items-center gap-2 text-[13px] text-content/80">
+          <Toggle label="Enabled" on={enabled} onChange={setEnabled} />
           Enabled — polls while MonoCode is open
-        </label>
+        </div>
 
         {error ? (
           <p role="alert" className="text-[12px] text-red-400">
@@ -353,7 +350,7 @@ export function WatchSheet({
           </button>
           <button
             type="button"
-            className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-white hover:bg-accent/90"
+            className="rounded-md bg-content px-3 py-1.5 text-[12px] font-medium text-background-base hover:bg-content/80"
             onClick={save}
           >
             {existing ? "Save watcher" : "Create watcher"}

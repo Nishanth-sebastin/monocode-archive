@@ -216,7 +216,7 @@ describe("AgentActionsMenu", () => {
       );
       // The same-session run is guarded…
       const submit = dialog()!.querySelector<HTMLButtonElement>(
-        "button.bg-accent",
+        "button.bg-content",
       )!;
       expect(submit.textContent).toContain("Queued");
       expect(submit.disabled).toBe(true);
