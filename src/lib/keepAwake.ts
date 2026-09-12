@@ -32,7 +32,8 @@ const EMPTY_STATUS: PowerStatus = {
 /**
  * Sessions doing real execution: a live turn that is not parked on an
  * approval or question. Background subagents keep `busy` set, so they are
- * covered; waiting, queued-only, finished, failed and unknown sessions are not.
+ * covered; inbox-ask turns count too — they are real agent work. Waiting,
+ * queued-only, finished, failed and unknown sessions are not.
  */
 export function keepAwakeSessionIds(sessions: Session[]): string[] {
   const ids = new Set<string>();
@@ -68,7 +69,12 @@ export function syncKeepAwake(enabled: boolean, sessionIds: string[]) {
 }
 
 export function retryKeepAwake(): Promise<BackendPowerStatus> {
-  return invoke<BackendPowerStatus>("power_retry");
+  // Pipe the fresh status through the store too: the broadcast event does the
+  // same thing, but this keeps Retry working even if the listener is dead.
+  return invoke<BackendPowerStatus>("power_retry").then((status) => {
+    applyStatus(status);
+    return status;
+  });
 }
 
 let statusSnapshot: PowerStatus = EMPTY_STATUS;

@@ -1400,9 +1400,13 @@ export default function App({
   // One idle-sleep assertion per runtime, owned by the backend. This window
   // reports only sessions doing real execution; waiting/idle/finished work
   // drops out, and a stale window cannot hold the machine awake alone.
-  // syncKeepAwake dedupes internally, so IPC only fires on real changes.
+  // syncKeepAwake dedupes internally, so IPC only fires on real changes, and
+  // the block-scan is skipped entirely while the setting is off.
   useEffect(() => {
-    syncKeepAwake(keepAwakeEnabled, keepAwakeSessionIds(sessions));
+    syncKeepAwake(
+      keepAwakeEnabled,
+      keepAwakeEnabled ? keepAwakeSessionIds(sessions) : [],
+    );
   }, [keepAwakeEnabled, sessions]);
 
   useEffect(() => {

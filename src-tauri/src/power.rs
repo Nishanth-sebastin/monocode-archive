@@ -10,9 +10,12 @@
 //!
 //! Accepted residuals: a renderer that dies without `WindowEvent::Destroyed`
 //! keeps its refs until the webview reloads or the runtime exits (WKWebView
-//! self-heals by reloading, which re-pushes under the same label); and a
-//! release racing the monitor's reap→flag store can still signal a just-reaped
-//! pid in a nanosecond window, before the OS can realistically recycle it.
+//! self-heals by reloading — the remount re-pushes under the same label with
+//! an empty set, since `busy` is in-memory only, so the assertion releases
+//! even if the harness child is still streaming; that matches the app's own
+//! in-flight semantics); and a release racing the monitor's reap→flag store
+//! can still signal a just-reaped pid in a nanosecond window, before the OS
+//! can realistically recycle it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -229,8 +232,17 @@ impl PowerHost {
                         "monocode power: acquired idle-sleep assertion (platform={}, working={working})",
                         platform::NAME
                     );
-                    if let (Some(app), Some((child, exited))) = (app, child) {
-                        Self::monitor_helper(app.clone(), child, exited, key, generation);
+                    match (app, child) {
+                        (Some(app), Some((child, exited))) => {
+                            Self::monitor_helper(app.clone(), child, exited, key, generation);
+                        }
+                        // No handle to report to — kill the helper now rather
+                        // than leave a live caffeinate while held reads false.
+                        (None, Some((mut child, _))) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        _ => {}
                     }
                 }
                 Err(error) => {
