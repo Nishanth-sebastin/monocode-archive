@@ -31,6 +31,7 @@ import {
   museGoalText,
   museInitializeParams,
   museItemEvent,
+  museItemStatus,
   museModelsFromList,
   musePostureKey,
   museReasoningEffort,
@@ -181,7 +182,14 @@ export async function compactMuseContext(
     .then(async () => {
       live.cancelled = false;
       live.muteUpdates = false;
-      await runCompaction(live);
+      try {
+        await runCompaction(live);
+      } catch (error) {
+        // A turn cancel rejects the compact; tearing the session down does
+        // not — it resolves quietly like the send path.
+        if (live.stopping) return;
+        throw error;
+      }
     });
   live.turns = work.then(
     () => undefined,
@@ -400,6 +408,7 @@ export async function stopMuseSession(sessionId: string): Promise<void> {
   liveByThread.delete(sessionId);
   if (live) {
     live.stopping = true;
+    live.cancelled = true;
     live.muteUpdates = true;
     clearPending(live);
     settleAllTurns(live, new Error("Muse session stopped"));
@@ -471,7 +480,17 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   }
   // A different cwd or sandbox posture cannot be applied to a running host:
   // recycle the process and resume the durable session on the new host.
-  if (existing) await stopMuseSession(input.sessionId);
+  if (existing) {
+    // A turn cut by the recycle resolves quietly; leave a transcript marker
+    // so the truncated answer is not mistaken for a completed one.
+    if (existing.activeTurnId || existing.turnWaits.size > 0) {
+      existing.onEvent({
+        type: "status",
+        text: "Muse session restarted to apply new settings.",
+      });
+    }
+    await stopMuseSession(input.sessionId);
+  }
 
   const resume = resumeByThread.get(input.sessionId);
   const canResume = resume != null && resume.cwd === input.cwd;
@@ -872,7 +891,11 @@ function waitTurn(
   if (live.rpc.isClosed) {
     return Promise.reject(new Error("Muse host exited"));
   }
-  if (disposition === "queued") live.queuedTurnIds.add(turnId);
+  // A turn/started landing between the ack and this registration already
+  // marked the turn active; it must not sit in the unqueue set.
+  if (disposition === "queued" && live.activeTurnId !== turnId) {
+    live.queuedTurnIds.add(turnId);
+  }
   const wait: TurnWait = {} as TurnWait;
   wait.promise = new Promise<void>((resolve, reject) => {
     wait.timer = setTimeout(() => {
@@ -968,13 +991,24 @@ function handleNotification(live: Live, method: string, params: unknown): void {
     case "item/completed": {
       const item = asRecord(rec?.item);
       const events = museItemEvent(item, "completed", live.items);
-      if (item && stringField(item, "kind") === "compaction") {
+      const itemKind = stringField(item, "kind");
+      // item/completed is the item's authoritative terminal revision, but
+      // turn/completed can trail it by ~60s while Muse drains reminder-child
+      // tasks (eot gate). Seal the stream here so a finished answer does not
+      // render as still typing for the whole gate.
+      if (itemKind === "agentMessage") {
+        events.push({ type: "message.completed" });
+      } else if (itemKind === "reasoning") {
+        events.push({ type: "reasoning.completed" });
+      }
+      if (item && itemKind === "compaction") {
         const status = stringField(item, "status");
-        if (status === "failed" || status === "cancelled") {
+        const outcome = museItemStatus(status, true);
+        if (outcome === "failed" || outcome === "cancelled") {
           live.compactionWait?.reject(
             new Error(
               stringField(item, "failureReason") ??
-                `Muse compaction ${status}`,
+                `Muse compaction ${status ?? outcome}`,
             ),
           );
         } else {

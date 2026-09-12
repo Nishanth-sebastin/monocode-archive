@@ -570,4 +570,58 @@ describe("OpenCode child permission routing", () => {
       });
     },
   );
+
+  it("keeps the running turn's posture when a plan send is queued", async () => {
+    const events: HarnessEvent[] = [];
+    const { done } = await startTurn(events);
+    // Queue a plan send behind the still-running supervised turn. Its
+    // intent must not flip the running turn's permission handling.
+    const queued = sendOpenCodeTurn({
+      sessionId: "opencode-live",
+      cwd: "/repo",
+      model: "opencode:openrouter/anthropic/claude-sonnet-4.6",
+      runtimeMode: "supervised",
+      intent: "plan",
+      text: "then plan the refactor",
+      attachments: [],
+      onEvent: (event) => events.push(event),
+    });
+
+    askPermission("session_1");
+    // Supervised posture: the write request goes to the user. A leaked plan
+    // posture would auto-deny it via replyPermission with no UI prompt.
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested",
+    );
+    expect(
+      harnessHttp.mock.calls.some(([input]) =>
+        input.url.includes("/permission/"),
+      ),
+    ).toBe(false);
+    const request = events.find((e) => e.type === "approval.requested")!;
+    if (request.type !== "approval.requested")
+      throw new Error("missing approval");
+    respondOpenCodeApproval("opencode-live", request.requestId, "deny");
+    await waitFor(
+      () =>
+        harnessHttp.mock.calls.some(([input]) =>
+          input.url.includes("/permission/permission_child/reply"),
+        ),
+      "permission reply",
+    );
+    idle();
+    await done;
+
+    // The queued plan send now runs its own prompt.
+    await waitFor(
+      () =>
+        harnessHttp.mock.calls.filter(([input]) =>
+          input.url.includes("/prompt_async"),
+        ).length === 2,
+      "queued prompt",
+    );
+    idle();
+    await queued;
+  });
 });

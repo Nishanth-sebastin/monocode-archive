@@ -421,7 +421,7 @@ function mapTurnTerminal(
     stringField(turn, "status") ??
     (method === "turn/aborted" ? "interrupted" : "completed");
   const errorObj = asRecord(turn?.error);
-  const error = stringField(errorObj, "message");
+  const error = codexTurnErrorMessage(errorObj);
   const status =
     statusRaw === "failed"
       ? "failed"
@@ -444,6 +444,22 @@ function mapTurnTerminal(
     turnCompleted: { status, ...(error ? { error } : {}) },
     activeTurnId: null,
   };
+}
+
+/** The app-server can nest an upstream API error JSON inside error.message. */
+function codexTurnErrorMessage(
+  errorObj: Record<string, unknown> | null,
+): string | undefined {
+  const message = stringField(errorObj, "message");
+  if (!message) return undefined;
+  const trimmed = message.trim();
+  if (!trimmed.startsWith("{")) return message;
+  try {
+    const inner = asRecord(asRecord(JSON.parse(trimmed))?.error);
+    return stringField(inner, "message") ?? message;
+  } catch {
+    return message;
+  }
 }
 
 function mapItemLifecycle(
@@ -482,12 +498,10 @@ function mapItemLifecycle(
     if (completed) {
       const text = streamTextDelta(item.text);
       const events: HarnessEvent[] = [];
-      if (text) {
-        events.push(
-          { type: "message.delta", text },
-          { type: "message.completed" },
-        );
-      }
+      if (text) events.push({ type: "message.delta", text });
+      // Seal the streaming block even when the item carries no text —
+      // turn/completed may lag behind the last item.
+      events.push({ type: "message.completed" });
       return { events };
     }
     return { events: [] };

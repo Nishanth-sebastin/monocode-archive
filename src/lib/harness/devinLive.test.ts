@@ -576,4 +576,154 @@ describe("devin live turn sequence", () => {
     await turn;
     await stopDevinSession("t8");
   });
+
+  it("keeps the running turn's posture when a plan turn is queued behind it", async () => {
+    const events: HarnessEvent[] = [];
+    const turn = sendDevinTurn(baseInput(events, "run tests", "t10") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
+    await waitFor(() => byMethod("session/new").length > 0, "session/new");
+    reply(byMethod("session/new")[0].id, {
+      ...SETUP,
+      modes: { ...SETUP.modes, currentModeId: "accept-edits" },
+    });
+    await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
+    const promptId = lastByMethod("session/prompt").id;
+
+    // Queue a plan turn behind the still-running supervised turn. Its
+    // intent must not flip the running turn's permission posture.
+    const queued = sendDevinTurn({
+      ...baseInput(events, "then plan the refactor", "t10"),
+      intent: "plan",
+    } as never);
+
+    onLine!(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 91,
+        method: "session/request_permission",
+        params: {
+          sessionId: "S1",
+          toolCall: {
+            toolCallId: "call_9",
+            title: "Ran rm -rf build",
+            kind: "execute",
+            status: "pending",
+            rawInput: { command: "rm -rf build" },
+          },
+          options: [
+            { optionId: "allow_once", name: "Allow" },
+            { optionId: "reject_once", name: "Reject" },
+          ],
+        },
+      }),
+    );
+    // Supervised posture: the write request goes to the user. If the queued
+    // plan posture had leaked, it would auto-deny instead.
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested",
+    );
+    respondDevinApproval("t10", 91, "deny");
+    await waitFor(
+      () => parse().some((m) => m.id === 91 && m.result),
+      "permission response",
+    );
+
+    reply(promptId, { stopReason: "end_turn" });
+    await turn;
+
+    // The queued plan turn now applies its own mode before prompting.
+    await waitFor(
+      () => byMethod("session/set_mode").length > 0,
+      "set_mode for queued turn",
+    );
+    expect(lastByMethod("session/set_mode").params.modeId).toBe("plan");
+    reply(lastByMethod("session/set_mode").id, {});
+    await waitFor(
+      () => byMethod("session/prompt").length === 2,
+      "queued prompt",
+    );
+    reply(lastByMethod("session/prompt").id, { stopReason: "end_turn" });
+    await queued;
+    await stopDevinSession("t10");
+  });
+
+  it("keeps the running turn's posture when a full-access send is queued", async () => {
+    const events: HarnessEvent[] = [];
+    const turn = sendDevinTurn(baseInput(events, "run tests", "t11") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true },
+    });
+    await waitFor(() => byMethod("session/new").length > 0, "session/new");
+    reply(byMethod("session/new")[0].id, {
+      ...SETUP,
+      modes: { ...SETUP.modes, currentModeId: "accept-edits" },
+    });
+    await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
+    const promptId = lastByMethod("session/prompt").id;
+
+    // Queue a full-access send behind the running supervised turn. Its
+    // runtimeMode must not auto-approve the running turn's requests.
+    const queued = sendDevinTurn({
+      ...baseInput(events, "then clean up", "t11"),
+      runtimeMode: "full-access",
+    } as never);
+
+    onLine!(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 92,
+        method: "session/request_permission",
+        params: {
+          sessionId: "S1",
+          toolCall: {
+            toolCallId: "call_10",
+            title: "Ran rm -rf build",
+            kind: "execute",
+            status: "pending",
+            rawInput: { command: "rm -rf build" },
+          },
+          options: [
+            { optionId: "allow_once", name: "Allow" },
+            { optionId: "reject_once", name: "Reject" },
+          ],
+        },
+      }),
+    );
+    // If the queued posture had leaked, full-access would auto-allow this
+    // write request and approval.requested would never surface.
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested",
+    );
+    expect(parse().some((m) => m.id === 92)).toBe(false);
+    respondDevinApproval("t11", 92, "allow");
+    await waitFor(
+      () => parse().some((m) => m.id === 92 && m.result),
+      "permission response",
+    );
+
+    reply(promptId, { stopReason: "end_turn" });
+    await turn;
+
+    // The queued send applies its own mode before prompting.
+    await waitFor(
+      () => byMethod("session/set_mode").length > 0,
+      "set_mode for queued turn",
+    );
+    reply(lastByMethod("session/set_mode").id, {});
+    await waitFor(
+      () => byMethod("session/prompt").length === 2,
+      "queued prompt",
+    );
+    reply(lastByMethod("session/prompt").id, { stopReason: "end_turn" });
+    await queued;
+    await stopDevinSession("t11");
+  });
 });

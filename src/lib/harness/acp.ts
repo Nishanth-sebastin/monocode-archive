@@ -659,6 +659,14 @@ export function acpStopReasonMessage(
   }
 }
 
+/**
+ * Matches explicit auth-failure phrases rather than any "auth"/"credential"
+ * substring, so routine error text (token refresh logs, `authorized`, a
+ * tool's bare 403) doesn't get a spurious "not signed in" hint appended.
+ */
+const ACP_AUTH_PATTERN =
+  /not (?:signed|logged) in|not authenticated|unauthori[sz]ed|authentication (?:required|failed|error)|(?:please|then|must) (?:log|sign) ?in|(?:log|sign) ?in (?:required|first|again|to continue)|(?:signed|logged) out|invalid (?:api key|access token|token|credentials?)|expired (?:token|credentials?|session)|(?:token|credentials?|session)(?:\s+(?:has|have|is))?\s+expired|(?:401|403)[^\n]*(?:unauthori[sz]ed|forbidden)|(?:unauthori[sz]ed|forbidden)[^\n]*\b(?:401|403)\b/i;
+
 /** Wrap an initialize/session failure with provider-specific sign-in help. */
 export function acpAuthError(
   provider: string,
@@ -667,7 +675,7 @@ export function acpAuthError(
   verb = "start",
 ): Error {
   const detail = error instanceof Error ? error.message : String(error);
-  if (/log ?in|sign ?in|auth|credential|unauthori|forbidden|permission/i.test(detail)) {
+  if (ACP_AUTH_PATTERN.test(detail)) {
     return new Error(`${detail.trim()}\n\n${authHelp}`);
   }
   if (/timed out/i.test(detail)) {

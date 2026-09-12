@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 const sent: string[] = [];
 let onLine: ((line: string) => void) | undefined;
 let onExit: ((code: number | null) => void) | undefined;
+let onStderr: ((line: string) => void) | undefined;
 
 vi.mock("./child", () => ({
   resolveMuseBinary: async () => ({ path: "/fake/muse" }),
@@ -13,9 +14,11 @@ vi.mock("./child", () => ({
     _id: string,
     line: (l: string) => void,
     exit: (c: number | null) => void,
+    stderr?: (l: string) => void,
   ) => {
     onLine = line;
     onExit = exit;
+    onStderr = stderr;
   },
   writeChild: async (_id: string, line: string) => {
     sent.push(line);
@@ -124,6 +127,7 @@ describe("muse live turn sequence", () => {
   beforeEach(() => {
     sent.length = 0;
     replied.clear();
+    onStderr = undefined;
     __museTestReset();
   });
 
@@ -856,5 +860,118 @@ describe("muse live turn sequence", () => {
     await cancelMuseTurn("tcc");
     await expect(compact).rejects.toThrow();
     await stopMuseSession("tcc");
+  });
+
+  it("seals the message when its item completes instead of waiting for the turn gate", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "t11");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: {
+        itemId: "i1",
+        kind: "agentMessage",
+        status: "inProgress",
+        text: "",
+      },
+    });
+    notify("item/delta", {
+      sessionId: "MS1",
+      itemId: "i1",
+      field: "text",
+      delta: "done early",
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: {
+        itemId: "i1",
+        kind: "agentMessage",
+        status: "completed",
+        text: "done early",
+      },
+    });
+    // Muse holds turn/completed behind its end-of-turn gate (~60s while
+    // reminder children drain). The finished message must not stay "typing"
+    // for the whole gate.
+    await waitFor(
+      () => events.some((e) => e.type === "message.completed"),
+      "message.completed",
+    );
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("t11");
+  });
+
+  it("ignores routine stderr lines that merely contain auth-like words", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "t12");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+
+    onStderr!("INFO oauth token refresh scheduled");
+    onStderr!("WARN authorized scopes: repo, workflow");
+    onStderr!("DEBUG credential store locked");
+    onStderr!("WARN sandbox denied read on /etc/shadow");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events.some((e) => e.type === "session.error")).toBe(false);
+
+    onStderr!("error: not authenticated");
+    await waitFor(
+      () => events.some((e) => e.type === "session.error"),
+      "session.error",
+    );
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("t12");
+  });
+
+  it("stopping the session resolves an in-flight send without an error", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "t13");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    await stopMuseSession("t13");
+    // The send resolves quietly instead of surfacing "Muse session stopped".
+    await turn;
+    expect(events.some((e) => e.type === "session.error")).toBe(false);
+  });
+
+  it("does not unqueue a turn that started before its wait registered", async () => {
+    const events: HarnessEvent[] = [];
+    const turn = sendMuseTurn(baseInput(events, "hey", "t14") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, INIT_RESULT);
+    await waitFor(() => byMethod("session/start").length > 0, "session/start");
+    reply(lastByMethod("session/start")!.id, {
+      session: { sessionId: "MS1" },
+      viewCursor: "c0",
+    });
+    await flushControls();
+    const turnMsg = lastByMethod("turn/start")!;
+    // A queued ack followed by turn/started landing before waitTurn runs:
+    // the turn is active, so cancelling must interrupt it — not unqueue it.
+    reply(turnMsg.id, {
+      commandId: turnMsg.params.commandId,
+      disposition: "queued",
+      turnId: "TQ",
+    });
+    notify("turn/started", { sessionId: "MS1", turnId: "TQ" });
+    await new Promise((r) => setTimeout(r, 10));
+
+    await cancelMuseTurn("t14");
+    expect(
+      byMethod("turn/interrupt").some((m) => m.params.turnId === "TQ"),
+    ).toBe(true);
+    expect(byMethod("turn/unqueue")).toHaveLength(0);
+    await turn;
+    await stopMuseSession("t14");
   });
 });

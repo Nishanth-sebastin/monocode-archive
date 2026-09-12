@@ -26,9 +26,15 @@ const MUSE_SCHEMA_VERSION = 1;
 export const MUSE_AUTH_HELP =
   "Muse is not signed in. Run `muse auth set --api-key-stdin` in a terminal, or set META_API_KEY, then retry.";
 
-/** Lines that read as an auth failure in host output or error text. */
+/**
+ * Lines that read as a real auth failure in host output or error text.
+ * Matches explicit failure phrases rather than any "login"/"auth" substring
+ * so routine stderr logs (token refresh, `authorized`, sandbox denials, a
+ * tool's bare 403) don't surface a spurious "not signed in" error while the
+ * session works fine.
+ */
 export const MUSE_AUTH_PATTERN =
-  /log ?in|sign ?in|not authenticated|auth|credential|unauthori|forbidden|denied/i;
+  /not (?:signed|logged) in|not authenticated|unauthori[sz]ed|authentication (?:required|failed|error)|(?:please|then|must) (?:log|sign) ?in|(?:log|sign) ?in (?:required|first|again|to continue)|(?:signed|logged) out|invalid (?:api key|access token|token|credentials?)|expired (?:token|credentials?|session)|(?:token|credentials?|session)(?:\s+(?:has|have|is))?\s+expired|(?:401|403)[^\n]*(?:unauthori[sz]ed|forbidden)|(?:unauthori[sz]ed|forbidden)[^\n]*\b(?:401|403)\b|muse auth|authRequired/i;
 
 const MUSE_CLIENT_CAPABILITIES = {
   // MonoCode renders userInput dialogs through the shared question UI.
@@ -307,7 +313,7 @@ function museToolKind(name: string): string {
   return "other";
 }
 
-function museItemStatus(status: unknown, terminal: boolean): string {
+export function museItemStatus(status: unknown, terminal: boolean): string {
   const value = String(status ?? "");
   if (value === "inProgress") return "in_progress";
   if (value === "completed") return "completed";

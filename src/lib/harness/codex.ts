@@ -84,6 +84,10 @@ type Live = {
   turnEndPending: boolean;
   emittedAssistant: string;
   emittedReasoning: string;
+  /** The model the bound thread reports; backstops a placeholder picker id. */
+  threadModel: string;
+  /** Server requests received before the live session was bound. */
+  earlyRequests: { id: JsonRpcId; method: string; params: unknown }[];
 };
 
 type Resume = {
@@ -123,6 +127,7 @@ export async function sendCodexTurn(input: SendTurnInput): Promise<void> {
       live.planning = input.intent === "plan";
       live.cancelled = false;
       live.muteUpdates = false;
+      flushEarlyRequests(live);
       try {
         await runTurn(live, input);
       } catch (error) {
@@ -151,6 +156,7 @@ export async function compactCodexContext(
     .then(async () => {
       live.cancelled = false;
       live.muteUpdates = false;
+      flushEarlyRequests(live);
       try {
         await runCompaction(live);
       } catch (error) {
@@ -273,6 +279,7 @@ export async function stopCodexSession(sessionId: string): Promise<void> {
   liveByThread.delete(sessionId);
   if (live) {
     live.muteUpdates = true;
+    live.cancelled = true;
     clearServerRequests(live);
     live.turnDone?.();
     live.turnDone = null;
@@ -351,6 +358,11 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   const { path } = await resolveCodexBinaryImpl(input.cwd);
   markTurn(input.sessionId, "codex binary resolved");
   const liveRef: { current: Live | null } = { current: null };
+  // Requests can race session binding (e.g. a pending approval re-issued by
+  // thread/resume). The app-server awaits our response, so they are buffered
+  // and dispatched once the session is live and unmuted — never left hanging.
+  const earlyRequests: { id: JsonRpcId; method: string; params: unknown }[] =
+    [];
 
   const rpc = new JsonRpcClient(
     input.sessionId,
@@ -362,28 +374,34 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       },
       onRequest: (id, method, params) => {
         const live = liveRef.current;
-        const turn = live?.turnDone;
         // The external clock can be requested before thread/start or resume
         // returns, so it must not depend on the live session being bound.
-        const response =
-          method === "currentTime/read"
-            ? rpc.respond(id, { currentTimeAt: Math.floor(Date.now() / 1000) })
-            : live
-              ? handleServerRequest(live, id, method, params)
-              : undefined;
-        void response?.catch((error: unknown) => {
-          if (live?.muteUpdates || (live && live.turnDone !== turn)) return;
-          const failure =
-            error instanceof Error ? error : new Error(String(error));
-          if (live?.turnFailed) {
-            live.turnFailed(failure);
-          } else {
-            (live?.onEvent ?? input.onEvent)({
-              type: "session.error",
-              message: failure.message,
-            });
-          }
-        });
+        if (method === "currentTime/read") {
+          void rpc
+            .respond(id, { currentTimeAt: Math.floor(Date.now() / 1000) })
+            .catch(() => undefined);
+          return;
+        }
+        if (!live) {
+          earlyRequests.push({ id, method, params });
+          return;
+        }
+        const turn = live.turnDone;
+        void handleServerRequest(live, id, method, params).catch(
+          (error: unknown) => {
+            if (live.muteUpdates || live.turnDone !== turn) return;
+            const failure =
+              error instanceof Error ? error : new Error(String(error));
+            if (live.turnFailed) {
+              live.turnFailed(failure);
+            } else {
+              live.onEvent({
+                type: "session.error",
+                message: failure.message,
+              });
+            }
+          },
+        );
       },
     },
     { includeJsonrpc: false, label: "codex" },
@@ -431,23 +449,24 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     const serviceTier = input.modelSettings?.serviceTier;
 
     let threadId: string | undefined;
+    let threadModel = "";
     let didResume = false;
 
     if (canResume && resume) {
       try {
-        const opened = await rpc.request<{ thread?: { id?: string } }>(
-          "thread/resume",
-          {
-            threadId: resume.threadId,
-            ...buildThreadStartParams({
-              cwd: input.cwd,
-              runtimeMode: input.runtimeMode,
-              model,
-              serviceTier,
-            }),
-          },
-        );
+        const opened = await rpc.request<{
+          thread?: { id?: string; model?: string };
+        }>("thread/resume", {
+          threadId: resume.threadId,
+          ...buildThreadStartParams({
+            cwd: input.cwd,
+            runtimeMode: input.runtimeMode,
+            model,
+            serviceTier,
+          }),
+        });
         threadId = opened.thread?.id ?? resume.threadId;
+        threadModel = opened.thread?.model ?? "";
         didResume = true;
       } catch (error) {
         if (!isRecoverableThreadResumeError(error)) throw error;
@@ -456,7 +475,9 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     }
 
     if (!threadId) {
-      const opened = await rpc.request<{ thread?: { id?: string } }>(
+      const opened = await rpc.request<{
+        thread?: { id?: string; model?: string };
+      }>(
         "thread/start",
         buildThreadStartParams({
           cwd: input.cwd,
@@ -466,6 +487,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
         }),
       );
       threadId = opened.thread?.id?.trim();
+      threadModel = opened.thread?.model ?? "";
     }
 
     if (!threadId) throw new Error("Codex did not return a thread id");
@@ -494,6 +516,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       turnEndPending: false,
       emittedAssistant: "",
       emittedReasoning: "",
+      threadModel,
+      earlyRequests,
     };
     liveRef.current = live;
     liveByThread.set(input.sessionId, live);
@@ -544,7 +568,10 @@ async function populateCatalog(sessionId: string, live: Live): Promise<void> {
 }
 
 async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
-  const model = nativeModelId(input.model, input.cwd);
+  // The picker's "Default" entry resolves to an empty native id; sending ""
+  // in collaborationMode.settings.model is schema-valid but the server then
+  // rejects the model call. Fall back to the model the thread reports.
+  const model = nativeModelId(input.model, input.cwd) || live.threadModel;
   const effort = input.modelSettings?.reasoningEffort;
   const serviceTier = input.modelSettings?.serviceTier;
 
@@ -716,6 +743,24 @@ function finishActiveTurn(live: Live, extraEvents: HarnessEvent[] = []): void {
 function settlePendingTurn(live: Live): void {
   if (!live.turnEndPending || !live.turnDone) return;
   finishActiveTurn(live);
+}
+
+/** Dispatch server requests buffered while the session was binding. */
+function flushEarlyRequests(live: Live): void {
+  const pending = live.earlyRequests.splice(0);
+  for (const req of pending) {
+    void handleServerRequest(live, req.id, req.method, req.params).catch(
+      (error: unknown) => {
+        void live.rpc
+          .respondError(req.id, {
+            code: -32603,
+            message:
+              error instanceof Error ? error.message : String(error),
+          })
+          .catch(() => undefined);
+      },
+    );
+  }
 }
 
 async function handleServerRequest(

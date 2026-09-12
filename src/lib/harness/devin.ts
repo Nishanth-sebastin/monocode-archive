@@ -117,11 +117,13 @@ export async function sendDevinTurn(input: SendTurnInput): Promise<void> {
   if (cancelledThreads.delete(input.sessionId)) return;
 
   live.onEvent = input.onEvent;
-  live.runtimeMode = input.runtimeMode;
-  live.planning = input.intent === "plan";
   live.turns = live.turns
     .catch(() => undefined)
     .then(async () => {
+      // Posture is set when this send actually runs so a queued turn does
+      // not flip the running turn's auto-permission behavior mid-flight.
+      live.runtimeMode = input.runtimeMode;
+      live.planning = input.intent === "plan";
       live.cancelled = false;
       live.muteUpdates = false;
       try {
@@ -398,8 +400,9 @@ export async function prewarmDevinSession(
 async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   const existing = liveByThread.get(input.sessionId);
   if (existing && pathKey(existing.cwd) === pathKey(input.cwd)) {
+    // Posture stays with the running turn; a queued send stamps its own
+    // runtimeMode/planning when its task actually starts.
     existing.onEvent = input.onEvent;
-    existing.runtimeMode = input.runtimeMode;
     return existing;
   }
   if (existing) {
@@ -812,6 +815,14 @@ async function handleRequest(
 
 async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
   const request = devinPermissionRequest(params);
+  if (live.cancelled || live.muteUpdates) {
+    // A request landing after cancel/stop must still be answered — the
+    // server holds its turn open until it gets a response.
+    await live.acp
+      .respond(id, { outcome: { outcome: "cancelled" } })
+      .catch(() => undefined);
+    return;
+  }
   if (request.callId) {
     live.onEvent({
       type: "tool.updated",
@@ -885,7 +896,7 @@ async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
 
 async function handleElicitation(live: Live, id: JsonRpcId, params: unknown) {
   const parsed = devinElicitation(params);
-  if (!parsed) {
+  if (!parsed || live.cancelled || live.muteUpdates) {
     await live.acp
       .respond(id, { action: "cancel" })
       .catch(() => undefined);

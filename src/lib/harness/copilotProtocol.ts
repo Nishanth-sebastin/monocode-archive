@@ -34,6 +34,14 @@ export const COPILOT_CLIENT_CAPABILITIES = {
 export const AUTH_HELP =
   "GitHub Copilot CLI is not signed in. Run `copilot login` in a terminal, or set COPILOT_GITHUB_TOKEN for BYOK/headless use, then retry.";
 
+/**
+ * Matches explicit auth-failure phrases rather than any "login"/"auth"
+ * substring, so routine stderr (token refresh logs, `authorized`, sandbox
+ * denials) doesn't surface a spurious "not signed in" error.
+ */
+export const COPILOT_AUTH_PATTERN =
+  /not (?:signed|logged) in|not authenticated|unauthori[sz]ed|authentication (?:required|failed|error)|(?:please|then|must) (?:log|sign) ?in|(?:log|sign) ?in (?:required|first|again|to continue)|(?:signed|logged) out|invalid (?:api key|access token|token|credentials?)|expired (?:token|credentials?|session)|(?:token|credentials?|session)(?:\s+(?:has|have|is))?\s+expired|(?:401|403)[^\n]*(?:unauthori[sz]ed|forbidden)|(?:unauthori[sz]ed|forbidden)[^\n]*\b(?:401|403)\b|copilot login/i;
+
 /** Launch args for `copilot` ACP stdio. Reasoning is fixed at server start. */
 export function copilotSpawnArgs(effort?: string): string[] {
   const args = ["--acp", "--stdio"];

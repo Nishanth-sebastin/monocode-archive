@@ -939,4 +939,79 @@ describe("copilot live turn", () => {
     await turn;
     await stopCopilotSession("t27");
   });
+
+  it("keeps the running turn's posture when a plan turn is queued behind it", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "t29");
+    await waitFor(() => byMethod("session/set_mode").length > 0, "set_mode");
+    reply(lastByMethod("session/set_mode")!.id, {});
+    await waitFor(() => byMethod("session/prompt").length > 0, "prompt");
+    const promptId = lastByMethod("session/prompt")!.id;
+
+    // Queue a plan turn behind the still-running supervised turn. Its
+    // intent must not flip the running turn's permission posture.
+    const queued = sendCopilotTurn({
+      sessionId: "t29",
+      cwd: "/repo",
+      model: "copilot:default",
+      modelSettings: {},
+      runtimeMode: "supervised",
+      intent: "plan",
+      text: "then plan the refactor",
+      attachments: [],
+      onEvent: (e: HarnessEvent) => events.push(e),
+    } as never);
+
+    onLine!(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 91,
+        method: "session/request_permission",
+        params: {
+          sessionId: "C1",
+          toolCall: {
+            toolCallId: "call_9",
+            title: "Ran rm -rf build",
+            kind: "execute",
+            status: "pending",
+            rawInput: { command: "rm -rf build" },
+          },
+          options: [
+            { optionId: "allow_once", name: "Allow" },
+            { optionId: "reject_once", name: "Reject" },
+          ],
+        },
+      }),
+    );
+    // Supervised posture: the write request goes to the user. A leaked plan
+    // posture would auto-deny it without an approval.requested event.
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested",
+    );
+    expect(parse().some((m) => m.id === 91)).toBe(false);
+    respondCopilotApproval("t29", 91, "deny");
+    await waitFor(
+      () => parse().some((m) => m.id === 91 && m.result),
+      "permission response",
+    );
+
+    reply(promptId, { stopReason: "end_turn" });
+    await turn;
+
+    // The queued plan turn applies its own mode before prompting.
+    await waitFor(
+      () => byMethod("session/set_mode").length === 2,
+      "set_mode for queued turn",
+    );
+    expect(lastByMethod("session/set_mode")!.params.modeId).toBe("plan");
+    reply(lastByMethod("session/set_mode")!.id, {});
+    await waitFor(
+      () => byMethod("session/prompt").length === 2,
+      "queued prompt",
+    );
+    reply(lastByMethod("session/prompt")!.id, { stopReason: "end_turn" });
+    await queued;
+    await stopCopilotSession("t29");
+  });
 });

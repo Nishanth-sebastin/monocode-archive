@@ -73,7 +73,6 @@ type Live = {
   client: OpenCodeClient;
   openCodeSessionId: string;
   cwd: string;
-  runtimeMode: RuntimeMode;
   planning: boolean;
   onEvent: (event: HarnessEvent) => void;
   approvals: Map<number, PendingApproval>;
@@ -124,11 +123,12 @@ export async function sendOpenCodeTurn(input: SendTurnInput): Promise<void> {
   if (cancelledThreads.delete(input.sessionId)) return;
 
   live.onEvent = input.onEvent;
-  live.runtimeMode = input.runtimeMode;
-  live.planning = input.intent === "plan";
   live.turns = live.turns
     .catch(() => undefined)
     .then(async () => {
+      // Posture applies when the queued turn actually runs — applying it at
+      // enqueue time would flip the running turn's permission handling.
+      live.planning = input.intent === "plan";
       live.cancelled = false;
       live.muteUpdates = false;
       try {
@@ -251,6 +251,7 @@ export async function stopOpenCodeSession(sessionId: string): Promise<void> {
   liveByThread.delete(sessionId);
   if (live) {
     live.muteUpdates = true;
+    live.cancelled = true;
     for (const [, pending] of live.approvals) pending.resolve("deny");
     live.approvals.clear();
     for (const [, pending] of live.questions)
@@ -286,7 +287,6 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   const existing = liveByThread.get(input.sessionId);
   if (existing && existing.cwd === input.cwd) {
     existing.onEvent = input.onEvent;
-    existing.runtimeMode = input.runtimeMode;
     return existing;
   }
   if (existing) {
@@ -358,7 +358,6 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       client,
       openCodeSessionId: openCodeSession.id,
       cwd: input.cwd,
-      runtimeMode: input.runtimeMode,
       planning: input.intent === "plan",
       onEvent: input.onEvent,
       approvals: new Map(),
@@ -958,7 +957,10 @@ function isHttpNotFound(error: unknown): boolean {
   return error instanceof OpenCodeHttpError && error.status === 404;
 }
 
+const versionCheckedPaths = new Set<string>();
+
 async function assertOpenCodeVersion(path: string, cwd: string): Promise<void> {
+  if (versionCheckedPaths.has(path)) return;
   const output = await execChild(path, ["--version"], cwd).catch(() => "");
   const version = parseOpenCodeVersion(output);
   if (!version) {
@@ -971,6 +973,7 @@ async function assertOpenCodeVersion(path: string, cwd: string): Promise<void> {
       `OpenCode v${version} is too old. Upgrade to v${MINIMUM_OPENCODE_VERSION} or newer.`,
     );
   }
+  versionCheckedPaths.add(path);
 }
 
 function waitForServerUrl(
@@ -1009,4 +1012,5 @@ export function __openCodeTestReset(): void {
   liveByThread.clear();
   resumeByThread.clear();
   cancelledThreads.clear();
+  versionCheckedPaths.clear();
 }

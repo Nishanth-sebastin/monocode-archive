@@ -41,6 +41,7 @@ import {
 } from "./child";
 import {
   AUTH_HELP,
+  COPILOT_AUTH_PATTERN,
   COPILOT_CLIENT_CAPABILITIES,
   copilotCurrentModelId,
   copilotEffortFromSettings,
@@ -143,11 +144,13 @@ export async function sendCopilotTurn(input: SendTurnInput): Promise<void> {
   if (cancelledThreads.delete(input.sessionId)) return;
 
   live.onEvent = input.onEvent;
-  live.runtimeMode = input.runtimeMode;
-  live.planning = input.intent === "plan";
   live.turns = live.turns
     .catch(() => undefined)
     .then(async () => {
+      // Posture is set when this send actually runs so a queued turn does
+      // not flip the running turn's auto-permission behavior mid-flight.
+      live.runtimeMode = input.runtimeMode;
+      live.planning = input.intent === "plan";
       live.cancelled = false;
       live.muteUpdates = false;
       try {
@@ -397,8 +400,9 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     pathKey(existing.cwd) === pathKey(input.cwd) &&
     existing.launchEffort === effort
   ) {
+    // Posture stays with the running turn; a queued send stamps its own
+    // runtimeMode/planning when its task actually starts.
     existing.onEvent = input.onEvent;
-    existing.runtimeMode = input.runtimeMode;
     return existing;
   }
   if (existing) {
@@ -472,7 +476,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     },
     (line) => {
       console.debug("[monocode] copilot stderr", line);
-      if (/log ?in|sign ?in|not authenticated|unauthori/i.test(line)) {
+      if (COPILOT_AUTH_PATTERN.test(line)) {
         emit({
           type: "session.error",
           message: `${line.trim()}\n\n${AUTH_HELP}`,
@@ -795,7 +799,7 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
     const detail = error instanceof Error ? error.message : String(error);
     live.onEvent({
       type: "session.error",
-      message: /log ?in|sign ?in|auth|credential|unauthori/i.test(detail)
+      message: COPILOT_AUTH_PATTERN.test(detail)
         ? `${detail.trim()}\n\n${AUTH_HELP}`
         : detail,
     });
@@ -928,6 +932,14 @@ async function handleRequest(
 
 async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
   const request = acpPermissionRequest(params);
+  if (live.cancelled || live.muteUpdates) {
+    // A request landing after cancel/stop must still be answered — the
+    // server holds its turn open until it gets a response.
+    await live.acp
+      .respond(id, { outcome: { outcome: "cancelled" } })
+      .catch(() => undefined);
+    return;
+  }
   if (request.callId) {
     live.onEvent({
       type: "tool.updated",
@@ -1001,7 +1013,7 @@ async function handlePermission(live: Live, id: JsonRpcId, params: unknown) {
 
 async function handleElicitation(live: Live, id: JsonRpcId, params: unknown) {
   const parsed = acpElicitation(params);
-  if (!parsed) {
+  if (!parsed || live.cancelled || live.muteUpdates) {
     await live.acp
       .respond(id, { action: "cancel" })
       .catch(() => undefined);
