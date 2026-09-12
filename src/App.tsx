@@ -3233,12 +3233,26 @@ export default function App({
       leafIds(entry.layout).includes(sessionId),
     );
     if (!tab) return false;
+    setProjectTerminalFocused(false);
     setActiveTabId(tab.id);
     setTabs((prev) =>
       prev.map((entry) =>
-        entry.id === tab.id ? { ...entry, focusedId: sessionId } : entry,
+        entry.id === tab.id
+          ? { ...entry, focusedId: sessionId, diffFocused: false }
+          : entry,
       ),
     );
+    const cwd = focusedWorkspaceTabCwd(
+      { ...tab, focusedId: sessionId },
+      sessionsRef.current,
+    );
+    if (cwd && looksLikeProject(cwd)) {
+      const normalized = normalizeProjectPath(cwd);
+      if (!sameProjectPath(normalized, projectCwdRef.current)) {
+        setProjectCwd(normalized);
+        setRecents(rememberProject(normalized));
+      }
+    }
     setComposerFocused(true);
     return true;
   }, []);
@@ -7941,7 +7955,12 @@ export default function App({
           anchor={queueAnchor}
           items={attentionItems}
           onDismiss={() => setQueueAnchor(null)}
-          onAction={(item) => void onAttentionAction(item)}
+          // Dispatching navigates or opens a dialog — the queue must not stay
+          // on top holding keyboard focus, or typing hits its s/d shortcuts.
+          onAction={(item) => {
+            setQueueAnchor(null);
+            void onAttentionAction(item);
+          }}
           onSnooze={onAttentionSnooze}
           onDismissItem={onAttentionDismissItem}
           onOpenAutomations={() => openSettings("automations")}
