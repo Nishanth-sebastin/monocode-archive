@@ -11,6 +11,7 @@ import {
   devinModeId,
   devinModeIdsFromConfig,
   devinModesFromSetup,
+  devinModelSelectionForUid,
   devinModelsFromConfig,
   devinModelsFromOutput,
   devinPermissionOptionId,
@@ -41,7 +42,11 @@ const SESSION_NEW = {
           name: "Claude Sonnet 5 Medium",
           _meta: { "cognition.ai/contextWindow": 1_000_000 },
         },
-        { value: "swe-2-high", name: "SWE 2 High" },
+        { value: "claude-sonnet-5-low", name: "Claude Sonnet 5 Low" },
+        { value: "claude-sonnet-5-high", name: "Claude Sonnet 5 High" },
+        { value: "claude-sonnet-5-max", name: "Claude Sonnet 5 Max" },
+        { value: "swe-2-high", name: "SWE-2 High" },
+        { value: "swe-2-medium", name: "SWE-2 Medium" },
       ],
     },
     {
@@ -82,26 +87,114 @@ describe("devinModeId", () => {
 });
 
 describe("devinConfigOptions + models", () => {
-  it("reads the dynamic model select from session/new configOptions", () => {
+  it("groups the model select into one row per model with a reasoning setting", () => {
     const options = devinConfigOptions(SESSION_NEW.configOptions);
     expect(options).toHaveLength(2);
     expect(devinCurrentModelId(options)).toBe("claude-sonnet-5-medium");
     const models = devinModelsFromConfig(options);
     expect(models).toEqual([
       {
-        id: "devin:claude-sonnet-5-medium",
+        id: "devin:claude-sonnet-5",
         harness: "devin",
-        name: "Claude Sonnet 5 Medium",
+        name: "Claude Sonnet 5",
         nativeId: "claude-sonnet-5-medium",
         contextWindow: 1_000_000,
+        settings: [
+          {
+            id: "reasoning",
+            label: "Reasoning",
+            kind: "select",
+            value: "claude-sonnet-5-medium",
+            options: [
+              { value: "claude-sonnet-5-low", label: "Low" },
+              { value: "claude-sonnet-5-medium", label: "Medium" },
+              { value: "claude-sonnet-5-high", label: "High" },
+              { value: "claude-sonnet-5-max", label: "Max" },
+            ],
+          },
+        ],
       },
       {
-        id: "devin:swe-2-high",
+        id: "devin:swe-2",
         harness: "devin",
-        name: "SWE 2 High",
+        name: "SWE-2",
         nativeId: "swe-2-high",
+        settings: [
+          {
+            id: "reasoning",
+            label: "Reasoning",
+            kind: "select",
+            value: "swe-2-high",
+            options: [
+              { value: "swe-2-medium", label: "Medium" },
+              { value: "swe-2-high", label: "High" },
+            ],
+          },
+        ],
       },
     ]);
+  });
+
+  it("keeps speed, context and sidekick combinations as separate models", () => {
+    const models = devinModelsFromConfig(
+      devinConfigOptions([
+        {
+          id: "model",
+          type: "select",
+          options: [
+            { value: "claude-opus-5-low", name: "Claude Opus 5 Low" },
+            { value: "claude-opus-5-high", name: "Claude Opus 5 High" },
+            { value: "claude-opus-5-low-fast", name: "Claude Opus 5 Low Fast" },
+            {
+              value: "claude-opus-5-high-fast",
+              name: "Claude Opus 5 High Fast",
+            },
+            { value: "glm-5-2", name: "GLM-5.2 High" },
+            { value: "glm-5-2-none-1m", name: "GLM-5.2 No Thinking 1M" },
+            {
+              value: "fusion-a-high-sidekick-b-medium",
+              name: "Fusion (Claude Fable 5.1 High + SWE-2 Medium)",
+            },
+            {
+              value: "fusion-a-low-sidekick-b-medium",
+              name: "Fusion (Claude Fable 5.1 Low + SWE-2 Medium)",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(models.map((model) => model.name)).toEqual([
+      "Claude Opus 5",
+      "Claude Opus 5 Fast",
+      "GLM-5.2",
+      "GLM-5.2 1M",
+      "Fusion (Claude Fable 5.1 + SWE-2 Medium)",
+    ]);
+    // A label like "GLM-5.2 High" still exposes the level even when the uid
+    // itself carries no level suffix.
+    expect(models[2]!.nativeId).toBe("glm-5-2");
+    const fusion = models[4]!;
+    const reasoning = fusion.settings?.find(
+      (setting) => setting.id === "reasoning",
+    );
+    expect(reasoning?.options).toEqual([
+      { value: "fusion-a-low-sidekick-b-medium", label: "Low" },
+      { value: "fusion-a-high-sidekick-b-medium", label: "High" },
+    ]);
+  });
+
+  it("maps a reported model uid back to its group and reasoning value", () => {
+    const options = devinConfigOptions(SESSION_NEW.configOptions);
+    expect(devinModelSelectionForUid(options, "claude-sonnet-5-max")).toEqual({
+      id: "devin:claude-sonnet-5",
+      reasoning: "claude-sonnet-5-max",
+    });
+    expect(
+      devinModelSelectionForUid(options, "claude-sonnet-5-medium"),
+    ).toEqual({ id: "devin:claude-sonnet-5", reasoning: "claude-sonnet-5-medium" });
+    expect(devinModelSelectionForUid(options, "unknown-uid")).toEqual({
+      id: "devin:unknown-uid",
+    });
   });
 
   it("reads modes from the setup modes block and the mode config option", () => {
@@ -135,13 +228,20 @@ describe("devinConfigOptions + models", () => {
         ],
       }),
     );
-    expect(models.map((m) => m.nativeId)).toEqual([
-      "claude-opus-5",
-      "claude-opus-5-medium",
-      "claude-opus-5-low",
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({
+      id: "devin:claude-opus-5",
+      name: "Claude Opus 5",
+      nativeId: "claude-opus-5-medium",
+      contextWindow: 1_000_000,
+    });
+    expect(
+      models[0].settings?.find((setting) => setting.id === "reasoning")
+        ?.options,
+    ).toEqual([
+      { value: "claude-opus-5-low", label: "Low" },
+      { value: "claude-opus-5-medium", label: "Medium" },
     ]);
-    expect(models[1].contextWindow).toBe(1_000_000);
-    expect(models[1].id).toBe("devin:claude-opus-5-medium");
   });
 
   it("returns no models from junk output", () => {

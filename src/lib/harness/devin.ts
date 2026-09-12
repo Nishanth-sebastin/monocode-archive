@@ -1,4 +1,4 @@
-import { nativeModelId } from "../models";
+import { findModel, nativeModelId } from "../models";
 import { pathKey } from "../paths";
 import type { RuntimeMode } from "../session";
 import type { UserQuestion, UserQuestionReply } from "../userQuestion";
@@ -27,6 +27,7 @@ import {
   devinModeIdsFromConfig,
   devinModesFromSetup,
   devinModelConfigId,
+  devinModelSelectionForUid,
   devinPermissionOptionId,
   devinPermissionRequest,
   devinPromptBlocks,
@@ -510,7 +511,17 @@ async function applyModelSelection(
   live: Live,
   input: HarnessSessionInput,
 ): Promise<void> {
-  const base = nativeModelId(input.model, input.cwd).trim();
+  // Devin folds the reasoning level into the model uid. The picker's
+  // `reasoning` setting carries the chosen variant's uid — apply it only when
+  // it belongs to the selected model's group.
+  const reasoning = input.modelSettings?.reasoning?.trim();
+  const offered = findModel(input.model, input.cwd)
+    ?.settings?.find((setting) => setting.id === "reasoning")
+    ?.options.some((option) => option.value === reasoning);
+  const base = (reasoning && offered
+    ? reasoning
+    : nativeModelId(input.model, input.cwd)
+  ).trim();
   if (!base) return;
   const current = live.configOptions.find(
     (option) => option.id === live.modelConfigId,
@@ -642,9 +653,11 @@ function handleNotification(live: Live, method: string, params: unknown) {
       live.configOptions = next;
       const current = devinCurrentModelId(next);
       if (current && current !== previous) {
+        const selection = devinModelSelectionForUid(next, current);
         live.onEvent({
           type: "session.configChanged",
-          model: `devin:${current}`,
+          model: selection.id,
+          modelSettings: { reasoning: selection.reasoning ?? "" },
         });
       }
     }
