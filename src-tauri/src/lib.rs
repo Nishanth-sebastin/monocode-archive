@@ -346,6 +346,7 @@ pub fn run() {
             harness::harness_resolve_grok,
             harness::harness_resolve_devin,
             harness::harness_resolve_copilot,
+            harness::harness_resolve_muse,
             harness::harness_free_port,
             harness::harness_spawn,
             harness::harness_write,

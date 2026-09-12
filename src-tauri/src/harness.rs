@@ -366,6 +366,18 @@ pub fn harness_resolve_copilot() -> Result<CursorBinary, String> {
         })
 }
 
+/// Resolve the Muse Code CLI (`muse`).
+#[tauri::command(async)]
+pub fn harness_resolve_muse() -> Result<CursorBinary, String> {
+    resolve_muse()
+        .map(|path| CursorBinary {
+            path: path.to_string_lossy().into_owned(),
+        })
+        .ok_or_else(|| {
+            "Muse Code CLI not found. Install it and run `muse auth set --api-key-stdin`, then retry.".into()
+        })
+}
+
 /// Bind an ephemeral loopback port for `opencode serve`.
 #[tauri::command]
 pub fn harness_free_port() -> Result<u16, String> {
@@ -819,6 +831,7 @@ fn is_resolved_harness_binary(command: &str) -> bool {
         resolve_grok(),
         resolve_devin(),
         resolve_copilot(),
+        resolve_muse(),
     ]
     .into_iter()
     .flatten()
@@ -1175,10 +1188,11 @@ fn is_harness_argv_token(part: &str) -> bool {
             | "fx"
             | "devin"
             | "copilot"
+            | "muse"
             | "pi"
             | "worker-server"
             | "app-server"
-    )
+    ) || name.starts_with("muse-bin-")
 }
 
 #[cfg(any(all(unix, not(target_os = "linux")), test))]
@@ -1728,6 +1742,38 @@ fn copilot_help_mentions_acp(path: &Path) -> bool {
     }
 }
 
+fn resolve_muse() -> Option<PathBuf> {
+    let home = dirs_home().map(PathBuf::from);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Installer layout first: ~/.local/bin/muse is a bash launcher that execs
+    // the versioned runtime pinned by ~/.local/bin/.muse-version; the runtime
+    // binary is the fallback for a missing or corrupt launcher.
+    if let Some(home) = &home {
+        let local_bin = home.join(".local/bin");
+        candidates.push(local_bin.join("muse"));
+        if let Ok(version) = std::fs::read_to_string(local_bin.join(".muse-version")) {
+            let version = version.trim();
+            if !version.is_empty() && !version.contains('/') && !version.contains('\\') {
+                candidates.push(local_bin.join(format!("muse-bin-{version}")));
+            }
+        }
+        candidates.push(home.join(".npm-global/bin/muse"));
+        candidates.push(home.join(".cargo/bin/muse"));
+        candidates.push(home.join("n/bin/muse"));
+    }
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/opt/homebrew/bin/muse"));
+    candidates.push(PathBuf::from("/usr/local/bin/muse"));
+    candidates.push(PathBuf::from("/usr/bin/muse"));
+    candidates.push(PathBuf::from("/snap/bin/muse"));
+    if let Some(from_shell) = which_via_login_shell("muse") {
+        candidates.push(from_shell);
+    }
+
+    first_binary_matching(candidates, is_muse_agent)
+}
+
 fn is_pi_coding_agent(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -1959,6 +2005,69 @@ fn devin_help_mentions_acp(path: &Path) -> bool {
             .to_ascii_lowercase();
             text.contains("acp")
                 && (text.contains("devin") || text.contains("agent client protocol"))
+        }
+        _ => {
+            terminate(pid);
+            false
+        }
+    }
+}
+
+fn is_muse_agent(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    // Versioned runtime binary shipped under ~/.local/bin by the installer.
+    if name.starts_with("muse-bin-") {
+        return path_has_component(path, ".local") || file_mentions_muse_agent(path);
+    }
+    if !binary_name_eq(path, "muse") {
+        return false;
+    }
+    file_mentions_muse_agent(path) || muse_help_mentions_serve(path)
+}
+
+fn file_mentions_muse_agent(path: &Path) -> bool {
+    file_contains_markers(
+        path,
+        &[
+            "MUSE_CHANNEL_URL",
+            "muse serve",
+            "muse-bin-",
+            "msp session host",
+        ],
+    )
+}
+
+fn muse_help_mentions_serve(path: &Path) -> bool {
+    let mut cmd = Command::new(path);
+    cmd.arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    apply_gui_env(&mut cmd);
+    isolate_child(&mut cmd);
+    let Ok(child) = spawn_managed(&mut cmd) else {
+        return false;
+    };
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(output)) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .to_ascii_lowercase();
+            text.contains("serve") && (text.contains("msp") || text.contains("session host"))
         }
         _ => {
             terminate(pid);
@@ -2968,6 +3077,38 @@ mod tests {
         assert!(!file_mentions_copilot_agent(&aws));
         assert!(!is_copilot_agent(&aws));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn muse_accepts_launcher_markers_and_pinned_runtime() {
+        let dir = std::env::temp_dir().join(format!("monocode-muse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The bash launcher carries its channel markers.
+        let launcher = dir.join("muse");
+        std::fs::write(&launcher, b"#!/bin/sh\n# MUSE_CHANNEL_URL muse-bin-\n").unwrap();
+        assert!(is_muse_agent(&launcher));
+
+        // The versioned runtime is trusted under the installer's .local tree.
+        let local = dir.join(".local/bin");
+        std::fs::create_dir_all(&local).unwrap();
+        let runtime = local.join("muse-bin-9.9.9-test");
+        std::fs::write(&runtime, b"\0").unwrap();
+        assert!(is_muse_agent(&runtime));
+
+        // A pinned binary outside the installer tree needs markers.
+        let stray = dir.join("muse-bin-9.9.9-test");
+        std::fs::write(&stray, b"#!/bin/sh\necho not muse\n").unwrap();
+        assert!(!is_muse_agent(&stray));
+
+        // Another tool named muse must not win the name.
+        let other = dir.join("muse-other");
+        std::fs::write(&other, b"#!/bin/sh\necho media player\n").unwrap();
+        assert!(!is_muse_agent(&other));
+
+        assert!(!is_muse_agent(&dir.join("missing")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

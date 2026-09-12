@@ -1,0 +1,860 @@
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+const sent: string[] = [];
+let onLine: ((line: string) => void) | undefined;
+let onExit: ((code: number | null) => void) | undefined;
+
+vi.mock("./child", () => ({
+  resolveMuseBinary: async () => ({ path: "/fake/muse" }),
+  spawnChild: async () => undefined,
+  killChild: async () => undefined,
+  unwatchChild: () => undefined,
+  watchChild: (
+    _id: string,
+    line: (l: string) => void,
+    exit: (c: number | null) => void,
+  ) => {
+    onLine = line;
+    onExit = exit;
+  },
+  writeChild: async (_id: string, line: string) => {
+    sent.push(line);
+  },
+}));
+
+const {
+  sendMuseTurn,
+  cancelMuseTurn,
+  compactMuseContext,
+  respondMuseApproval,
+  respondMuseQuestion,
+  stopMuseSession,
+  bindMuseSession,
+  __museTestReset,
+} = await import("./muse");
+import type { HarnessEvent } from "./types";
+
+const INIT_RESULT = {
+  schema: { version: 1, fingerprint: "sha256:test" },
+  serverInfo: { name: "muse", version: "1.1.1" },
+};
+
+const parse = () => sent.map((s) => JSON.parse(s));
+const byMethod = (method: string) => parse().filter((m) => m.method === method);
+const lastByMethod = (method: string) => byMethod(method).at(-1);
+const waitFor = async (pred: () => boolean, label: string) => {
+  for (let i = 0; i < 200; i++) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(
+    `timed out waiting for ${label}; sent=${JSON.stringify(
+      parse().map((m) => m.method ?? `reply:${m.id}`),
+    )}`,
+  );
+};
+
+function reply(id: number | string, result: unknown) {
+  onLine!(JSON.stringify({ jsonrpc: "2.0", id, result }));
+}
+function fail(id: number | string, error: unknown) {
+  onLine!(JSON.stringify({ jsonrpc: "2.0", id, error }));
+}
+function notify(method: string, params: unknown) {
+  onLine!(JSON.stringify({ jsonrpc: "2.0", method, params }));
+}
+function serverRequest(id: number, method: string, params: unknown) {
+  onLine!(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+}
+
+const baseInput = (events: HarnessEvent[], text: string, id = "t1") => ({
+  sessionId: id,
+  cwd: "/repo",
+  model: "muse:default",
+  modelSettings: {},
+  runtimeMode: "supervised" as const,
+  text,
+  attachments: [],
+  onEvent: (e: HarnessEvent) => events.push(e),
+});
+
+const replied = new Set<number | string>();
+
+/** Answer any pending session/set* control requests, then turn/start's ack. */
+async function flushControls() {
+  for (let i = 0; i < 200; i++) {
+    const pending = parse().filter(
+      (m) => m.method?.startsWith("session/set") && !replied.has(m.id),
+    );
+    for (const m of pending) {
+      replied.add(m.id);
+      reply(m.id, {});
+    }
+    if (byMethod("turn/start").length > 0) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error("timed out waiting for turn/start");
+}
+
+/** Drive a session through initialize + session/start + turn/start ack. */
+async function startTurn(events: HarnessEvent[], text: string, id: string) {
+  const turn = sendMuseTurn(baseInput(events, text, id) as never);
+  await waitFor(() => byMethod("initialize").length > 0, "initialize");
+  expect(byMethod("initialize")[0].params.capabilities.userInputDialogs).toBe(
+    true,
+  );
+  reply(byMethod("initialize")[0].id, INIT_RESULT);
+  await waitFor(() => byMethod("session/start").length > 0, "session/start");
+  const startMsg = lastByMethod("session/start")!;
+  expect(startMsg.params.workspaceRoot).toBe("/repo");
+  reply(startMsg.id, { session: { sessionId: "MS1" }, viewCursor: "c0" });
+  await flushControls();
+  const turnMsg = lastByMethod("turn/start")!;
+  reply(turnMsg.id, {
+    commandId: turnMsg.params.commandId,
+    disposition: "started",
+    startedNewTurn: true,
+    status: "accepted",
+    turnId: "T1",
+  });
+  return { turn, turnId: "T1" };
+}
+
+describe("muse live turn sequence", () => {
+  beforeEach(() => {
+    sent.length = 0;
+    replied.clear();
+    __museTestReset();
+  });
+
+  it("starts a session, sets the approval mode, and streams a turn", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "t1");
+
+    // supervised maps to promptUnmatched on session/start.
+    expect(lastByMethod("session/start")!.params.approvalMode).toBe(
+      "promptUnmatched",
+    );
+    // commandId must be a UUIDv7 the server accepts.
+    expect(lastByMethod("turn/start")!.params.commandId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "i1", kind: "agentMessage", status: "inProgress", text: "" },
+    });
+    notify("item/delta", {
+      sessionId: "MS1",
+      itemId: "i1",
+      field: "text",
+      delta: "hi there",
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: {
+        itemId: "i1",
+        kind: "agentMessage",
+        status: "completed",
+        text: "hi there",
+      },
+    });
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+
+    expect(events.some((e) => e.type === "session.started")).toBe(true);
+    expect(
+      events.some(
+        (e) =>
+          e.type === "session.providerBound" && e.providerSessionId === "MS1",
+      ),
+    ).toBe(true);
+    expect(
+      events.some((e) => e.type === "message.delta" && e.text === "hi there"),
+    ).toBe(true);
+    expect(events.some((e) => e.type === "message.completed")).toBe(true);
+    await stopMuseSession("t1");
+  });
+
+  it("maps tool items and context usage to block events", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "list files", "t2");
+
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: {
+        itemId: "i9",
+        kind: "toolCall",
+        status: "inProgress",
+        tool: "bash",
+        args: JSON.stringify({ command: "ls -la" }),
+      },
+    });
+    notify("item/delta", {
+      sessionId: "MS1",
+      itemId: "i9",
+      field: "output",
+      delta: "total 12",
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: {
+        itemId: "i9",
+        kind: "toolCall",
+        status: "completed",
+        tool: "bash",
+        visibleOutput: "total 12",
+      },
+    });
+    notify("session/contextUsage", {
+      sessionId: "MS1",
+      usedTokens: 1200,
+      windowTokens: 200000,
+      pressure: "low",
+    });
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+
+    const started = events.find((e) => e.type === "tool.started");
+    expect(started).toMatchObject({ callId: "i9", kind: "execute" });
+    const updated = events.find(
+      (e) => e.type === "tool.updated" && e.detail?.includes("total 12"),
+    );
+    expect(updated).toBeDefined();
+    expect(
+      events.some(
+        (e) => e.type === "context" && e.used === 1200 && e.window === 200000,
+      ),
+    ).toBe(true);
+    await stopMuseSession("t2");
+  });
+
+  it("surfaces an approval request and answers it with approval/decide", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "run tests", "t3");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+
+    serverRequest(77, "approval/request", {
+      approvalId: "a1",
+      sessionId: "MS1",
+      turnId: "T1",
+      itemId: "i2",
+      toolCallId: "call_2",
+      toolName: "bash",
+      rawArgs: JSON.stringify({ command: "npm test" }),
+      currentRequirementId: { approvalId: "a1", sourceIndex: 0 },
+      availableChoices: [
+        { choiceId: "ch-allow", label: "Allow once", decision: "approved", scope: "once" },
+        { choiceId: "ch-deny", label: "Deny", decision: "denied", scope: "once" },
+      ],
+      subject: { kind: "shell", command: "npm test" },
+    });
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested",
+    );
+    // The server request itself gets an immediate {} acknowledgement.
+    expect(parse().some((m) => m.id === 77 && "result" in m)).toBe(true);
+
+    respondMuseApproval("t3", 1, "allow");
+    await waitFor(
+      () => byMethod("approval/decide").length > 0,
+      "approval/decide",
+    );
+    const decide = lastByMethod("approval/decide")!;
+    expect(decide.params).toMatchObject({
+      approvalId: "a1",
+      choiceId: "ch-allow",
+      sessionId: "MS1",
+      requirementId: { approvalId: "a1", sourceIndex: 0 },
+    });
+    reply(decide.id, {
+      approvalId: "a1",
+      commandId: decide.params.commandId,
+      status: "accepted",
+      terminal: true,
+    });
+    expect(
+      events.some(
+        (e) => e.type === "approval.resolved" && e.decision === "allow",
+      ),
+    ).toBe(true);
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("t3");
+  });
+
+  it("re-asks when Muse reports a stale approval requirement", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "run tests", "t7");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+
+    serverRequest(81, "approval/request", {
+      approvalId: "a2",
+      sessionId: "MS1",
+      turnId: "T1",
+      itemId: "i4",
+      toolCallId: "call_4",
+      toolName: "bash",
+      rawArgs: "{}",
+      currentRequirementId: { approvalId: "a2", sourceIndex: 0 },
+      availableChoices: [
+        { choiceId: "ch-allow", label: "Allow", decision: "approved", scope: "once" },
+      ],
+      subject: { kind: "shell", command: "npm test" },
+    });
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "first approval.requested",
+    );
+    respondMuseApproval("t7", 1, "allow");
+    await waitFor(
+      () => byMethod("approval/decide").length > 0,
+      "approval/decide",
+    );
+    fail(lastByMethod("approval/decide")!.id, {
+      code: -32000,
+      message: "requirement stale",
+      data: { kind: "approvalRequirementStale" },
+    });
+    await waitFor(
+      () =>
+        events.filter((e) => e.type === "approval.requested").length === 2,
+      "second approval.requested",
+    );
+    const second = events
+      .filter((e) => e.type === "approval.requested")
+      .at(-1)!;
+    expect(second.requestId).not.toBe(1);
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("t7");
+  });
+
+  it("converts a userInput request into a question and answers it", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "pick one", "t4");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+
+    serverRequest(88, "userInput/request", {
+      userInputId: "u1",
+      sessionId: "MS1",
+      turnId: "T1",
+      itemId: "i3",
+      toolCallId: "call_3",
+      toolName: "request_user_input",
+      questions: [
+        {
+          id: "q1",
+          header: "Pick",
+          question: "Which option?",
+          selection: { mode: "single", minSelections: 1, maxSelections: 1 },
+          options: [{ label: "Alpha" }, { label: "Beta" }],
+        },
+      ],
+    });
+    await waitFor(
+      () => events.some((e) => e.type === "question.asked"),
+      "question.asked",
+    );
+    const asked = events.find((e) => e.type === "question.asked")!;
+    expect(asked.questions[0].prompt).toBe("Which option?");
+    expect(asked.questions[0].options.map((o) => o.label)).toEqual([
+      "Alpha",
+      "Beta",
+    ]);
+
+    respondMuseQuestion("t4", asked.requestId, {
+      kind: "answered",
+      answers: { q1: ["Alpha"] },
+    });
+    await waitFor(
+      () => byMethod("userInput/answer").length > 0,
+      "userInput/answer",
+    );
+    expect(lastByMethod("userInput/answer")!.params).toMatchObject({
+      sessionId: "MS1",
+      userInputId: "u1",
+      answers: [{ questionId: "q1", selectedLabel: "Alpha" }],
+    });
+    expect(
+      events.some(
+        (e) => e.type === "question.resolved" && e.decision === "answered",
+      ),
+    ).toBe(true);
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("t4");
+  });
+
+  it("sends userInput/cancel when the question is skipped", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "pick one", "t8");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+
+    serverRequest(89, "userInput/request", {
+      userInputId: "u2",
+      sessionId: "MS1",
+      turnId: "T1",
+      itemId: "i5",
+      toolCallId: "call_5",
+      toolName: "request_user_input",
+      questions: [
+        {
+          id: "q1",
+          question: "Continue?",
+          selection: { mode: "single" },
+          options: [{ label: "Yes" }, { label: "No" }],
+        },
+      ],
+    });
+    await waitFor(
+      () => events.some((e) => e.type === "question.asked"),
+      "question.asked",
+    );
+    respondMuseQuestion("t8", 1, { kind: "skipped" });
+    await waitFor(
+      () => byMethod("userInput/cancel").length > 0,
+      "userInput/cancel",
+    );
+    expect(lastByMethod("userInput/cancel")!.params.userInputId).toBe("u2");
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("t8");
+  });
+
+  it("cancel interrupts the active turn and drops pending requests", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "run tests", "t6");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+
+    serverRequest(91, "approval/request", {
+      approvalId: "a3",
+      sessionId: "MS1",
+      turnId: "T1",
+      itemId: "i6",
+      toolCallId: "call_6",
+      toolName: "bash",
+      rawArgs: "{}",
+      currentRequirementId: { approvalId: "a3", sourceIndex: 0 },
+      availableChoices: [
+        { choiceId: "ch-allow", label: "Allow", decision: "approved", scope: "once" },
+      ],
+      subject: { kind: "shell", command: "rm -rf x" },
+    });
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested",
+    );
+
+    await cancelMuseTurn("t6");
+    await turn;
+    await waitFor(
+      () =>
+        byMethod("turn/interrupt").some((m) => m.params.turnId === "T1"),
+      "turn/interrupt",
+    );
+    // A late approval update must not re-prompt after cancellation.
+    const before = events.filter((e) => e.type === "approval.requested").length;
+    notify("approval/updated", {
+      approvalId: "a3",
+      sessionId: "MS1",
+      currentRequirementId: { approvalId: "a3", sourceIndex: 1 },
+      availableChoices: [],
+    });
+    serverRequest(92, "approval/request", {
+      approvalId: "a4",
+      sessionId: "MS1",
+      turnId: "T1",
+      itemId: "i7",
+      toolCallId: "call_7",
+      toolName: "bash",
+      rawArgs: "{}",
+      currentRequirementId: { approvalId: "a4", sourceIndex: 0 },
+      availableChoices: [
+        { choiceId: "ch-allow", label: "Allow", decision: "approved", scope: "once" },
+      ],
+      subject: { kind: "shell", command: "rm -rf y" },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(
+      events.filter((e) => e.type === "approval.requested").length,
+    ).toBe(before);
+    await stopMuseSession("t6");
+  });
+
+  it("resumes a parked session with session/resume instead of session/start", async () => {
+    const events: HarnessEvent[] = [];
+    const first = await startTurn(events, "hey", "t5");
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await first.turn;
+    await stopMuseSession("t5");
+
+    sent.length = 0;
+    const turn2 = sendMuseTurn(baseInput(events, "back again", "t5") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize 2");
+    reply(byMethod("initialize")[0].id, INIT_RESULT);
+    await waitFor(
+      () => byMethod("session/resume").length > 0,
+      "session/resume",
+    );
+    const resumeMsg = lastByMethod("session/resume")!;
+    expect(resumeMsg.params.sessionId).toBe("MS1");
+    expect(byMethod("session/start")).toHaveLength(0);
+    reply(resumeMsg.id, {
+      session: { sessionId: "MS1" },
+      history: {},
+      pendingRequests: [],
+      viewCursor: "c1",
+    });
+    await flushControls();
+    const turnMsg = lastByMethod("turn/start")!;
+    reply(turnMsg.id, {
+      commandId: turnMsg.params.commandId,
+      disposition: "started",
+      startedNewTurn: true,
+      status: "accepted",
+      turnId: "T2",
+    });
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T2",
+      terminal: "completed",
+    });
+    await turn2;
+    await stopMuseSession("t5");
+  });
+
+  it("bindMuseSession seeds resume state for a restored thread", async () => {
+    bindMuseSession("t9", "MS-RESTORED", "/repo");
+    const events: HarnessEvent[] = [];
+    const turn = sendMuseTurn(baseInput(events, "hello", "t9") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, INIT_RESULT);
+    await waitFor(
+      () => byMethod("session/resume").length > 0,
+      "session/resume",
+    );
+    expect(lastByMethod("session/resume")!.params.sessionId).toBe(
+      "MS-RESTORED",
+    );
+    reply(lastByMethod("session/resume")!.id, {
+      session: { sessionId: "MS-RESTORED" },
+      history: {},
+      pendingRequests: [],
+      viewCursor: "c1",
+    });
+    await flushControls();
+    const turnMsg = lastByMethod("turn/start")!;
+    reply(turnMsg.id, {
+      commandId: turnMsg.params.commandId,
+      disposition: "started",
+      startedNewTurn: true,
+      status: "accepted",
+      turnId: "T9",
+    });
+    notify("turn/completed", {
+      sessionId: "MS-RESTORED",
+      turnId: "T9",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("t9");
+  });
+
+  it("falls back to session/start when resume reports the session missing", async () => {
+    bindMuseSession("t10", "MS-GONE", "/repo");
+    const events: HarnessEvent[] = [];
+    const turn = sendMuseTurn(baseInput(events, "hello", "t10") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, INIT_RESULT);
+    await waitFor(
+      () => byMethod("session/resume").length > 0,
+      "session/resume",
+    );
+    fail(lastByMethod("session/resume")!.id, {
+      code: -32000,
+      message: "session not found",
+      data: { kind: "sessionNotFound" },
+    });
+    await waitFor(() => byMethod("session/start").length > 0, "session/start");
+    reply(lastByMethod("session/start")!.id, {
+      session: { sessionId: "MS-NEW" },
+      viewCursor: "c0",
+    });
+    await waitFor(() => byMethod("turn/start").length > 0, "turn/start");
+    const turnMsg = lastByMethod("turn/start")!;
+    reply(turnMsg.id, {
+      commandId: turnMsg.params.commandId,
+      disposition: "started",
+      startedNewTurn: true,
+      status: "accepted",
+      turnId: "T10",
+    });
+    notify("turn/completed", {
+      sessionId: "MS-NEW",
+      turnId: "T10",
+      terminal: "completed",
+    });
+    await turn;
+    expect(
+      events.some(
+        (e) =>
+          e.type === "session.providerBound" &&
+          e.providerSessionId === "MS-NEW",
+      ),
+    ).toBe(true);
+    await stopMuseSession("t10");
+  });
+
+  it("routes a child exit to the running turn's listener", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "t4b");
+    onExit!(1);
+    await turn.catch(() => undefined);
+    expect(events.some((e) => e.type === "session.ended")).toBe(true);
+  });
+
+  it("settles a compaction when the compaction item completes", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "tc");
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+
+    const compact = compactMuseContext(
+      baseInput(events, "", "tc") as never,
+    );
+    await waitFor(() => byMethod("session/compact").length > 0, "compact");
+    reply(lastByMethod("session/compact")!.id, {
+      commandId: "x",
+      status: "accepted",
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "c1", kind: "compaction", status: "completed" },
+    });
+    await compact;
+    await stopMuseSession("tc");
+  });
+
+  it("surfaces a pending approval re-issued during session/resume", async () => {
+    const events: HarnessEvent[] = [];
+    const first = await startTurn(events, "hey", "tr");
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await first.turn;
+    await stopMuseSession("tr");
+
+    sent.length = 0;
+    const turn2 = sendMuseTurn(baseInput(events, "again", "tr") as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, INIT_RESULT);
+    await waitFor(
+      () => byMethod("session/resume").length > 0,
+      "session/resume",
+    );
+    // The host re-issues the pending request while resume is in flight.
+    serverRequest(97, "approval/request", {
+      approvalId: "a9",
+      sessionId: "MS1",
+      turnId: "T0",
+      itemId: "iR",
+      currentRequirementId: { approvalId: "a9", sourceIndex: 0 },
+      availableChoices: [
+        { choiceId: "ch-allow", decision: "approved", scope: "once" },
+        { choiceId: "ch-deny", decision: "denied", scope: "once" },
+      ],
+      subject: { kind: "shell", command: "deploy" },
+    });
+    reply(lastByMethod("session/resume")!.id, {
+      session: { sessionId: "MS1" },
+      history: {},
+      pendingRequests: [{ kind: "approval", approvalId: "a9", viewCursor: "c1" }],
+      viewCursor: "c1",
+    });
+    await waitFor(
+      () => events.some((e) => e.type === "approval.requested"),
+      "approval.requested after resume",
+    );
+
+    await flushControls();
+    reply(lastByMethod("turn/start")!.id, {
+      commandId: lastByMethod("turn/start")!.params.commandId,
+      disposition: "started",
+      status: "accepted",
+      turnId: "T9",
+    });
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T9",
+      terminal: "completed",
+    });
+    await turn2;
+    await stopMuseSession("tr");
+  });
+
+  it("dedupes a re-issued approval/request for the same approvalId", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "run", "td");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+
+    const params = {
+      approvalId: "aD",
+      sessionId: "MS1",
+      turnId: "T1",
+      itemId: "iD",
+      currentRequirementId: { approvalId: "aD", sourceIndex: 0 },
+      availableChoices: [
+        { choiceId: "ch-allow", decision: "approved", scope: "once" },
+      ],
+      subject: { kind: "shell", command: "make" },
+    };
+    serverRequest(98, "approval/request", params);
+    serverRequest(99, "approval/request", {
+      ...params,
+      currentRequirementId: { approvalId: "aD", sourceIndex: 1 },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(
+      events.filter((e) => e.type === "approval.requested").length,
+    ).toBe(1);
+
+    respondMuseApproval("td", 1, "allow");
+    await waitFor(
+      () => byMethod("approval/decide").length > 0,
+      "approval/decide",
+    );
+    // The refreshed requirement token is what gets decided.
+    expect(lastByMethod("approval/decide")!.params.requirementId).toEqual({
+      approvalId: "aD",
+      sourceIndex: 1,
+    });
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("td");
+  });
+
+  it("auto-denies an approval during a plan turn", async () => {
+    const events: HarnessEvent[] = [];
+    const turn = sendMuseTurn({
+      ...baseInput(events, "plan it", "tp"),
+      intent: "plan",
+    } as never);
+    await waitFor(() => byMethod("initialize").length > 0, "initialize");
+    reply(byMethod("initialize")[0].id, INIT_RESULT);
+    await waitFor(() => byMethod("session/start").length > 0, "session/start");
+    const startMsg = lastByMethod("session/start")!;
+    expect(startMsg.params.approvalMode).toBe("denyUnmatched");
+    reply(startMsg.id, { session: { sessionId: "MSP" }, viewCursor: "c0" });
+    await waitFor(() => byMethod("turn/start").length > 0, "turn/start");
+    reply(lastByMethod("turn/start")!.id, {
+      commandId: lastByMethod("turn/start")!.params.commandId,
+      disposition: "started",
+      status: "accepted",
+      turnId: "TP",
+    });
+    notify("turn/started", { sessionId: "MSP", turnId: "TP" });
+
+    serverRequest(96, "approval/request", {
+      approvalId: "aP",
+      sessionId: "MSP",
+      turnId: "TP",
+      itemId: "iP",
+      currentRequirementId: { approvalId: "aP", sourceIndex: 0 },
+      availableChoices: [
+        { choiceId: "ch-allow", decision: "approved", scope: "once" },
+        { choiceId: "ch-deny", decision: "denied", scope: "once" },
+      ],
+      subject: { kind: "shell", command: "rm -rf build" },
+    });
+    await waitFor(
+      () => byMethod("approval/decide").length > 0,
+      "approval/decide",
+    );
+    expect(lastByMethod("approval/decide")!.params.choiceId).toBe("ch-deny");
+    expect(events.some((e) => e.type === "approval.requested")).toBe(false);
+
+    notify("turn/completed", {
+      sessionId: "MSP",
+      turnId: "TP",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("tp");
+  });
+
+  it("settles the turn wait when Muse retracts the submission", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "tx");
+    notify("turn/retracted", { sessionId: "MS1", turnId: "T1" });
+    await expect(turn).rejects.toThrow(/retracted/);
+    await stopMuseSession("tx");
+  });
+
+  it("rejects an in-flight compaction when the turn is cancelled", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "tcc");
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+
+    const compact = compactMuseContext(baseInput(events, "", "tcc") as never);
+    await waitFor(
+      () => byMethod("session/compact").length > 0,
+      "session/compact",
+    );
+    reply(lastByMethod("session/compact")!.id, { status: "accepted" });
+    await cancelMuseTurn("tcc");
+    await expect(compact).rejects.toThrow();
+    await stopMuseSession("tcc");
+  });
+});
