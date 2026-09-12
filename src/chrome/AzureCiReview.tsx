@@ -10,6 +10,7 @@ import {
   type AzureStatus,
 } from "../lib/azure";
 import { requestAgentContext } from "../lib/agentContext";
+import { openWatchSheet } from "../lib/watchers";
 import {
   ciContext,
   ciKey,
@@ -609,6 +610,25 @@ function CiSourcePanel({
         </button>
         <button className={button} onClick={() => external()}>
           Open pipeline in Azure
+        </button>
+        <button
+          className={button}
+          onClick={() =>
+            openWatchSheet({
+              source: {
+                kind: "azure-ci",
+                target: source.target,
+                definitionName: source.definitionName,
+                remote: source.remote,
+                cwd: source.cwd,
+                branch: source.branch,
+                ...(source.session ? { sessionId: source.session } : {}),
+              },
+              name: `Failures · ${source.definitionName || "Pipeline"}`,
+            })
+          }
+        >
+          Watch failures
         </button>
       </div>
       {busy || !status ? (

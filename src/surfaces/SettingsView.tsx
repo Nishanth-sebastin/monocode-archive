@@ -210,6 +210,7 @@ import {
 } from "../lib/updater";
 
 import { SkillsPage } from "./SkillsPage";
+import { AutomationsPage } from "./AutomationsPage";
 
 export type SettingsAnchor = "github" | "gitlab" | "linear" | "jira" | "azure";
 
@@ -326,6 +327,7 @@ export function SettingsView({
           {section === "keybindings" ? <KeybindingsPage /> : null}
           {section === "providers" ? <ProvidersPage key={cwd} cwd={cwd} /> : null}
           {section === "inbox" ? <InboxPage /> : null}
+          {section === "automations" ? <AutomationsPage /> : null}
           {section === "skills" ? <SkillsPage key={cwd} cwd={cwd} /> : null}
           {section === "archive" ? (
             <ArchivePage

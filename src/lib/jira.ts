@@ -253,11 +253,12 @@ export function jiraIssue(site: string, issue: IssueResponse): InboxItem {
 export async function listJiraIssues(
   site: string,
   state: "open" | "all",
+  filter?: JiraFilter,
 ): Promise<InboxItem[]> {
   const before = generation;
   const result = await invoke<{ site: string; issues: IssueResponse[] }>(
     "jira_list_issues",
-    { site, state, ...loadJiraFilter(site) },
+    { site, state, ...(filter ?? loadJiraFilter(site)) },
   );
   if (before !== generation)
     throw new Error("Jira connection changed. Refresh and retry.");
