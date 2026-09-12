@@ -2091,7 +2091,6 @@ query InboxIssueRelations($owner: String!, $name: String!, $number: Int!) {
         repository { nameWithOwner }
       }
       subIssues(first: 50) {
-        totalCount
         pageInfo { hasNextPage }
         nodes {
           number title url state updatedAt
@@ -2190,8 +2189,10 @@ fn parse_github_issue_relations(json: &str, repo: &str) -> Result<Value, String>
         .cloned()
         .ok_or_else(|| "GitHub issue not found".to_string())?;
     let mut edges = Vec::new();
+    let mut dropped = false;
     let mut push = |key: &str, label: &str, node: &Value| {
         if edges.len() >= 50 {
+            dropped = true;
             return;
         }
         if let Some(item) = graph_issue_item(node, repo) {
@@ -2215,10 +2216,11 @@ fn parse_github_issue_relations(json: &str, repo: &str) -> Result<Value, String>
             push("children", "Sub-issue", node);
         }
     }
-    let truncated = issue
-        .pointer("/subIssues/pageInfo/hasNextPage")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let truncated = dropped
+        || issue
+            .pointer("/subIssues/pageInfo/hasNextPage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     Ok(json!({ "edges": edges, "truncated": truncated }))
 }
 

@@ -7,7 +7,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
-use crate::jira::{require_config, JiraConfig};
+use crate::jira::{require_config, HttpError, JiraConfig};
 
 const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
 const PAGE_LIMIT: usize = 25;
@@ -27,25 +27,25 @@ fn wiki_request(
     config: &JiraConfig,
     path: &str,
     query: &[(&str, String)],
-) -> Result<Value, String> {
+) -> Result<Value, HttpError> {
     serde_json::from_slice(&wiki_bytes(config, path, query)?)
-        .map_err(|_| "Confluence returned an invalid response".into())
+        .map_err(|_| HttpError::other("Confluence returned an invalid response"))
 }
 
 fn wiki_bytes(
     config: &JiraConfig,
     path: &str,
     query: &[(&str, String)],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, HttpError> {
     if BACKOFF
         .lock()
-        .map_err(|_| "Confluence request state unavailable")?
+        .map_err(|_| HttpError::other("Confluence request state unavailable"))?
         .as_ref()
         .is_some_and(|(site, until)| site == &config.site && *until > Instant::now())
     {
-        return Err(
-            "Confluence requests are paused after a service error. Wait before retrying.".into(),
-        );
+        return Err(HttpError::other(
+            "Confluence requests are paused after a service error. Wait before retrying.",
+        ));
     }
     let authorization = base64::engine::general_purpose::STANDARD
         .encode(format!("{}:{}", config.email, config.token));
@@ -72,15 +72,18 @@ fn wiki_bytes(
                     .clamp(1, 300);
                 *BACKOFF
                     .lock()
-                    .map_err(|_| "Confluence request state unavailable")? = Some((
-                    config.site.clone(),
-                    Instant::now() + Duration::from_secs(seconds),
-                ));
+                    .map_err(|_| HttpError::other("Confluence request state unavailable"))? =
+                    Some((
+                        config.site.clone(),
+                        Instant::now() + Duration::from_secs(seconds),
+                    ));
             }
-            return Err(http_error(status));
+            return Err(HttpError::status(http_error(status), status));
         }
         Err(_) => {
-            return Err("Cannot reach Confluence Cloud. Check your connection and retry.".into())
+            return Err(HttpError::other(
+                "Cannot reach Confluence Cloud. Check your connection and retry.",
+            ))
         }
     };
     let mut bytes = Vec::new();
@@ -88,15 +91,17 @@ fn wiki_bytes(
         .into_reader()
         .take(MAX_RESPONSE + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read Confluence response")?;
+        .map_err(|_| HttpError::other("Cannot read Confluence response"))?;
     if bytes.len() as u64 > MAX_RESPONSE {
-        return Err("Confluence response is too large. Choose a narrower search.".into());
+        return Err(HttpError::other(
+            "Confluence response is too large. Choose a narrower search.",
+        ));
     }
     Ok(bytes)
 }
 
 /// Verify the shared credentials can read Confluence on this site.
-pub(crate) fn probe(config: &JiraConfig) -> Result<Value, String> {
+pub(crate) fn probe(config: &JiraConfig) -> Result<Value, HttpError> {
     wiki_request(config, "user/current", &[])
 }
 
@@ -149,20 +154,22 @@ fn search_cql(query: &str, space: &str) -> Result<String, String> {
     ))
 }
 
-/// Pull the pagination cursor out of a provider `next` link; the URL itself
-/// never reaches the WebView.
-fn next_cursor(page: &Value) -> String {
+/// Pull the pagination token out of a provider `next` link; the URL itself
+/// never reaches the WebView. Returns the parameter name and decoded value —
+/// resending the raw value would percent-encode it a second time.
+fn next_cursor(page: &Value) -> Option<(&'static str, String)> {
     let next = page["_links"]["next"].as_str().unwrap_or_default();
-    let query = next.split_once('?').map(|(_, query)| query).unwrap_or("");
-    for pair in query.split('&') {
-        if let Some(value) = pair.strip_prefix("cursor=") {
-            return value.to_string();
+    let base = tauri::Url::parse("https://confluence.invalid").ok()?;
+    let url = base.join(next).ok()?;
+    for (key, value) in url.query_pairs() {
+        if key == "cursor" {
+            return Some(("cursor", value.into_owned()));
         }
-        if let Some(value) = pair.strip_prefix("start=") {
-            return value.to_string();
+        if key == "start" {
+            return Some(("start", value.into_owned()));
         }
     }
-    String::new()
+    None
 }
 
 #[tauri::command]
@@ -170,14 +177,11 @@ pub async fn confluence_spaces(app: AppHandle, site: String) -> Result<Value, St
     tauri::async_runtime::spawn_blocking(move || {
         let config = require_config(&app, &site)?;
         require_confluence(&config)?;
+        // No `type` filter: personal (`~`-keyed) spaces hold pages too.
         let page = wiki_request(
             &config,
             "space",
-            &[
-                ("limit", "100".into()),
-                ("status", "current".into()),
-                ("type", "global".into()),
-            ],
+            &[("limit", "100".into()), ("status", "current".into())],
         )?;
         let spaces: Vec<Value> = page["results"]
             .as_array()
@@ -205,6 +209,7 @@ pub async fn confluence_search(
     query: String,
     space: String,
     cursor: String,
+    cursor_param: String,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let config = require_config(&app, &site)?;
@@ -217,17 +222,20 @@ pub async fn confluence_search(
         let mut params = vec![
             ("cql", cql),
             ("limit", PAGE_LIMIT.to_string()),
-            (
-                "expand",
-                "space,version,ancestors,history.lastUpdated".into(),
-            ),
+            ("expand", "space,version".into()),
         ];
         if !cursor.is_empty() {
-            // Older sites still paginate `content/search` with `start`.
-            let key = if cursor.bytes().all(|b| b.is_ascii_digit()) {
-                "start"
-            } else {
-                "cursor"
+            // The previous response names its own pagination parameter; older
+            // sites still paginate `content/search` with `start`.
+            let key = match cursor_param.trim() {
+                known @ ("cursor" | "start") => known,
+                _ => {
+                    if cursor.bytes().all(|b| b.is_ascii_digit()) {
+                        "start"
+                    } else {
+                        "cursor"
+                    }
+                }
             };
             params.push((key, cursor.to_string()));
         }
@@ -235,9 +243,11 @@ pub async fn confluence_search(
         if !page["results"].is_array() {
             return Err("Confluence returned an invalid search result".into());
         }
+        let next = next_cursor(&page);
         Ok(json!({
             "results": page["results"],
-            "next": next_cursor(&page),
+            "next": next.as_ref().map(|(_, value)| value.as_str()).unwrap_or_default(),
+            "nextParam": next.map(|(key, _)| key).unwrap_or_default(),
         }))
     })
     .await
@@ -255,11 +265,9 @@ pub async fn confluence_page(app: AppHandle, site: String, id: String) -> Result
         wiki_request(
             &config,
             &format!("content/{id}"),
-            &[(
-                "expand",
-                "body.storage,space,version,ancestors,history.lastUpdated".into(),
-            )],
+            &[("expand", "body.storage,space,version".into())],
         )
+        .map_err(String::from)
     })
     .await
     .map_err(|_| "Confluence page task failed")?
@@ -288,13 +296,14 @@ mod tests {
     }
 
     #[test]
-    fn next_cursor_reads_only_the_cursor_parameter() {
-        let page = json!({"_links":{"next":"/rest/api/search?cql=type%3Dpage&cursor=abc123"}});
-        assert_eq!(next_cursor(&page), "abc123");
+    fn next_cursor_reads_and_decodes_only_the_pagination_parameter() {
+        let page =
+            json!({"_links":{"next":"/rest/api/search?cql=type%3Dpage&cursor=abc%2B123%3D"}});
+        assert_eq!(next_cursor(&page), Some(("cursor", "abc+123=".into())));
         let legacy = json!({"_links":{"next":"/rest/api/content/search?start=25&cql=x"}});
-        assert_eq!(next_cursor(&legacy), "25");
-        assert_eq!(next_cursor(&json!({"_links":{}})), "");
+        assert_eq!(next_cursor(&legacy), Some(("start", "25".into())));
+        assert_eq!(next_cursor(&json!({"_links":{}})), None);
         let hostile = json!({"_links":{"next":"https://evil.test/?cursor=abc"}});
-        assert_eq!(next_cursor(&hostile), "abc");
+        assert_eq!(next_cursor(&hostile), Some(("cursor", "abc".into())));
     }
 }

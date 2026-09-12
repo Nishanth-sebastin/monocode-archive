@@ -179,6 +179,7 @@ import {
 import { inboxAskKey } from "../lib/inboxAsk";
 import {
   JIRA_CHANGE_EVENT,
+  atlassianCapable,
   jiraConnected,
   jiraDetails,
   jiraThread,
@@ -577,10 +578,7 @@ export function InboxView({
         setJiraSite(status.site);
         setConnections(prev => ({
           ...prev,
-          jira:
-            status.connected &&
-            (!(status.capabilities ?? []).length ||
-              status.capabilities.includes("Jira")),
+          jira: status.connected && atlassianCapable(status, "Jira"),
         }));
         setJiraProjects([]);
         setJiraFavorites([]);

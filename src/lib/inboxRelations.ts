@@ -138,7 +138,14 @@ function normalizeEdges(
 ): InboxRelationEdge[] {
   return edges.slice(0, 50).flatMap((edge) => {
     const ref = typeof edge.ref === "string" ? edge.ref.trim() : "";
-    const linked = item(edge.item);
+    let linked: InboxItem | null = null;
+    try {
+      // One malformed target degrades to a ref-only row — it must not
+      // reject the whole relations load.
+      linked = item(edge.item);
+    } catch {
+      linked = null;
+    }
     if (!ref && !linked) return [];
     return [
       {
@@ -162,20 +169,22 @@ export async function loadInboxRelations(
   let edges: InboxRelationEdge[] = [];
   let truncated = false;
   if (item.provider === "jira") {
-    const raw = await invoke<{ edges?: RawEdge[] }>("jira_issue_relations", {
-      site: item.site,
-      id: item.id,
-    });
+    const raw = await invoke<{ edges?: RawEdge[]; truncated?: boolean }>(
+      "jira_issue_relations",
+      { site: item.site, id: item.id },
+    );
+    truncated = raw.truncated === true;
     edges = normalizeEdges(raw.edges ?? [], (node) =>
       node && typeof node === "object" && (node as { id?: string }).id
         ? jiraIssue(item.site ?? "", node as Parameters<typeof jiraIssue>[1])
         : null,
     );
   } else if (item.provider === "azure") {
-    const raw = await invoke<{ edges?: RawEdge[] }>("azure_item_relations", {
-      site: item.site,
-      id: item.id,
-    });
+    const raw = await invoke<{ edges?: RawEdge[]; truncated?: boolean }>(
+      "azure_item_relations",
+      { site: item.site, id: item.id },
+    );
+    truncated = raw.truncated === true;
     edges = normalizeEdges(raw.edges ?? [], (node) =>
       node && typeof node === "object" && (node as { id?: number }).id
         ? azureItem(item.site ?? "", node as Parameters<typeof azureItem>[1])

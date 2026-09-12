@@ -709,7 +709,14 @@ pub async fn azure_item_content(
 /// Only work-item links become relations; attachments, hyperlinks and
 /// artifacts are already shown elsewhere in the detail pane.
 fn relation_target_id(site: &str, url: &str) -> Option<u64> {
-    let rest = url.strip_prefix(&format!("{site}/"))?;
+    // Azure echoes the organization segment verbatim; compare it loosely.
+    if url.len() <= site.len()
+        || !url[..site.len()].eq_ignore_ascii_case(site)
+        || url.as_bytes()[site.len()] != b'/'
+    {
+        return None;
+    }
+    let rest = &url[site.len() + 1..];
     let (path, id) = rest.rsplit_once('/')?;
     if !path.to_ascii_lowercase().ends_with("_apis/wit/workitems") {
         return None;
@@ -749,7 +756,9 @@ pub async fn azure_item_relations(
         let mut edges = Vec::new();
         let mut ids = Vec::new();
         let mut seen = HashSet::new();
+        let mut truncated = false;
         if let Some(relations) = source["relations"].as_array() {
+            truncated = relations.len() > 50;
             for relation in relations.iter().take(50) {
                 let rel = relation["rel"].as_str().unwrap_or_default();
                 if !rel.starts_with("System.LinkTypes.") {
@@ -762,10 +771,10 @@ pub async fn azure_item_relations(
                 };
                 let name = relation["attributes"]["name"]
                     .as_str()
-                    .unwrap_or("related")
-                    .trim()
-                    .to_string();
-                edges.push((target, relation_key(rel, &name), name));
+                    .unwrap_or_default()
+                    .trim();
+                let name = if name.is_empty() { "related" } else { name };
+                edges.push((target, relation_key(rel, name), name));
                 if seen.insert(target) {
                     ids.push(target);
                 }
@@ -805,10 +814,11 @@ pub async fn azure_item_relations(
                 .map(|(target, key, name)| json!({
                     "key": key,
                     "label": name,
-                    "ref": target.to_string(),
+                    "ref": format!("#{target}"),
                     "item": by_id.get(target).cloned().unwrap_or(Value::Null),
                 }))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            "truncated": truncated,
         }))
     })
     .await

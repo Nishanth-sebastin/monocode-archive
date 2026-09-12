@@ -5,7 +5,7 @@ import { Modal } from "./Modal";
 import { Select } from "./Select";
 import { AgentMarkdown } from "../surfaces/AgentMarkdown";
 import { ChevronRight, ExternalLink, LoaderCircle, Search } from "./icons";
-import { jiraConnected } from "../lib/jira";
+import { atlassianCapable, jiraConnected } from "../lib/jira";
 import { MAX_CONTEXT_ITEMS, requestAgentContext } from "../lib/agentContext";
 import {
   confluenceMarkdown,
@@ -38,7 +38,10 @@ export function ConfluencePicker({
   const [space, setSpace] = useState("");
   const [text, setText] = useState("");
   const [results, setResults] = useState<ConfluencePageSummary[]>([]);
-  const [next, setNext] = useState("");
+  const [next, setNext] = useState<{ value: string; param: string }>({
+    value: "",
+    param: "",
+  });
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState("");
   const [selected, setSelected] = useState<Map<string, Selection>>(new Map());
@@ -48,6 +51,7 @@ export function ConfluencePicker({
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const generation = useRef(0);
+  const searchSeq = useRef(0);
   const searching = text.trim() !== "";
 
   useEffect(() => {
@@ -59,10 +63,7 @@ export function ConfluencePicker({
           setConnectError("Connect Atlassian Cloud in Settings to add Confluence pages.");
           return;
         }
-        if (
-          (status.capabilities ?? []).length > 0 &&
-          !status.capabilities.includes("Confluence")
-        ) {
+        if (!atlassianCapable(status, "Confluence")) {
           setConnectError(
             "This Atlassian connection has no Confluence access. Reconnect in Settings with an account that can read Confluence.",
           );
@@ -91,14 +92,17 @@ export function ConfluencePicker({
       .catch(() => {});
   }, [site]);
 
-  const search = (cursor = "") => {
+  const search = (cursor = "", cursorParam = "") => {
     if (!site) return;
+    // A fresh search invalidates any in-flight one — otherwise a stale
+    // response can overwrite or append onto newer results.
+    const seq = ++searchSeq.current;
     const current = generation.current;
     setLoading(true);
     setListError("");
-    void confluenceSearch(site, { text, space, cursor })
+    void confluenceSearch(site, { text, space, cursor, cursorParam })
       .then((page) => {
-        if (current !== generation.current) return;
+        if (current !== generation.current || seq !== searchSeq.current) return;
         setResults((existing) =>
           cursor
             ? [
@@ -109,16 +113,17 @@ export function ConfluencePicker({
               ]
             : page.results,
         );
-        setNext(page.next);
+        setNext({ value: page.next, param: page.nextParam });
       })
       .catch((reason: unknown) => {
-        if (current === generation.current)
+        if (current === generation.current && seq === searchSeq.current)
           setListError(
             reason instanceof Error ? reason.message : String(reason),
           );
       })
       .finally(() => {
-        if (current === generation.current) setLoading(false);
+        if (current === generation.current && seq === searchSeq.current)
+          setLoading(false);
       });
   };
 
@@ -142,7 +147,11 @@ export function ConfluencePicker({
     const current = generation.current;
     void confluencePage(site, summary.id)
       .then((page) => {
-        if (current !== generation.current || !page) return;
+        if (current !== generation.current) return;
+        if (!page) {
+          setPreviewError("This page is unavailable.");
+          return;
+        }
         setPages((existing) => new Map(existing).set(summary.id, page));
       })
       .catch((reason: unknown) => {
@@ -188,7 +197,8 @@ export function ConfluencePicker({
           while (nextIndex < wanted.length) {
             const id = wanted[nextIndex++];
             if (!fetched.has(id)) {
-              const page = await confluencePage(site, id);
+              // One unavailable page skips; it must not fail the send.
+              const page = await confluencePage(site, id).catch(() => null);
               if (page) fetched.set(id, page);
             }
           }
@@ -368,17 +378,16 @@ export function ConfluencePicker({
                               </div>
                             ) : null}
                           </>
+                        ) : previewError ? (
+                          <p role="alert" className="text-red-400">
+                            {previewError}
+                          </p>
                         ) : (
                           <p className="flex items-center gap-2 text-content/45">
                             <LoaderCircle className="size-3.5 animate-spin" strokeWidth={1.75} />
                             Loading page…
                           </p>
                         )}
-                        {previewError ? (
-                          <p role="alert" className="text-red-400">
-                            {previewError}
-                          </p>
-                        ) : null}
                       </div>
                     ) : null}
                   </div>
@@ -409,11 +418,11 @@ export function ConfluencePicker({
                   </button>
                 </p>
               ) : null}
-              {next && !loading ? (
+              {next.value && !loading ? (
                 <button
                   type="button"
                   className="w-full px-3 py-2 text-left text-content/60 hover:bg-content/5"
-                  onClick={() => search(next)}
+                  onClick={() => search(next.value, next.param)}
                 >
                   Load more pages
                 </button>

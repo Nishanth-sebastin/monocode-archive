@@ -7,6 +7,7 @@ import { inboxItemStatus, type InboxItem } from "../lib/githubTasks";
 import {
   contextFromTickets,
   contextTicketKey,
+  MAX_CONTEXT_ITEMS,
   requestAgentContext,
 } from "../lib/agentContext";
 import {
@@ -60,10 +61,14 @@ export function InboxRelated({ item }: { item: InboxItem }) {
 
   const selectedItems = () => {
     const wanted = new Set(selected);
-    return (relations?.groups ?? [])
-      .flatMap((group) => group.edges)
-      .filter((edge) => edge.item && wanted.has(contextTicketKey(edge.item)))
-      .map((edge) => edge.item!);
+    // The same target can legitimately appear under two groups — send it once.
+    const items = new Map<string, InboxItem>();
+    for (const edge of (relations?.groups ?? []).flatMap((group) => group.edges)) {
+      if (!edge.item) continue;
+      const id = contextTicketKey(edge.item);
+      if (wanted.has(id)) items.set(id, edge.item);
+    }
+    return [...items.values()];
   };
 
   const send = () => {
@@ -73,11 +78,20 @@ export function InboxRelated({ item }: { item: InboxItem }) {
       requestAgentContext({
         tickets: items,
         context: contextFromTickets(items),
+        cwd: item.projectPath || undefined,
       });
     } catch (reason) {
       setSendError(reason instanceof Error ? reason.message : String(reason));
     }
   };
+
+  // PRs and CI items have no provider-native work-item relations.
+  if (
+    (item.provider === "github" || item.provider === "gitlab") &&
+    item.kind !== "issue"
+  ) {
+    return null;
+  }
 
   return (
     <details
@@ -135,6 +149,10 @@ export function InboxRelated({ item }: { item: InboxItem }) {
                       <ContextCheckbox
                         className=""
                         label={`Include ${edge.ref}`}
+                        disabled={
+                          !selected.includes(id) &&
+                          selected.length >= MAX_CONTEXT_ITEMS - 1
+                        }
                         checked={selected.includes(id)}
                         onChange={() =>
                           setSelected((current) =>

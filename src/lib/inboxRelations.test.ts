@@ -1,9 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import type { InboxItem } from "./githubTasks";
 import {
   groupInboxRelations,
+  loadInboxRelations,
   type InboxRelationEdge,
 } from "./inboxRelations";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+const call = vi.mocked(invoke);
 
 const item = (number: number, over: Partial<InboxItem> = {}): InboxItem => ({
   provider: "jira",
@@ -98,5 +103,46 @@ describe("groupInboxRelations", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].key).toBe("related");
     expect(groups[0].edges).toHaveLength(1);
+  });
+});
+
+describe("loadInboxRelations", () => {
+  it("degrades a malformed Jira target to a ref-only row instead of failing", async () => {
+    call.mockResolvedValue({
+      edges: [
+        { key: "related", label: "relates to", ref: "ENG-9", item: { broken: true } },
+        {
+          key: "parent",
+          label: "Parent",
+          ref: "ENG-2",
+          item: {
+            id: "10002",
+            key: "ENG-2",
+            fields: {
+              summary: "Parent issue",
+              status: { name: "In Progress", statusCategory: { key: "indeterminate" } },
+              project: { key: "ENG", name: "Engineering" },
+              updated: "2026-01-01T00:00:00Z",
+            },
+          },
+        },
+      ],
+      truncated: true,
+    });
+    const relations = await loadInboxRelations(item(1));
+    expect(call).toHaveBeenCalledWith("jira_issue_relations", {
+      site: "https://team.atlassian.net",
+      id: "1",
+    });
+    expect(relations.truncated).toBe(true);
+    const broken = relations.groups
+      .find((group) => group.key === "related")
+      ?.edges[0];
+    expect(broken?.ref).toBe("ENG-9");
+    expect(broken?.item).toBeNull();
+    expect(
+      relations.groups.find((group) => group.key === "parent")?.edges[0].item
+        ?.identifier,
+    ).toBe("ENG-2");
   });
 });

@@ -36,6 +36,16 @@ const threads = new Map<string, GithubWorkItemThread>();
 export function jiraConnected(): Promise<JiraStatus> {
   return invoke("jira_status");
 }
+
+/** Capability gating: an empty list means the connection predates capability
+ * tracking — treat the product as unknown and let requests decide. */
+export function atlassianCapable(
+  status: Pick<JiraStatus, "capabilities">,
+  product: "Jira" | "Confluence",
+): boolean {
+  const capabilities = status.capabilities ?? [];
+  return !capabilities.length || capabilities.includes(product);
+}
 export async function saveJiraConfig(
   site: string,
   email: string,

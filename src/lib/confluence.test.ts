@@ -16,9 +16,7 @@ const page = (storage: string, extra: Partial<ConfluencePage> = {}): ConfluenceP
   spaceKey: "ENG",
   spaceName: "Engineering",
   version: 7,
-  updatedAt: "2026-01-01T00:00:00Z",
   url: `${site}/wiki/spaces/ENG/pages/123456`,
-  excerpt: "",
   storage,
   ...extra,
 });
@@ -62,6 +60,30 @@ describe("confluenceMarkdown", () => {
       true,
     );
   });
+
+  it("reads namespaced ri: attributes on links, pages, attachments and users", () => {
+    const storage = [
+      '<ac:link><ri:url ri:value="https://docs.test/guide" /><ac:link-body>Guide</ac:link-body></ac:link>',
+      '<ac:link><ri:page ri:content-title="Runbook" /></ac:link>',
+      '<ac:image><ri:attachment ri:filename="diagram.png" /></ac:image>',
+      '<ri:user ri:userkey="ada" />',
+    ].join("");
+    const { text } = confluenceMarkdown(storage);
+    expect(text).toContain("[Guide](https://docs.test/guide)");
+    expect(text).toContain("[Page: Runbook]");
+    expect(text).toContain("[Image: diagram.png]");
+    expect(text).toContain("@ada");
+  });
+
+  it("keeps CDATA code containing > intact and reads task status elements", () => {
+    const storage = [
+      '<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[if (a > b) { f(); }]]></ac:plain-text-body></ac:structured-macro>',
+      '<ac:task-list><ac:task><ac:task-id>1</ac:task-id><ac:task-status>complete</ac:task-status><ac:task-body><span>Done thing</span></ac:task-body></ac:task></ac:task-list>',
+    ].join("");
+    const { text } = confluenceMarkdown(storage);
+    expect(text).toContain("if (a > b) { f(); }");
+    expect(text).toContain("- [x] Done thing");
+  });
 });
 
 describe("confluenceSections", () => {
@@ -93,6 +115,22 @@ describe("confluenceSections", () => {
     expect(sections[1].text).toBe("Detail body");
     expect(sections[1].level).toBe(2);
     expect(sections[2].level).toBe(3);
+  });
+
+  it("ignores #-lines inside fenced code blocks", () => {
+    const markdown = [
+      "# Real",
+      "",
+      "```",
+      "# just a comment",
+      "## also not a heading",
+      "```",
+      "",
+      "tail",
+    ].join("\n");
+    const sections = confluenceSections(markdown);
+    expect(sections.map((section) => section.title)).toEqual(["Real"]);
+    expect(sections[0].text).toContain("# just a comment");
   });
 });
 

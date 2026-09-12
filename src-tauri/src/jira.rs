@@ -140,11 +140,14 @@ pub async fn jira_set_config(
                     .unwrap_or(&config.email)
                     .to_string();
                 config.capabilities.push("Jira".into());
-                if wiki.is_ok() {
+                // Only a definitive denial records Confluence as absent; a
+                // transient probe failure leaves it enabled for per-request
+                // errors instead of blocking it until the next reconnect.
+                if !matches!(&wiki, Err(error) if error.denied()) {
                     config.capabilities.push("Confluence".into());
                 }
             }
-            (Err(_), Ok(user)) => {
+            (Err(jira_error), Ok(user)) => {
                 // The site may provision Confluence without Jira for this account.
                 if user["accountId"].as_str().unwrap_or_default().is_empty()
                     && user["displayName"].as_str().unwrap_or_default().is_empty()
@@ -155,9 +158,14 @@ pub async fn jira_set_config(
                     .as_str()
                     .unwrap_or(&config.email)
                     .to_string();
+                if !jira_error.denied() {
+                    // Jira's answer was inconclusive — keep it enabled rather
+                    // than silently downgrading a working connection.
+                    config.capabilities.push("Jira".into());
+                }
                 config.capabilities.push("Confluence".into());
             }
-            (Err(jira_error), Err(_)) => return Err(jira_error),
+            (Err(jira_error), Err(_)) => return Err(jira_error.into()),
         }
         fs::create_dir_all(path.parent().ok_or("Cannot locate Jira settings")?)
             .map_err(|_| "Cannot create Jira settings")?;
@@ -183,29 +191,65 @@ fn http_error(status: u16) -> String {
     }
 }
 
+/// The HTTP status rides along with the message so capability probing can tell
+/// a definitive denial (401/403/404) from a transient failure.
+#[derive(Debug)]
+pub(crate) struct HttpError {
+    message: String,
+    status: Option<u16>,
+}
+
+impl HttpError {
+    pub(crate) fn status(message: impl Into<String>, status: u16) -> Self {
+        Self {
+            message: message.into(),
+            status: Some(status),
+        }
+    }
+
+    pub(crate) fn other(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: None,
+        }
+    }
+
+    /// The product answered with an auth/permission/absence status — only then
+    /// is it safe to record the capability as absent.
+    pub(crate) fn denied(&self) -> bool {
+        matches!(self.status, Some(401 | 403 | 404))
+    }
+}
+
+impl From<HttpError> for String {
+    fn from(error: HttpError) -> Self {
+        error.message
+    }
+}
+
 pub(crate) fn request(
     config: &JiraConfig,
     path: &str,
     query: &[(&str, String)],
-) -> Result<Value, String> {
+) -> Result<Value, HttpError> {
     serde_json::from_slice(&request_bytes(config, path, query)?)
-        .map_err(|_| "Jira returned an invalid response".into())
+        .map_err(|_| HttpError::other("Jira returned an invalid response"))
 }
 
 fn request_bytes(
     config: &JiraConfig,
     path: &str,
     query: &[(&str, String)],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, HttpError> {
     if BACKOFF
         .lock()
-        .map_err(|_| "Jira request state unavailable")?
+        .map_err(|_| HttpError::other("Jira request state unavailable"))?
         .as_ref()
         .is_some_and(|(site, until)| site == &config.site && *until > Instant::now())
     {
-        return Err(
-            "Jira requests are paused after a service error. Wait before refreshing.".into(),
-        );
+        return Err(HttpError::other(
+            "Jira requests are paused after a service error. Wait before refreshing.",
+        ));
     }
     let authorization = base64::engine::general_purpose::STANDARD
         .encode(format!("{}:{}", config.email, config.token));
@@ -232,23 +276,29 @@ fn request_bytes(
                     .clamp(1, 300);
                 *BACKOFF
                     .lock()
-                    .map_err(|_| "Jira request state unavailable")? = Some((
+                    .map_err(|_| HttpError::other("Jira request state unavailable"))? = Some((
                     config.site.clone(),
                     Instant::now() + Duration::from_secs(seconds),
                 ));
             }
-            return Err(http_error(status));
+            return Err(HttpError::status(http_error(status), status));
         }
-        Err(_) => return Err("Cannot reach Jira Cloud. Check your connection and retry.".into()),
+        Err(_) => {
+            return Err(HttpError::other(
+                "Cannot reach Jira Cloud. Check your connection and retry.",
+            ))
+        }
     };
     let mut bytes = Vec::new();
     response
         .into_reader()
         .take(MAX_RESPONSE + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read Jira response")?;
+        .map_err(|_| HttpError::other("Cannot read Jira response"))?;
     if bytes.len() as u64 > MAX_RESPONSE {
-        return Err("Jira response is too large. Choose a narrower filter.".into());
+        return Err(HttpError::other(
+            "Jira response is too large. Choose a narrower filter.",
+        ));
     }
     Ok(bytes)
 }
@@ -305,7 +355,7 @@ pub async fn jira_list_issues(
             if !token.is_empty() {
                 query.push(("nextPageToken", token.to_string()));
             }
-            request(&config, "search/jql", &query)
+            request(&config, "search/jql", &query).map_err(String::from)
         })?;
         Ok(json!({ "site": config.site, "issues": issues }))
     })
@@ -413,6 +463,7 @@ pub async fn jira_issue_content(
                 &[("fields", "description,creator,attachment".into())],
             )
         }
+        .map_err(String::from)
     })
     .await
     .map_err(|_| "Jira details task failed")?
@@ -428,9 +479,9 @@ fn relation_key(name: &str, outward: bool) -> String {
     }
 }
 
-fn push_edge(edges: &mut Vec<Value>, key: &str, label: &str, issue: &Value) {
+fn push_edge(edges: &mut Vec<Value>, key: &str, label: &str, issue: &Value) -> bool {
     if edges.len() >= 50 {
-        return;
+        return false;
     }
     edges.push(json!({
         "key": key,
@@ -438,19 +489,23 @@ fn push_edge(edges: &mut Vec<Value>, key: &str, label: &str, issue: &Value) {
         "ref": issue["key"].as_str().unwrap_or_default(),
         "item": issue,
     }));
+    true
 }
 
-fn relation_edges(fields: &Value) -> Vec<Value> {
+fn relation_edges(fields: &Value) -> (Vec<Value>, bool) {
     let mut edges = Vec::new();
+    let mut truncated = false;
     if fields["parent"]["key"].is_string() {
-        push_edge(&mut edges, "parent", "Parent", &fields["parent"]);
+        truncated |= !push_edge(&mut edges, "parent", "Parent", &fields["parent"]);
     }
     if let Some(subtasks) = fields["subtasks"].as_array() {
+        truncated |= subtasks.len() > 50;
         for subtask in subtasks.iter().take(50) {
-            push_edge(&mut edges, "children", "Sub-task", subtask);
+            truncated |= !push_edge(&mut edges, "children", "Sub-task", subtask);
         }
     }
     if let Some(links) = fields["issuelinks"].as_array() {
+        truncated |= links.len() > 50;
         for link in links.iter().take(50) {
             let (outward, linked) = if link["outwardIssue"].is_object() {
                 (true, &link["outwardIssue"])
@@ -463,10 +518,10 @@ fn relation_edges(fields: &Value) -> Vec<Value> {
             let label = link["type"][if outward { "outward" } else { "inward" }]
                 .as_str()
                 .unwrap_or("related");
-            push_edge(&mut edges, &relation_key(name, outward), label, linked);
+            truncated |= !push_edge(&mut edges, &relation_key(name, outward), label, linked);
         }
     }
-    edges
+    (edges, truncated)
 }
 
 #[tauri::command]
@@ -485,7 +540,8 @@ pub async fn jira_issue_relations(
             &format!("issue/{id}"),
             &[("fields", "parent,subtasks,issuelinks".into())],
         )?;
-        Ok(json!({ "edges": relation_edges(&issue["fields"]) }))
+        let (edges, truncated) = relation_edges(&issue["fields"]);
+        Ok(json!({ "edges": edges, "truncated": truncated }))
     })
     .await
     .map_err(|_| "Jira relations task failed")?
@@ -619,7 +675,8 @@ mod tests {
                 {"type":{"name":"Blocks","inward":"is blocked by","outward":"blocks"}}
             ]
         });
-        let edges = relation_edges(&fields);
+        let (edges, truncated) = relation_edges(&fields);
+        assert!(!truncated);
         let rows: Vec<(&str, &str, &str)> = edges
             .iter()
             .map(|e| {

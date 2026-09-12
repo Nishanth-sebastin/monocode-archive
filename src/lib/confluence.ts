@@ -9,9 +9,7 @@ export type ConfluencePageSummary = {
   spaceKey: string;
   spaceName: string;
   version: number;
-  updatedAt: string;
   url: string;
-  excerpt: string;
 };
 
 export type ConfluencePage = ConfluencePageSummary & {
@@ -35,14 +33,18 @@ export function confluenceSpaces(site: string): Promise<ConfluenceSpace[]> {
 
 export function confluenceSearch(
   site: string,
-  query: { text: string; space: string; cursor?: string },
-): Promise<{ results: ConfluencePageSummary[]; next: string }> {
-  return invoke<{ results?: unknown[]; next?: string }>("confluence_search", {
-    site,
-    query: query.text,
-    space: query.space,
-    cursor: query.cursor ?? "",
-  }).then((result) => ({
+  query: { text: string; space: string; cursor?: string; cursorParam?: string },
+): Promise<{ results: ConfluencePageSummary[]; next: string; nextParam: string }> {
+  return invoke<{ results?: unknown[]; next?: string; nextParam?: string }>(
+    "confluence_search",
+    {
+      site,
+      query: query.text,
+      space: query.space,
+      cursor: query.cursor ?? "",
+      cursorParam: query.cursorParam ?? "",
+    },
+  ).then((result) => ({
     results: (result.results ?? [])
       .slice(0, 25)
       .flatMap((row) => {
@@ -50,6 +52,7 @@ export function confluenceSearch(
         return page ? [page] : [];
       }),
     next: typeof result.next === "string" ? result.next : "",
+    nextParam: typeof result.nextParam === "string" ? result.nextParam : "",
   }));
 }
 
@@ -72,10 +75,7 @@ type RawPage = {
   status?: unknown;
   space?: { key?: unknown; name?: unknown };
   version?: { number?: unknown };
-  ancestors?: { title?: unknown }[];
-  history?: { lastUpdated?: { when?: unknown } };
   _links?: { webui?: unknown; base?: unknown };
-  excerpt?: unknown;
 };
 
 function pageSummary(site: string, raw: unknown): ConfluencePageSummary | null {
@@ -98,12 +98,7 @@ function pageSummary(site: string, raw: unknown): ConfluencePageSummary | null {
       typeof row.version?.number === "number" && row.version.number > 0
         ? row.version.number
         : 0,
-    updatedAt:
-      typeof row.history?.lastUpdated?.when === "string"
-        ? row.history.lastUpdated.when
-        : "",
     url: webui ? `${site}/wiki${webui}` : "",
-    excerpt: typeof row.excerpt === "string" ? row.excerpt : "",
   };
 }
 
@@ -120,13 +115,28 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
     return { text: "", truncated: false };
   }
   const template = document.createElement("template");
-  template.innerHTML = storage.slice(0, MAX_STORAGE);
+  // HTML parsing ends a bogus <![CDATA[ comment at the first `>`, so lift
+  // CDATA bodies into marker-delimited text before parsing.
+  template.innerHTML = storage
+    .slice(0, MAX_STORAGE)
+    .replace(
+      /<!\[CDATA\[([\s\S]*?)\]\]>/g,
+      (_match, text: string) =>
+        `\uE000${text
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")}\uE001`,
+    );
   let nodes = 0;
   let truncated = storage.length > MAX_STORAGE;
   const escape = (value: string) =>
     value.replace(/[\\`*_{}\[\]<>#|]/g, "\\$&");
+  const stripMarkers = (value: string) => value.replace(/[\uE000\uE001]/g, "");
   const attr = (node: Element, name: string) =>
-    node.getAttribute(name) ?? node.getAttribute(`ac:${name}`) ?? "";
+    node.getAttribute(name) ??
+    node.getAttribute(`ac:${name}`) ??
+    node.getAttribute(`ri:${name}`) ??
+    "";
   const find = (node: Element, tag: string): Element | undefined =>
     Array.from(node.getElementsByTagName("*")).find(
       (el) => el.tagName.toLowerCase() === tag,
@@ -134,7 +144,7 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
   // HTML parsing turns <![CDATA[…]]> into a bogus comment; recover its text.
   const collectText = (node: Node): string => {
     if (node.nodeType === 3 || node.nodeType === 4)
-      return node.textContent ?? "";
+      return stripMarkers(node.textContent ?? "");
     if (node.nodeType === 8)
       return (node.textContent ?? "")
         .replace(/^\[CDATA\[/, "")
@@ -146,7 +156,7 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
       truncated = true;
       return "";
     }
-    if (node.nodeType === 3) return escape(node.textContent ?? "");
+    if (node.nodeType === 3) return escape(stripMarkers(node.textContent ?? ""));
     if (!(node instanceof Element)) return "";
     const tag = node.tagName.toLowerCase();
     if (
@@ -185,7 +195,40 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
       return "";
     }
     if (tag === "ac:plain-text-body") return "";
-    if (tag === "ac:link" || tag === "ac:link-body")
+    if (tag === "ac:link") {
+      const link = find(node, "ri:url");
+      // ri:url is not void in HTML parsing — `<ri:url/>` swallows the
+      // following ac:link-body as its own child, so find it anywhere inside.
+      const linkBody = find(node, "ac:link-body");
+      const body = linkBody
+        ? Array.from(linkBody.childNodes)
+            .map((child) => render(child, depth + 1))
+            .join("")
+        : Array.from(node.childNodes)
+            .filter(
+              (child) =>
+                !(
+                  child instanceof Element &&
+                  child.tagName.toLowerCase() === "ri:url"
+                ),
+            )
+            .map((child) => render(child, depth + 1))
+            .join("");
+      if (!link) return body;
+      try {
+        const url = new URL(attr(link, "value"));
+        if (
+          ["https:", "http:"].includes(url.protocol) &&
+          !url.username &&
+          !url.password
+        )
+          return `[${body.trim() || escape(url.hostname)}](${url.href.replace(/\(/g, "%28").replace(/\)/g, "%29")})`;
+      } catch {
+        /* unsafe href — keep the link text only */
+      }
+      return body;
+    }
+    if (tag === "ac:link-body")
       return Array.from(node.childNodes)
         .map((child) => render(child, depth + 1))
         .join("");
@@ -213,7 +256,10 @@ export function confluenceMarkdown(storage: string): { text: string; truncated: 
     if (tag === "ri:user") return `@${escape(attr(node, "userkey") || "user")}`;
     if (tag === "ac:emoticon" || tag === "ac:placeholder") return "";
     if (tag === "ac:task") {
-      const status = attr(node, "status") === "complete" ? "x" : " ";
+      const status =
+        find(node, "ac:task-status")?.textContent?.trim() === "complete"
+          ? "x"
+          : " ";
       const taskBody = find(node, "ac:task-body");
       const body = taskBody
         ? Array.from(taskBody.childNodes)
@@ -275,6 +321,7 @@ export function confluenceSections(markdown: string): ConfluenceSection[] {
   const sections: ConfluenceSection[] = [];
   const lines = markdown.split("\n");
   let current: { title: string; level: number; body: string[] } | null = null;
+  let fenced = false;
   let index = 0;
   const flush = () => {
     if (!current) return;
@@ -287,7 +334,9 @@ export function confluenceSections(markdown: string): ConfluenceSection[] {
     current = null;
   };
   for (const line of lines) {
-    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+    // `#` lines inside fenced code are code, not headings.
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    const heading = fenced ? null : /^(#{1,6})\s+(.+)$/.exec(line);
     if (heading) {
       flush();
       current = {
