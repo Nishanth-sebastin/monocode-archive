@@ -4,7 +4,8 @@ import { type TranscriptSelection } from "../lib/transcriptSelection";
 
 type Props = {
   selection: TranscriptSelection | null;
-  onAddToChat: (text: string, responseId?: string) => void;
+  onAddToChat?: (text: string, responseId?: string) => void;
+  onAddToNotes?: (text: string) => void;
   onDismiss: () => void;
   onSendToAgent?: (text: string, responseId?: string) => void;
 };
@@ -12,6 +13,7 @@ type Props = {
 export function TranscriptSelectionMenu({
   selection,
   onAddToChat,
+  onAddToNotes,
   onDismiss,
   onSendToAgent,
 }: Props) {
@@ -40,11 +42,19 @@ export function TranscriptSelectionMenu({
       width={180}
       ariaLabel="Selected text actions"
       items={[
-        { kind: "item", id: "add", label: "Add to chat" },
-        ...(onSendToAgent ? [{ kind: "item" as const, id: "send", label: "Send to agent…" }] : []),
+        ...(onAddToChat
+          ? [{ kind: "item" as const, id: "add", label: "Add to chat" }]
+          : []),
+        ...(onAddToNotes
+          ? [{ kind: "item" as const, id: "note", label: "Add to notes" }]
+          : []),
+        ...(onSendToAgent
+          ? [{ kind: "item" as const, id: "send", label: "Send to agent…" }]
+          : []),
       ]}
       onPick={(id) => {
-        if (id === "add") onAddToChat(selection.text, selection.responseId);
+        if (id === "add") onAddToChat?.(selection.text, selection.responseId);
+        else if (id === "note") onAddToNotes?.(selection.text);
         else onSendToAgent?.(selection.text, selection.responseId);
         window.getSelection()?.removeAllRanges();
         onDismiss();

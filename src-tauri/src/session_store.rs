@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -252,10 +252,17 @@ pub fn session_search(
 }
 
 #[tauri::command(async)]
-pub fn session_delete(store: State<'_, SessionStore>, session_id: String) -> Result<(), String> {
+pub fn session_delete(
+    app: AppHandle,
+    store: State<'_, SessionStore>,
+    session_id: String,
+) -> Result<(), String> {
     validate_id(&session_id, "session")?;
     let conn = store.conn.lock().map_err(|_| "Session store is locked")?;
-    delete_session(&conn, &session_id).map_err(|e| e.to_string())
+    delete_session(&conn, &session_id).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit(crate::reminders::CHANGED, ());
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -574,7 +581,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     if current < 13 {
+        crate::notes::ensure_notes_table(conn)?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?1)",
+            params![now_millis()],
+        )?;
+    }
+    if current < 14 {
         // Effective checkout is part of model identity; keep history reads covered.
+        // This fork shipped the rebuild as v13, so databases that recorded that
+        // version still get the wider index here.
         conn.execute_batch(
             "DROP INDEX IF EXISTS sessions_cwd_cover_idx;
              CREATE INDEX sessions_cwd_cover_idx
@@ -584,7 +600,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                             linked_work_item_json, worktree_cwd);",
         )?;
         conn.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?1)",
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (14, ?1)",
             params![now_millis()],
         )?;
     }
@@ -612,6 +628,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          ON sessions (id) WHERE inbox_ask IS NOT NULL;",
     )?;
     crate::notes::ensure_notes_table(conn)?;
+    crate::reminders::ensure_table(conn)?;
     Ok(())
 }
 

@@ -305,6 +305,17 @@ export const SessionPane = memo(function SessionPane({
     },
     [session.cwd, session.harness, session.id, session.title],
   );
+  const saveSelectionNote = useCallback(
+    (text: string) => {
+      void createNote({
+        title: noteTitle(text),
+        body: text,
+        sourceSessionId: session.id,
+        sourceCwd: session.cwd,
+      });
+    },
+    [session.cwd, session.id],
+  );
 
   useEffect(() => {
     if (!addToChatTarget) return;
@@ -556,6 +567,7 @@ export const SessionPane = memo(function SessionPane({
               onAddToChat={(text, responseId) => addSelectionToChat(text, "quote", `${session.title} · session ${session.id} · response ${responseId ?? "unknown"} · ${session.harness} · ${sessionWorkCwd(session)}`)}
               onSendToAgent={(text, responseId) => requestAgentContext({ context: contextFromText("Selected agent response", text, `${session.title} · session ${session.id} · response ${responseId ?? "unknown"} · ${session.harness} · ${sessionWorkCwd(session)}`), sourceSessionId: session.id, cwd: sessionWorkCwd(session) })}
               onSaveNote={notesEnabled ? saveNote : undefined}
+              onSaveSelectionNote={notesEnabled ? saveSelectionNote : undefined}
               onOpenFile={onOpenFile}
               onOpenDiff={onOpenDiff}
               onOpenPlan={openPlan}

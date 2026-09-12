@@ -19,6 +19,8 @@ import {
   type ProjectTerminalDock,
 } from "./projectTerminal";
 import { normalizeProjectPath } from "./recents";
+import { pathKey } from "./paths";
+import { reconcileProjectReturn, type ProjectReturnMemory } from "./projectReturn";
 import type { InboxAskContext } from "./inboxAsk";
 import {
   HARNESSES,
@@ -49,6 +51,7 @@ export type WorkspaceSnapshot = {
   activeTabId: string;
   projectCwd: string;
   projectTerminals: ProjectTerminalDock[];
+  projectReturnTargets?: { projectPath: string; tabId?: string; paneId?: string }[];
 };
 
 export function collectWorkspaceSnapshot(
@@ -56,32 +59,65 @@ export function collectWorkspaceSnapshot(
   sessions: Session[],
   activeTabId: string,
   projectCwd: string,
+  memory: ProjectReturnMemory,
   projectTerminals: ProjectTerminalDock[] = [],
 ): WorkspaceSnapshot {
-  return withoutInboxSessions({
-    tabs: tabs
-      .map(sanitizeTab)
-      .filter((tab): tab is WorkspaceTab => tab != null),
-    sessions: sessions
-      .map(sessionStub)
-      .filter((stub): stub is WorkspaceSessionStub => stub != null),
+  const snapshot = withoutInboxSessions({
+    tabs: tabs.map(sanitizeTab).filter((tab): tab is WorkspaceTab => tab != null),
+    sessions: sessions.map(sessionStub).filter((stub): stub is WorkspaceSessionStub => stub != null),
     activeTabId,
     projectCwd: projectCwd.trim() || "~",
     projectTerminals: projectTerminals
       .map(sanitizeProjectTerminal)
       .filter((dock): dock is ProjectTerminalDock => dock != null),
   });
+  return withProjectReturnTargets(snapshot, memory);
+}
+
+function withProjectReturnTargets(
+  snapshot: WorkspaceSnapshot,
+  memory: ProjectReturnMemory,
+): WorkspaceSnapshot {
+  const valid = reconcileProjectReturn({
+    ...snapshot,
+    memory,
+    activeTabId: "",
+  });
+  return {
+    ...snapshot,
+    projectReturnTargets: [...valid].map(([projectPath, paneId]) => ({
+      projectPath,
+      tabId: paneId,
+    })),
+  };
+}
+
+function parseProjectReturnTargets(raw: unknown): ProjectReturnMemory {
+  const memory = new Map<string, string>();
+  if (!Array.isArray(raw)) return memory;
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    if (!("projectPath" in entry)) continue;
+    const projectPath = (entry as { projectPath?: unknown }).projectPath;
+    if (typeof projectPath !== "string" || !projectPath.trim()) continue;
+
+    const remembered =
+      (entry as { paneId?: unknown }).paneId ??
+      (entry as { tabId?: unknown }).tabId;
+    if (typeof remembered !== "string" || !remembered.trim()) continue;
+
+    memory.set(pathKey(projectPath), remembered.trim());
+  }
+  return memory;
 }
 
 /** Also removes tabs saved by the earlier, persistent Inbox implementation. */
 function withoutInboxSessions(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
-  const inboxIds = snapshot.sessions
-    .filter((session) => session.inboxAsk)
-    .map((session) => session.id);
+  const inboxIds = snapshot.sessions.filter(session => session.inboxAsk).map(session => session.id);
   if (inboxIds.length === 0) return snapshot;
   let tabs = snapshot.tabs;
   for (const id of inboxIds) {
-    tabs = tabs.flatMap((tab) => {
+    tabs = tabs.flatMap(tab => {
       if (!leafIds(tab.layout).includes(id)) return [tab];
       const next = closeLeaf(tab, id);
       return next ? [next] : [];
@@ -90,10 +126,10 @@ function withoutInboxSessions(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
   return {
     ...snapshot,
     tabs,
-    sessions: snapshot.sessions.filter((session) => !session.inboxAsk),
-    activeTabId: tabs.some((tab) => tab.id === snapshot.activeTabId)
+    sessions: snapshot.sessions.filter(session => !session.inboxAsk),
+    activeTabId: tabs.some(tab => tab.id === snapshot.activeTabId)
       ? snapshot.activeTabId
-      : (tabs[0]?.id ?? ""),
+      : tabs[0]?.id ?? "",
   };
 }
 
@@ -105,6 +141,7 @@ export function parseWorkspaceSnapshot(raw: unknown): WorkspaceSnapshot | null {
     activeTabId?: unknown;
     projectCwd?: unknown;
     projectTerminals?: unknown;
+    projectReturnTargets?: unknown;
   };
   if (!Array.isArray(value.tabs) || typeof value.activeTabId !== "string") {
     return null;
@@ -130,14 +167,13 @@ export function parseWorkspaceSnapshot(raw: unknown): WorkspaceSnapshot | null {
         .map(sanitizeProjectTerminal)
         .filter((dock): dock is ProjectTerminalDock => dock != null)
     : [];
-  const snapshot = withoutInboxSessions({
-    tabs,
-    sessions,
-    activeTabId,
-    projectCwd,
-    projectTerminals,
-  });
-  return snapshot.tabs.length > 0 ? snapshot : null;
+  const snapshot = withoutInboxSessions({ tabs, sessions, activeTabId, projectCwd, projectTerminals });
+  return snapshot.tabs.length > 0
+    ? withProjectReturnTargets(
+        snapshot,
+        parseProjectReturnTargets(value.projectReturnTargets),
+      )
+    : null;
 }
 
 export function workspaceSnapshotKey(snapshot: WorkspaceSnapshot): string {
@@ -173,9 +209,7 @@ export function hydrateWorkspaceSnapshot(
     const stub = stubs.get(id);
     const base = record ?? (stub ? sessionFromStub(stub) : null);
     if (!base || base.inboxAsk) return null;
-    const next = interruptedIds.has(id)
-      ? markTurnInterrupted(base)
-      : { ...base, busy: false };
+    const next = interruptedIds.has(id) ? markTurnInterrupted(base) : { ...base, busy: false };
     sessions.set(id, next);
     return next;
   };
@@ -216,7 +250,7 @@ export function hydrateWorkspaceSnapshot(
   const projectCwd =
     parsed.projectCwd !== "~"
       ? parsed.projectCwd
-      : (sessions.values().next().value?.cwd ?? "~");
+      : sessions.values().next().value?.cwd ?? "~";
 
   return {
     tabs,
@@ -224,6 +258,12 @@ export function hydrateWorkspaceSnapshot(
     activeTabId,
     projectCwd,
     projectTerminals: parsed.projectTerminals,
+    projectReturnMemory: reconcileProjectReturn({
+      memory: parseProjectReturnTargets(parsed.projectReturnTargets),
+      tabs,
+      sessions: [...sessions.values()],
+      activeTabId,
+    }),
   };
 }
 
@@ -287,17 +327,14 @@ function sanitizeStub(raw: unknown): WorkspaceSessionStub | null {
   return {
     id: value.id,
     cwd:
-      typeof value.cwd === "string" && value.cwd.trim()
-        ? value.cwd.trim()
-        : "~",
+      typeof value.cwd === "string" && value.cwd.trim() ? value.cwd.trim() : "~",
     harness,
     model: typeof value.model === "string" ? value.model : "",
     modelSettings,
     runtimeMode,
     title: typeof value.title === "string" ? value.title : "",
     ...(value.inboxAsk && typeof value.inboxAsk === "object"
-      ? { inboxAsk: value.inboxAsk as InboxAskContext }
-      : {}),
+      ? { inboxAsk: value.inboxAsk as InboxAskContext } : {}),
     ...(typeof value.providerSessionId === "string" && value.providerSessionId
       ? { providerSessionId: value.providerSessionId }
       : {}),
@@ -356,8 +393,7 @@ function sanitizeLayout(raw: unknown): LayoutNode | null {
   if (value.type !== "split" || typeof value.id !== "string" || !value.id) {
     return null;
   }
-  const dir =
-    value.dir === "down" ? "down" : value.dir === "right" ? "right" : null;
+  const dir = value.dir === "down" ? "down" : value.dir === "right" ? "right" : null;
   if (!dir || !Array.isArray(value.children) || value.children.length < 2) {
     return null;
   }
@@ -366,10 +402,7 @@ function sanitizeLayout(raw: unknown): LayoutNode | null {
     .filter((node): node is LayoutNode => node != null);
   if (children.length < 2) return null;
   const sizes = Array.isArray(value.sizes)
-    ? value.sizes.filter(
-        (size): size is number =>
-          typeof size === "number" && Number.isFinite(size),
-      )
+    ? value.sizes.filter((size): size is number => typeof size === "number" && Number.isFinite(size))
     : [];
   const normalized =
     sizes.length === children.length
@@ -610,7 +643,9 @@ function sanitizeCommit(raw: unknown): CommitTabSource | undefined {
   };
 }
 
-function sanitizeReleaseNotes(raw: unknown): ReleaseNotesTabSource | undefined {
+function sanitizeReleaseNotes(
+  raw: unknown,
+): ReleaseNotesTabSource | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const version = (raw as Record<string, unknown>).version;
   if (typeof version !== "string" || !version.trim()) return undefined;
@@ -660,8 +695,7 @@ function asHarness(value: unknown): HarnessId | null {
 }
 
 function asRuntimeMode(value: unknown): RuntimeMode | null {
-  return typeof value === "string" &&
-    (RUNTIME_MODES as string[]).includes(value)
+  return typeof value === "string" && (RUNTIME_MODES as string[]).includes(value)
     ? (value as RuntimeMode)
     : null;
 }
