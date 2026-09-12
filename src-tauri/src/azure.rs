@@ -368,22 +368,51 @@ pub async fn azure_list_items(
         let batch = request(&config, "_apis/wit/workitemsbatch", &version(), Some(json!({"ids":ids,"fields":["System.Id","System.Title","System.State","System.WorkItemType","System.TeamProject","System.ChangedDate","System.Tags","System.AssignedTo"],"errorPolicy":"Fail"})))?;
         let mut items = batch["value"].as_array().ok_or("Azure returned an invalid work-item batch")?.clone();
         items.truncate(100);
-        // One metadata request per distinct project, not one request per rendered card.
-        let mut projects = std::collections::HashMap::new();
-        for item in &mut items {
-            let name = item["fields"]["System.TeamProject"].as_str().unwrap_or_default().to_string();
-            if !projects.contains_key(&name) && projects.len() < 10 {
-                let types = request(&config, &format!("{}/_apis/wit/workitemtypes", project_path(&name)?), &version(), None).ok();
-                projects.insert(name.clone(), types);
-            }
-            let category = projects.get(&name).and_then(Option::as_ref).and_then(|v| v["value"].as_array())
-                .and_then(|types| types.iter().find(|t| t["name"] == item["fields"]["System.WorkItemType"]))
-                .and_then(|t| t["states"].as_array()).and_then(|states| states.iter().find(|s| s["name"] == item["fields"]["System.State"]))
-                .and_then(|s| s["category"].as_str()).unwrap_or("unknown").to_string();
-            item["stateCategory"] = json!(category);
-        }
+        attach_state_categories(&config, &mut items);
         Ok(json!({"site":config.site,"items":items}))
     }).await.map_err(|_| "Azure list task failed")?
+}
+
+/// One metadata request per distinct project, not one request per rendered row.
+fn attach_state_categories(config: &AzureConfig, items: &mut [Value]) {
+    let mut projects = std::collections::HashMap::new();
+    for item in items.iter_mut() {
+        let name = item["fields"]["System.TeamProject"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if !projects.contains_key(&name) && projects.len() < 10 {
+            let types = project_path(&name).ok().and_then(|project| {
+                request(
+                    config,
+                    &format!("{project}/_apis/wit/workitemtypes"),
+                    &version(),
+                    None,
+                )
+                .ok()
+            });
+            projects.insert(name.clone(), types);
+        }
+        let category = projects
+            .get(&name)
+            .and_then(Option::as_ref)
+            .and_then(|v| v["value"].as_array())
+            .and_then(|types| {
+                types
+                    .iter()
+                    .find(|t| t["name"] == item["fields"]["System.WorkItemType"])
+            })
+            .and_then(|t| t["states"].as_array())
+            .and_then(|states| {
+                states
+                    .iter()
+                    .find(|s| s["name"] == item["fields"]["System.State"])
+            })
+            .and_then(|s| s["category"].as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        item["stateCategory"] = json!(category);
+    }
 }
 
 fn guid(value: &str) -> bool {
@@ -677,6 +706,115 @@ pub async fn azure_item_content(
     .map_err(|_| "Azure details task failed")?
 }
 
+/// Only work-item links become relations; attachments, hyperlinks and
+/// artifacts are already shown elsewhere in the detail pane.
+fn relation_target_id(site: &str, url: &str) -> Option<u64> {
+    let rest = url.strip_prefix(&format!("{site}/"))?;
+    let (path, id) = rest.rsplit_once('/')?;
+    if !path.to_ascii_lowercase().ends_with("_apis/wit/workitems") {
+        return None;
+    }
+    let id: u64 = id.parse().ok()?;
+    (id > 0).then_some(id)
+}
+
+fn relation_key(rel: &str, name: &str) -> String {
+    match rel {
+        "System.LinkTypes.Hierarchy-Reverse" => "parent".into(),
+        "System.LinkTypes.Hierarchy-Forward" => "children".into(),
+        "System.LinkTypes.Related" => "related".into(),
+        "System.LinkTypes.Duplicate-Forward" | "System.LinkTypes.Duplicate-Reverse" => {
+            "duplicate".into()
+        }
+        _ => {
+            let name = name.trim();
+            if name.is_empty() {
+                rel.to_string()
+            } else {
+                name.to_ascii_lowercase()
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn azure_item_relations(
+    app: AppHandle,
+    site: String,
+    id: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &site)?;
+        let source = item(&config, &id)?;
+        let mut edges = Vec::new();
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(relations) = source["relations"].as_array() {
+            for relation in relations.iter().take(50) {
+                let rel = relation["rel"].as_str().unwrap_or_default();
+                if !rel.starts_with("System.LinkTypes.") {
+                    continue;
+                }
+                let Some(target) =
+                    relation_target_id(&config.site, relation["url"].as_str().unwrap_or_default())
+                else {
+                    continue;
+                };
+                let name = relation["attributes"]["name"]
+                    .as_str()
+                    .unwrap_or("related")
+                    .trim()
+                    .to_string();
+                edges.push((target, relation_key(rel, &name), name));
+                if seen.insert(target) {
+                    ids.push(target);
+                }
+            }
+        }
+        // Unreadable or deleted targets stay identifiable without fabricating
+        // titles: `errorPolicy: omit` drops them from the batch.
+        let mut by_id = std::collections::HashMap::new();
+        if !ids.is_empty() {
+            let batch = request(
+                &config,
+                "_apis/wit/workitemsbatch",
+                &version(),
+                Some(json!({
+                    "ids": ids,
+                    "fields": ["System.Id","System.Title","System.State","System.WorkItemType","System.TeamProject","System.ChangedDate","System.Tags","System.AssignedTo"],
+                    "errorPolicy": "omit"
+                })),
+            )?;
+            let mut rows: Vec<Value> = batch["value"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(200)
+                .cloned()
+                .collect();
+            attach_state_categories(&config, &mut rows);
+            for row in rows {
+                if let Some(id) = row["id"].as_u64() {
+                    by_id.insert(id, row);
+                }
+            }
+        }
+        Ok(json!({
+            "edges": edges
+                .iter()
+                .map(|(target, key, name)| json!({
+                    "key": key,
+                    "label": name,
+                    "ref": target.to_string(),
+                    "item": by_id.get(target).cloned().unwrap_or(Value::Null),
+                }))
+                .collect::<Vec<_>>()
+        }))
+    })
+    .await
+    .map_err(|_| "Azure relations task failed")?
+}
+
 #[tauri::command]
 pub async fn azure_image(
     app: AppHandle,
@@ -717,6 +855,46 @@ mod tests {
         let repos: AzureConfig = serde_json::from_value(current).unwrap();
         assert_eq!(repos.status()["capabilities"], json!(["Repos"]));
         assert!(!repos.status().to_string().contains("secret"));
+    }
+
+    #[test]
+    fn relation_targets_stay_in_the_connected_org() {
+        let site = "https://dev.azure.com/team";
+        assert_eq!(
+            relation_target_id(
+                site,
+                "https://dev.azure.com/team/94b15380/_apis/wit/workItems/42"
+            ),
+            Some(42)
+        );
+        for url in [
+            "https://dev.azure.com/other/94b15380/_apis/wit/workItems/42",
+            "https://dev.azure.com/team/94b15380/_apis/wit/attachments/42",
+            "https://dev.azure.com/team/_apis/wit/workItems/abc",
+            "not a url",
+        ] {
+            assert_eq!(relation_target_id(site, url), None);
+        }
+        assert_eq!(
+            relation_key("System.LinkTypes.Hierarchy-Reverse", "Parent"),
+            "parent"
+        );
+        assert_eq!(
+            relation_key("System.LinkTypes.Hierarchy-Forward", "Child"),
+            "children"
+        );
+        assert_eq!(
+            relation_key("System.LinkTypes.Related", "Related"),
+            "related"
+        );
+        assert_eq!(
+            relation_key("System.LinkTypes.Duplicate-Forward", "Duplicate"),
+            "duplicate"
+        );
+        assert_eq!(
+            relation_key("System.LinkTypes.Dependency-Forward", "Successor"),
+            "successor"
+        );
     }
 
     #[test]

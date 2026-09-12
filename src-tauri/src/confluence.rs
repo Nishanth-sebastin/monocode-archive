@@ -1,0 +1,300 @@
+//! Confluence Cloud reads on the shared Atlassian connection. Credentials stay on the app host.
+use std::io::Read;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use base64::Engine;
+use serde_json::{json, Value};
+use tauri::AppHandle;
+
+use crate::jira::{require_config, JiraConfig};
+
+const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
+const PAGE_LIMIT: usize = 25;
+static BACKOFF: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+fn http_error(status: u16) -> String {
+    match status {
+        401 => "Atlassian credentials expired or are invalid. Reconnect in Settings.".into(),
+        403 => "Confluence denied access. Check the account's Confluence permissions.".into(),
+        404 => "Confluence content is unavailable. Refresh or choose another page.".into(),
+        429 => "Confluence is rate limiting requests. Wait before retrying.".into(),
+        _ => format!("Confluence request failed (HTTP {status}). Check the connection and retry."),
+    }
+}
+
+fn wiki_request(
+    config: &JiraConfig,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Value, String> {
+    serde_json::from_slice(&wiki_bytes(config, path, query)?)
+        .map_err(|_| "Confluence returned an invalid response".into())
+}
+
+fn wiki_bytes(
+    config: &JiraConfig,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Vec<u8>, String> {
+    if BACKOFF
+        .lock()
+        .map_err(|_| "Confluence request state unavailable")?
+        .as_ref()
+        .is_some_and(|(site, until)| site == &config.site && *until > Instant::now())
+    {
+        return Err(
+            "Confluence requests are paused after a service error. Wait before retrying.".into(),
+        );
+    }
+    let authorization = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:{}", config.email, config.token));
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(20))
+        .redirects(0)
+        .build();
+    let mut req = agent
+        .get(&format!("{}/wiki/rest/api/{path}", config.site))
+        .set("Authorization", &format!("Basic {authorization}"))
+        .set("Accept", "application/json");
+    for (key, value) in query {
+        req = req.query(key, value);
+    }
+    let response = match req.call() {
+        Ok(response) if response.status() == 200 => response,
+        Ok(response) | Err(ureq::Error::Status(_, response)) => {
+            let status = response.status();
+            if status == 429 || status >= 500 {
+                let seconds = response
+                    .header("Retry-After")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(30)
+                    .clamp(1, 300);
+                *BACKOFF
+                    .lock()
+                    .map_err(|_| "Confluence request state unavailable")? = Some((
+                    config.site.clone(),
+                    Instant::now() + Duration::from_secs(seconds),
+                ));
+            }
+            return Err(http_error(status));
+        }
+        Err(_) => {
+            return Err("Cannot reach Confluence Cloud. Check your connection and retry.".into())
+        }
+    };
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_RESPONSE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read Confluence response")?;
+    if bytes.len() as u64 > MAX_RESPONSE {
+        return Err("Confluence response is too large. Choose a narrower search.".into());
+    }
+    Ok(bytes)
+}
+
+/// Verify the shared credentials can read Confluence on this site.
+pub(crate) fn probe(config: &JiraConfig) -> Result<Value, String> {
+    wiki_request(config, "user/current", &[])
+}
+
+/// Configs saved before capability tracking have an empty list; treat them as
+/// unknown and let the request decide instead of blocking them.
+fn require_confluence(config: &JiraConfig) -> Result<(), String> {
+    if !config.capabilities.is_empty() && !config.capabilities.iter().any(|cap| cap == "Confluence")
+    {
+        return Err(
+            "Confluence is not available on this Atlassian connection. Reconnect in Settings."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn cql_string(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 200 {
+        return Err("Search text must be 1-200 characters".into());
+    }
+    Ok(format!(
+        "\"{}\"",
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
+fn search_cql(query: &str, space: &str) -> Result<String, String> {
+    let mut parts = vec!["type = page AND status = current".to_string()];
+    let space = space.trim();
+    if !space.is_empty() {
+        if space.len() > 64
+            || !space
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '~'))
+        {
+            return Err("Choose a valid Confluence space".into());
+        }
+        parts.push(format!("space = {}", cql_string(space)?));
+    }
+    let query = query.trim();
+    if !query.is_empty() {
+        let text = cql_string(query)?;
+        parts.push(format!("(title ~ {text} OR text ~ {text})"));
+        return Ok(parts.join(" AND "));
+    }
+    Ok(format!(
+        "{} ORDER BY lastmodified DESC",
+        parts.join(" AND ")
+    ))
+}
+
+/// Pull the pagination cursor out of a provider `next` link; the URL itself
+/// never reaches the WebView.
+fn next_cursor(page: &Value) -> String {
+    let next = page["_links"]["next"].as_str().unwrap_or_default();
+    let query = next.split_once('?').map(|(_, query)| query).unwrap_or("");
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("cursor=") {
+            return value.to_string();
+        }
+        if let Some(value) = pair.strip_prefix("start=") {
+            return value.to_string();
+        }
+    }
+    String::new()
+}
+
+#[tauri::command]
+pub async fn confluence_spaces(app: AppHandle, site: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &site)?;
+        require_confluence(&config)?;
+        let page = wiki_request(
+            &config,
+            "space",
+            &[
+                ("limit", "100".into()),
+                ("status", "current".into()),
+                ("type", "global".into()),
+            ],
+        )?;
+        let spaces: Vec<Value> = page["results"]
+            .as_array()
+            .ok_or("Confluence returned an invalid space list")?
+            .iter()
+            .take(100)
+            .filter_map(|space| {
+                let key = space["key"].as_str()?;
+                Some(json!({
+                    "key": key,
+                    "name": space["name"].as_str().unwrap_or(key),
+                }))
+            })
+            .collect();
+        Ok(json!({ "spaces": spaces }))
+    })
+    .await
+    .map_err(|_| "Confluence spaces task failed")?
+}
+
+#[tauri::command]
+pub async fn confluence_search(
+    app: AppHandle,
+    site: String,
+    query: String,
+    space: String,
+    cursor: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &site)?;
+        require_confluence(&config)?;
+        let cql = search_cql(&query, &space)?;
+        let cursor = cursor.trim();
+        if cursor.len() > 2048 || cursor.chars().any(char::is_control) {
+            return Err("Confluence returned an invalid page cursor".into());
+        }
+        let mut params = vec![
+            ("cql", cql),
+            ("limit", PAGE_LIMIT.to_string()),
+            (
+                "expand",
+                "space,version,ancestors,history.lastUpdated".into(),
+            ),
+        ];
+        if !cursor.is_empty() {
+            // Older sites still paginate `content/search` with `start`.
+            let key = if cursor.bytes().all(|b| b.is_ascii_digit()) {
+                "start"
+            } else {
+                "cursor"
+            };
+            params.push((key, cursor.to_string()));
+        }
+        let page = wiki_request(&config, "content/search", &params)?;
+        if !page["results"].is_array() {
+            return Err("Confluence returned an invalid search result".into());
+        }
+        Ok(json!({
+            "results": page["results"],
+            "next": next_cursor(&page),
+        }))
+    })
+    .await
+    .map_err(|_| "Confluence search task failed")?
+}
+
+#[tauri::command]
+pub async fn confluence_page(app: AppHandle, site: String, id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &site)?;
+        require_confluence(&config)?;
+        if id.is_empty() || id.len() > 30 || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("Invalid Confluence page identity".into());
+        }
+        wiki_request(
+            &config,
+            &format!("content/{id}"),
+            &[(
+                "expand",
+                "body.storage,space,version,ancestors,history.lastUpdated".into(),
+            )],
+        )
+    })
+    .await
+    .map_err(|_| "Confluence page task failed")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cql_is_built_from_bounded_parts_never_raw_text() {
+        assert_eq!(
+            search_cql("", "ENG").unwrap(),
+            "type = page AND status = current AND space = \"ENG\" ORDER BY lastmodified DESC"
+        );
+        assert_eq!(
+            search_cql("auth flow", "").unwrap(),
+            "type = page AND status = current AND (title ~ \"auth flow\" OR text ~ \"auth flow\")"
+        );
+        assert_eq!(
+            search_cql("a\"b\\c", "TEAM").unwrap(),
+            "type = page AND status = current AND space = \"TEAM\" AND (title ~ \"a\\\"b\\\\c\" OR text ~ \"a\\\"b\\\\c\")"
+        );
+        assert!(search_cql("", "bad space!\"").is_err());
+        assert!(search_cql(&"x".repeat(201), "").is_err());
+    }
+
+    #[test]
+    fn next_cursor_reads_only_the_cursor_parameter() {
+        let page = json!({"_links":{"next":"/rest/api/search?cql=type%3Dpage&cursor=abc123"}});
+        assert_eq!(next_cursor(&page), "abc123");
+        let legacy = json!({"_links":{"next":"/rest/api/content/search?start=25&cql=x"}});
+        assert_eq!(next_cursor(&legacy), "25");
+        assert_eq!(next_cursor(&json!({"_links":{}})), "");
+        let hostile = json!({"_links":{"next":"https://evil.test/?cursor=abc"}});
+        assert_eq!(next_cursor(&hostile), "abc");
+    }
+}

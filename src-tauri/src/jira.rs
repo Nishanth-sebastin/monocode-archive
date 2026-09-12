@@ -18,6 +18,10 @@ pub(crate) struct JiraConfig {
     pub(crate) email: String,
     pub(crate) token: String,
     account: String,
+    /// Atlassian products verified for this credential. Empty means the
+    /// connection predates capability tracking — treated as unknown.
+    #[serde(default)]
+    pub(crate) capabilities: Vec<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -25,6 +29,7 @@ pub struct JiraStatus {
     connected: bool,
     site: String,
     account: String,
+    capabilities: Vec<String>,
 }
 
 impl JiraConfig {
@@ -33,6 +38,7 @@ impl JiraConfig {
             connected: true,
             site: self.site.clone(),
             account: self.account.clone(),
+            capabilities: self.capabilities.clone(),
         }
     }
 }
@@ -120,15 +126,39 @@ pub async fn jira_set_config(
             email: email.trim().into(),
             token: token.trim().into(),
             account: String::new(),
+            capabilities: Vec::new(),
         };
-        let viewer = request(&config, "myself", &[])?;
-        if viewer["accountId"].as_str().unwrap_or_default().is_empty() {
-            return Err("Jira did not return an authenticated account".into());
+        let viewer = request(&config, "myself", &[]);
+        let confluence = crate::confluence::probe(&config);
+        match (viewer, confluence) {
+            (Ok(viewer), wiki) => {
+                if viewer["accountId"].as_str().unwrap_or_default().is_empty() {
+                    return Err("Jira did not return an authenticated account".into());
+                }
+                config.account = viewer["displayName"]
+                    .as_str()
+                    .unwrap_or(&config.email)
+                    .to_string();
+                config.capabilities.push("Jira".into());
+                if wiki.is_ok() {
+                    config.capabilities.push("Confluence".into());
+                }
+            }
+            (Err(_), Ok(user)) => {
+                // The site may provision Confluence without Jira for this account.
+                if user["accountId"].as_str().unwrap_or_default().is_empty()
+                    && user["displayName"].as_str().unwrap_or_default().is_empty()
+                {
+                    return Err("Confluence did not return an authenticated account".into());
+                }
+                config.account = user["displayName"]
+                    .as_str()
+                    .unwrap_or(&config.email)
+                    .to_string();
+                config.capabilities.push("Confluence".into());
+            }
+            (Err(jira_error), Err(_)) => return Err(jira_error),
         }
-        config.account = viewer["displayName"]
-            .as_str()
-            .unwrap_or(&config.email)
-            .to_string();
         fs::create_dir_all(path.parent().ok_or("Cannot locate Jira settings")?)
             .map_err(|_| "Cannot create Jira settings")?;
         let raw = serde_json::to_string(&config).map_err(|_| "Cannot encode Jira settings")?;
@@ -388,6 +418,79 @@ pub async fn jira_issue_content(
     .map_err(|_| "Jira details task failed")?
 }
 
+/// Directional link wording stays provider-native; the key only picks a group.
+fn relation_key(name: &str, outward: bool) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "blocks" | "block" | "blocking" => if outward { "blocks" } else { "blocked-by" }.into(),
+        "duplicate" | "duplicates" | "duplicate of" => "duplicate".into(),
+        "relates" | "relates to" | "related" => "related".into(),
+        other => other.to_string(),
+    }
+}
+
+fn push_edge(edges: &mut Vec<Value>, key: &str, label: &str, issue: &Value) {
+    if edges.len() >= 50 {
+        return;
+    }
+    edges.push(json!({
+        "key": key,
+        "label": label,
+        "ref": issue["key"].as_str().unwrap_or_default(),
+        "item": issue,
+    }));
+}
+
+fn relation_edges(fields: &Value) -> Vec<Value> {
+    let mut edges = Vec::new();
+    if fields["parent"]["key"].is_string() {
+        push_edge(&mut edges, "parent", "Parent", &fields["parent"]);
+    }
+    if let Some(subtasks) = fields["subtasks"].as_array() {
+        for subtask in subtasks.iter().take(50) {
+            push_edge(&mut edges, "children", "Sub-task", subtask);
+        }
+    }
+    if let Some(links) = fields["issuelinks"].as_array() {
+        for link in links.iter().take(50) {
+            let (outward, linked) = if link["outwardIssue"].is_object() {
+                (true, &link["outwardIssue"])
+            } else if link["inwardIssue"].is_object() {
+                (false, &link["inwardIssue"])
+            } else {
+                continue;
+            };
+            let name = link["type"]["name"].as_str().unwrap_or("Related");
+            let label = link["type"][if outward { "outward" } else { "inward" }]
+                .as_str()
+                .unwrap_or("related");
+            push_edge(&mut edges, &relation_key(name, outward), label, linked);
+        }
+    }
+    edges
+}
+
+#[tauri::command]
+pub async fn jira_issue_relations(
+    app: AppHandle,
+    site: String,
+    id: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = require_config(&app, &site)?;
+        if !numeric_id(&id) {
+            return Err("Invalid Jira issue identity".into());
+        }
+        let issue = request(
+            &config,
+            &format!("issue/{id}"),
+            &[("fields", "parent,subtasks,issuelinks".into())],
+        )?;
+        Ok(json!({ "edges": relation_edges(&issue["fields"]) }))
+    })
+    .await
+    .map_err(|_| "Jira relations task failed")?
+}
+
 fn image_on_issue(issue: &Value, attachment_id: &str) -> bool {
     numeric_id(attachment_id)
         && issue["fields"]["attachment"]
@@ -499,5 +602,45 @@ mod tests {
         assert!(!numeric_id("../myself"));
         assert!(http_error(401).contains("Reconnect"));
         assert!(http_error(403).contains("permissions"));
+    }
+
+    #[test]
+    fn relation_edges_keep_direction_and_provider_labels() {
+        let fields = json!({
+            "parent": {"id":"1","key":"ENG-1","fields":{"summary":"Epic"}},
+            "subtasks": [{"id":"2","key":"ENG-2","fields":{"summary":"Sub"}}],
+            "issuelinks": [
+                {"type":{"name":"Blocks","inward":"is blocked by","outward":"blocks"},
+                 "outwardIssue":{"id":"3","key":"ENG-3","fields":{"summary":"Downstream"}}},
+                {"type":{"name":"Blocks","inward":"is blocked by","outward":"blocks"},
+                 "inwardIssue":{"id":"4","key":"ENG-4","fields":{"summary":"Upstream"}}},
+                {"type":{"name":"Cloners","inward":"is cloned by","outward":"clones"},
+                 "inwardIssue":{"id":"5","key":"ENG-5","fields":{"summary":"Clone"}}},
+                {"type":{"name":"Blocks","inward":"is blocked by","outward":"blocks"}}
+            ]
+        });
+        let edges = relation_edges(&fields);
+        let rows: Vec<(&str, &str, &str)> = edges
+            .iter()
+            .map(|e| {
+                (
+                    e["key"].as_str().unwrap(),
+                    e["label"].as_str().unwrap(),
+                    e["ref"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("parent", "Parent", "ENG-1"),
+                ("children", "Sub-task", "ENG-2"),
+                ("blocks", "blocks", "ENG-3"),
+                ("blocked-by", "is blocked by", "ENG-4"),
+                ("cloners", "is cloned by", "ENG-5"),
+            ]
+        );
+        // A link with no readable issue is skipped, never faked.
+        assert_eq!(edges.len(), 5);
     }
 }

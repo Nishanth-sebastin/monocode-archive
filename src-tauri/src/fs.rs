@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::wsl;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::dirs_home;
 
@@ -772,6 +772,20 @@ pub struct GitHubWorkItemComment {
     pub resolved: bool,
     pub thread_id: String,
     pub replies: Vec<GitHubWorkItemComment>,
+}
+
+/// Issue sub-issues and parent for the inbox detail pane, via GraphQL.
+#[tauri::command]
+pub async fn git_github_issue_relations(
+    cwd: String,
+    kind: String,
+    number: i64,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_github_issue_relations_for(&expand_home(&cwd), &kind, number)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -2068,6 +2082,27 @@ query InboxPullRequestThread($owner: String!, $name: String!, $number: Int!) {
 }
 "#;
 
+const GITHUB_ISSUE_RELATIONS_QUERY: &str = r#"
+query InboxIssueRelations($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      parent {
+        number title url state updatedAt
+        repository { nameWithOwner }
+      }
+      subIssues(first: 50) {
+        totalCount
+        pageInfo { hasNextPage }
+        nodes {
+          number title url state updatedAt
+          repository { nameWithOwner }
+        }
+      }
+    }
+  }
+}
+"#;
+
 const GITHUB_REVIEW_REPLY_MUTATION: &str = r#"
 mutation InboxReviewReply($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: {
@@ -2117,6 +2152,109 @@ fn git_github_work_item_thread_for(
         ],
     )?;
     parse_github_work_item_thread(&json, kind)
+}
+
+fn graph_issue_item(node: &Value, fallback_repo: &str) -> Option<Value> {
+    let number = node.get("number").and_then(Value::as_i64)?;
+    if number <= 0 {
+        return None;
+    }
+    let repo = node
+        .pointer("/repository/nameWithOwner")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_repo);
+    Some(json!({
+        "number": number,
+        "title": node.get("title").and_then(Value::as_str).unwrap_or_default(),
+        "url": node.get("url").and_then(Value::as_str).unwrap_or_default(),
+        "state": node.get("state").and_then(Value::as_str).unwrap_or_default().to_lowercase(),
+        "updatedAt": node.get("updatedAt").and_then(Value::as_str).unwrap_or_default(),
+        "repo": repo,
+    }))
+}
+
+fn parse_github_issue_relations(json: &str, repo: &str) -> Result<Value, String> {
+    let parsed: Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    if let Some(message) = parsed
+        .get("errors")
+        .and_then(Value::as_array)
+        .and_then(|errors| errors.first())
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+    {
+        return Err(message.to_string());
+    }
+    let issue = parsed
+        .pointer("/data/repository/issue")
+        .filter(|issue| issue.is_object())
+        .cloned()
+        .ok_or_else(|| "GitHub issue not found".to_string())?;
+    let mut edges = Vec::new();
+    let mut push = |key: &str, label: &str, node: &Value| {
+        if edges.len() >= 50 {
+            return;
+        }
+        if let Some(item) = graph_issue_item(node, repo) {
+            let foreign = item["repo"]
+                .as_str()
+                .is_some_and(|linked| !linked.eq_ignore_ascii_case(repo));
+            edges.push(json!({
+                "key": key,
+                "label": label,
+                "ref": format!("#{}", item["number"].as_i64().unwrap_or_default()),
+                "item": item,
+                "foreign": foreign,
+            }));
+        }
+    };
+    if let Some(parent) = issue.get("parent") {
+        push("parent", "Parent", parent);
+    }
+    if let Some(nodes) = issue.pointer("/subIssues/nodes").and_then(Value::as_array) {
+        for node in nodes {
+            push("children", "Sub-issue", node);
+        }
+    }
+    let truncated = issue
+        .pointer("/subIssues/pageInfo/hasNextPage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(json!({ "edges": edges, "truncated": truncated }))
+}
+
+fn git_github_issue_relations_for(root: &Path, kind: &str, number: i64) -> Result<Value, String> {
+    let kind = kind.trim();
+    if kind != "issue" && kind != "pr" {
+        return Err("Unknown GitHub task kind".into());
+    }
+    if number <= 0 {
+        return Err("Invalid GitHub item number".into());
+    }
+    // Pull requests have no GitHub sub-issue or parent hierarchy.
+    if kind == "pr" {
+        return Ok(json!({ "edges": [], "truncated": false }));
+    }
+    let repo = git_github_repo_for(root)?;
+    let (owner, name) = split_github_repo(&repo)?;
+    let owner_field = format!("owner={owner}");
+    let name_field = format!("name={name}");
+    let number_field = format!("number={number}");
+    let json = gh_checked(
+        root,
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={GITHUB_ISSUE_RELATIONS_QUERY}"),
+            "-F",
+            &owner_field,
+            "-F",
+            &name_field,
+            "-F",
+            &number_field,
+        ],
+    )?;
+    parse_github_issue_relations(&json, &repo)
 }
 
 fn github_comment_input<'a>(
@@ -5698,6 +5836,29 @@ mod tests {
             github_pr_head_filter("hardbeat920/monocode", "main").as_deref(),
             Some("hardbeat920:main")
         );
+    }
+
+    #[test]
+    fn parse_github_issue_relations_marks_foreign_repos() {
+        let json = r#"{"data":{"repository":{"issue":{
+            "parent":{"number":7,"title":"Epic","url":"https://github.com/acme/web/issues/7","state":"OPEN","updatedAt":"","repository":{"nameWithOwner":"acme/web"}},
+            "subIssues":{"totalCount":2,"pageInfo":{"hasNextPage":true},"nodes":[
+                {"number":9,"title":"Sub","url":"https://github.com/acme/web/issues/9","state":"CLOSED","updatedAt":"","repository":{"nameWithOwner":"acme/web"}},
+                {"number":4,"title":"Other repo","url":"https://github.com/acme/api/issues/4","state":"OPEN","updatedAt":"","repository":{"nameWithOwner":"acme/api"}},
+                null
+            ]}
+        }}}}"#;
+        let parsed = parse_github_issue_relations(json, "acme/web").unwrap();
+        assert_eq!(parsed["truncated"], true);
+        let edges = parsed["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 3);
+        assert_eq!(edges[0]["key"], "parent");
+        assert_eq!(edges[0]["item"]["number"], 7);
+        assert_eq!(edges[1]["key"], "children");
+        assert_eq!(edges[1]["item"]["state"], "closed");
+        assert_eq!(edges[2]["foreign"], true);
+        assert_eq!(edges[2]["item"]["repo"], "acme/api");
+        assert!(parse_github_issue_relations(r#"{"errors":[{"message":"boom"}]}"#, "a/b").is_err());
     }
 
     #[test]

@@ -5,7 +5,14 @@ import type {
   InboxItem,
 } from "./githubTasks";
 
-export type JiraStatus = { connected: boolean; site: string; account: string };
+export type JiraStatus = {
+  connected: boolean;
+  site: string;
+  account: string;
+  /** Atlassian products verified for the saved credential. Empty means the
+   * connection predates capability tracking — treat as unknown. */
+  capabilities: string[];
+};
 export type JiraOption = { id: string; name: string };
 export type JiraFilter = { project: string; filter: string; assigned: boolean };
 export const DEFAULT_JIRA_FILTER: JiraFilter = {

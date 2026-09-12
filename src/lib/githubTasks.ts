@@ -578,8 +578,13 @@ async function fetchInboxItems(
   let jiraItems: InboxItem[] = [];
   try {
     const status = await jiraConnected();
-    if (status.connected) jiraItems = (await listJiraIssues(status.site, query.state)).map(item => ({ ...item, account: status.account }));
-    else errors.jira = "Connect Jira Cloud in Settings to see assigned issues.";
+    const jiraCapable =
+      !(status.capabilities ?? []).length ||
+      status.capabilities.includes("Jira");
+    if (status.connected && jiraCapable)
+      jiraItems = (await listJiraIssues(status.site, query.state)).map(item => ({ ...item, account: status.account }));
+    else if (!status.connected)
+      errors.jira = "Connect Jira Cloud in Settings to see assigned issues.";
   } catch (error) {
     errors.jira = inboxErrorMessage(error);
   }
