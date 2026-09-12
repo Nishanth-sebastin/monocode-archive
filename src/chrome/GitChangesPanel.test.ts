@@ -408,6 +408,125 @@ it("lets a task session switch the panel between child working copies", async ()
   }
 });
 
+it("collapses the child chips into a selector menu when they overflow", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => rows.get(key) ?? null,
+    setItem: (key: string, value: string) => rows.set(key, value),
+  });
+  rows.set(
+    "monocode.taskWorkspaces.v1",
+    JSON.stringify([
+      {
+        id: "t1",
+        projectId: "p1",
+        name: "Ship it",
+        sessionIds: ["s1"],
+        createdAt: 1,
+        children: [
+          {
+            id: "c1",
+            repositoryId: "r1",
+            workingCopy: "/repo-a",
+            branch: "feat/a",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+          {
+            id: "c2",
+            repositoryId: "r2",
+            workingCopy: "/repo-b",
+            branch: "feat/b",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+        ],
+      },
+    ]),
+  );
+  // A strip narrower than its chips reports scrollWidth > clientWidth.
+  const sizeDesc = (name: "scrollWidth" | "clientWidth") =>
+    Object.getOwnPropertyDescriptor(HTMLElement.prototype, name);
+  const savedScroll = sizeDesc("scrollWidth");
+  const savedClient = sizeDesc("clientWidth");
+  const restore = (name: "scrollWidth" | "clientWidth", desc?: PropertyDescriptor) => {
+    if (desc) Object.defineProperty(HTMLElement.prototype, name, desc);
+    else
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>)[
+        name
+      ];
+  };
+  Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+    configurable: true,
+    get() {
+      return 800;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get() {
+      return 120;
+    },
+  });
+  const { invoke } = await import("@tauri-apps/api/core");
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_diff_index") {
+      const cwd = (args as { cwd: string }).cwd;
+      return {
+        branch: cwd === "/repo-b" ? "feat/b" : "feat/a",
+        ahead: 0,
+        behind: 0,
+        files: [],
+      };
+    }
+    return original(command, args);
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const selector = () =>
+    host.querySelector('button[aria-haspopup="menu"]') as HTMLButtonElement | null;
+  const menuRow = (name: string) =>
+    [...document.querySelectorAll('ul[role="menu"] button')].find((button) =>
+      button.textContent?.includes(name),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-a",
+          sourceSessionId: "s1",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    // The chip row cannot fit — a compact selector shows the active child
+    // and the repo count instead of a clipped list.
+    expect(selector()?.textContent).toContain("repo-a");
+    expect(selector()?.textContent).toContain("2 repos");
+    await act(async () => selector()!.click());
+    expect(menuRow("repo-a")).toBeTruthy();
+    expect(menuRow("repo-b")).toBeTruthy();
+    await act(async () => (menuRow("repo-b") as HTMLButtonElement).click());
+    expect(host.querySelector("header")?.textContent).toContain("feat/b");
+    // The menu closed on selection and the selector follows the new child.
+    expect(document.querySelector('ul[role="menu"]')).toBeNull();
+    expect(selector()?.textContent).toContain("repo-b");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.mocked(invoke).mockImplementation(original);
+    restore("scrollWidth", savedScroll);
+    restore("clientWidth", savedClient);
+    vi.unstubAllGlobals();
+  }
+});
+
 it("routes GitHub rows externally and keeps an Azure CI override independent", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rows = new Map<string, string>();

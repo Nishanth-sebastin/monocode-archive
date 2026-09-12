@@ -17,6 +17,7 @@ import {
 import {
   childDelivery,
   deliveryStores,
+  EMPTY_DELIVERY,
   type DeliveryStores,
 } from "../lib/taskDelivery";
 import { projectsSnapshot, repositoryDisplayName, subscribeProjects } from "../lib/projects";
@@ -458,24 +459,271 @@ function TaskChildStrip({
   stores: DeliveryStores;
   onSelect: (cwd: string) => void;
 }) {
+  const stripRef = useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState(false);
+  const selectedEntry =
+    task.children.find(
+      (entry) =>
+        entry.workingCopy && pathKey(entry.workingCopy) === pathKey(viewCwd),
+    ) ?? null;
+
+  // Chip widths grow as branch and diff stats land, so the fit is re-measured
+  // on every render; the observer catches sidebar resizes. In selector mode
+  // the strip stays mounted but clipped so a wider panel restores the chips.
+  useLayoutEffect(() => {
+    const el = stripRef.current;
+    if (el) setOverflow(el.scrollWidth > el.clientWidth + 1);
+  });
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      setOverflow(el.scrollWidth > el.clientWidth + 1);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-content/10 px-2 py-1.5">
-      {task.children.map((entry) => (
-        <TaskChildChip
-          key={entry.id}
+    <div className="shrink-0 border-b border-content/10">
+      <div
+        ref={stripRef}
+        aria-hidden={overflow || undefined}
+        inert={overflow}
+        className={
+          overflow
+            ? "invisible flex h-0 items-center gap-1 overflow-hidden px-2"
+            : "flex items-center gap-1 overflow-x-auto px-2 py-1.5"
+        }
+      >
+        {task.children.map((entry) => (
+          <TaskChildChip
+            key={entry.id}
+            task={task}
+            entry={entry}
+            selected={
+              !!entry.workingCopy &&
+              pathKey(entry.workingCopy) === pathKey(viewCwd)
+            }
+            enabled={enabled}
+            stores={stores}
+            onSelect={onSelect}
+          />
+        ))}
+      </div>
+      {overflow ? (
+        <TaskChildSelector
           task={task}
-          entry={entry}
-          selected={
-            !!entry.workingCopy &&
-            pathKey(entry.workingCopy) === pathKey(viewCwd)
-          }
+          viewCwd={viewCwd}
+          selectedEntry={selectedEntry}
           enabled={enabled}
           stores={stores}
           onSelect={onSelect}
         />
-      ))}
+      ) : null}
     </div>
   );
+}
+
+/** Compact dropdown shown when the chip row cannot fit the sidebar width. */
+function TaskChildSelector({
+  task,
+  viewCwd,
+  selectedEntry,
+  enabled,
+  stores,
+  onSelect,
+}: {
+  task: TaskWorkspace;
+  viewCwd: string;
+  selectedEntry: TaskChild | null;
+  enabled: boolean;
+  stores: DeliveryStores;
+  onSelect: (cwd: string) => void;
+}) {
+  const anchor = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const data = useTaskChildData(task, selectedEntry, enabled, stores);
+  return (
+    <div className="flex items-center px-2 py-1.5">
+      <button
+        ref={anchor}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={
+          selectedEntry?.workingCopy
+            ? `${data.repoName} · ${selectedEntry.workingCopy}`
+            : "Choose a repository"
+        }
+        onClick={() => setOpen((value) => !value)}
+        className="flex min-w-0 items-center gap-1.5 rounded-full border border-accent/50 bg-accent/10 px-2 py-1 text-[11px] text-content"
+      >
+        <span className="max-w-28 truncate">{data.repoName}</span>
+        {data.branch ? (
+          <span className="max-w-24 truncate text-content/40">
+            {data.branch}
+          </span>
+        ) : null}
+        {data.stats?.files ? (
+          <span className="shrink-0 tabular-nums">
+            <span className="text-emerald-400/80">+{data.stats.additions}</span>{" "}
+            <span className="text-red-400/80">−{data.stats.deletions}</span>
+          </span>
+        ) : null}
+        {data.delivery.prs ? (
+          <GitPullRequest
+            className={`size-3 shrink-0 ${data.delivery.prNeedsAttention ? "text-red-400" : "text-content/45"}`}
+            strokeWidth={1.75}
+          />
+        ) : null}
+        {data.delivery.ci ? (
+          <CircleDashed
+            className={`size-3 shrink-0 ${data.delivery.ciFailing ? "text-red-400" : data.delivery.ciRunning ? "text-amber-400" : "text-content/45"}`}
+            strokeWidth={1.75}
+          />
+        ) : null}
+        <span className="shrink-0 text-content/40">
+          {task.children.length} repos
+        </span>
+        <ChevronDown
+          className={`size-3 shrink-0 text-content/45 ${open ? "rotate-180" : ""}`}
+          strokeWidth={1.75}
+        />
+      </button>
+      {open ? (
+        <Popover
+          anchor={anchor}
+          side="bottom"
+          align="start"
+          width={260}
+          onDismiss={() => setOpen(false)}
+        >
+          <ul role="menu" className="flex flex-col gap-0.5 p-1.5">
+            {task.children.map((entry) => (
+              <TaskChildMenuRow
+                key={entry.id}
+                task={task}
+                entry={entry}
+                selected={
+                  !!entry.workingCopy &&
+                  pathKey(entry.workingCopy) === pathKey(viewCwd)
+                }
+                enabled={enabled}
+                stores={stores}
+                onSelect={(cwd) => {
+                  setOpen(false);
+                  onSelect(cwd);
+                }}
+              />
+            ))}
+          </ul>
+        </Popover>
+      ) : null}
+    </div>
+  );
+}
+
+function TaskChildMenuRow({
+  task,
+  entry,
+  selected,
+  enabled,
+  stores,
+  onSelect,
+}: {
+  task: TaskWorkspace;
+  entry: TaskChild;
+  selected: boolean;
+  enabled: boolean;
+  stores: DeliveryStores;
+  onSelect: (cwd: string) => void;
+}) {
+  const data = useTaskChildData(task, entry, enabled, stores);
+  return (
+    <li role="none">
+      <button
+        type="button"
+        role="menuitem"
+        disabled={!data.prepared}
+        title={
+          data.prepared
+            ? `${data.repoName} · ${entry.workingCopy}`
+            : `${data.repoName} · not prepared yet`
+        }
+        onClick={() => entry.workingCopy && onSelect(entry.workingCopy)}
+        className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[11px] ${
+          selected
+            ? "bg-accent/10 text-content"
+            : "text-content/70 hover:bg-content/5 hover:text-content"
+        } disabled:opacity-40`}
+      >
+        <span className="w-3 shrink-0">
+          {selected ? (
+            <Check className="size-3 text-accent" strokeWidth={2} />
+          ) : null}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{data.repoName}</span>
+        {data.branch ? (
+          <span className="max-w-28 truncate text-content/40">
+            {data.branch}
+          </span>
+        ) : null}
+        {data.stats?.files ? (
+          <span className="shrink-0 tabular-nums">
+            <span className="text-emerald-400/80">+{data.stats.additions}</span>{" "}
+            <span className="text-red-400/80">−{data.stats.deletions}</span>
+          </span>
+        ) : null}
+        {data.delivery.prs ? (
+          <GitPullRequest
+            className={`size-3 shrink-0 ${data.delivery.prNeedsAttention ? "text-red-400" : "text-content/45"}`}
+            strokeWidth={1.75}
+          />
+        ) : null}
+        {data.delivery.ci ? (
+          <CircleDashed
+            className={`size-3 shrink-0 ${data.delivery.ciFailing ? "text-red-400" : data.delivery.ciRunning ? "text-amber-400" : "text-content/45"}`}
+            strokeWidth={1.75}
+          />
+        ) : null}
+      </button>
+    </li>
+  );
+}
+
+function useTaskChildData(
+  task: TaskWorkspace,
+  entry: TaskChild | null,
+  enabled: boolean,
+  stores: DeliveryStores,
+) {
+  const stats = useProjectDiffStats(
+    entry?.workingCopy ?? "",
+    enabled && !!entry?.workingCopy,
+  );
+  const branch = stats?.branch ?? entry?.branch;
+  const githubPr = useCachedBranchPr(entry?.workingCopy ?? "", branch);
+  const delivery = useMemo(
+    () =>
+      entry
+        ? childDelivery(
+            task,
+            entry,
+            [branch, entry.branch],
+            githubPr,
+            stores,
+          )
+        : EMPTY_DELIVERY,
+    [task, entry, branch, githubPr, stores],
+  );
+  const repo = entry ? repositoryForChild(task, entry) : undefined;
+  const repoName = repo
+    ? repositoryDisplayName(repo)
+    : entry?.workingCopy
+      ? basename(entry.workingCopy)
+      : "Repository";
+  return { stats, branch, delivery, repoName, prepared: !!entry?.workingCopy };
 }
 
 function TaskChildChip({
@@ -493,23 +741,12 @@ function TaskChildChip({
   stores: DeliveryStores;
   onSelect: (cwd: string) => void;
 }) {
-  const stats = useProjectDiffStats(
-    entry.workingCopy ?? "",
-    enabled && !!entry.workingCopy,
+  const { stats, branch, delivery, repoName, prepared } = useTaskChildData(
+    task,
+    entry,
+    enabled,
+    stores,
   );
-  const branch = stats?.branch ?? entry.branch;
-  const githubPr = useCachedBranchPr(entry.workingCopy ?? "", branch);
-  const delivery = useMemo(
-    () => childDelivery(task, entry, [branch, entry.branch], githubPr, stores),
-    [task, entry, branch, githubPr, stores],
-  );
-  const repo = repositoryForChild(task, entry);
-  const repoName = repo
-    ? repositoryDisplayName(repo)
-    : entry.workingCopy
-      ? basename(entry.workingCopy)
-      : "Repository";
-  const prepared = !!entry.workingCopy;
   return (
     <button
       type="button"
