@@ -41,17 +41,26 @@ tab/pane layout (`WorkspaceTab`, `workspaceSnapshot`, `sessionWorkspaceLifecycle
 
 - A repository appears at most once per attempt — uniqueness is keyed on
   `(attemptId, repositoryId)`, so the same repo can repeat across attempts
-  but never inside one.
-- Git forces each attempt to its own branch per repository; branch
-  suggestions dedupe against existing refs (`suggestTaskBranch`).
+  but never inside one. Enforced on writes (`createTask`/`reviseTask`/
+  `addTaskChildren`) and re-enforced on load: sanitize drops stored
+  duplicate pairs, which the dangling-attempt remap can otherwise
+  manufacture.
+- Git forces each attempt to its own branch per repository, so
+  `(repositoryId, branch)` is also unique across a task's children — a
+  duplicate would fail worktree creation permanently. Branch suggestions
+  dedupe against existing refs (`suggestTaskBranch`).
 - All children of one task share one execution host — `taskHostConflict`
   rejects mixed native/WSL working copies.
 - `taskOwnsCheckout(child)` (`branch`+`baseRef` recorded) marks checkouts the
   task created versus borrowed existing/main copies. Removal and cleanup
   offers must use it, never path heuristics.
-- The primary attempt cannot be removed; it can be marked `discarded`.
+- `attempts[0]` is pinned to `PRIMARY_ATTEMPT_ID` on load, so the primary
+  attempt's protection holds even for hand-edited records. It cannot be
+  removed; mark it `discarded` via `setTaskAttemptStatus` instead.
   `removeTaskAttempt` drops the record and its children while sessions,
   working copies and branches stay — the same policy as `removeTaskChild`.
+  Both refuse to remove a task's last checkout: a childless task record is
+  dropped on load anyway, so removal must go through `removeTask`.
 
 ## Lookups under multiple attempts
 
@@ -66,8 +75,9 @@ When a lookup must pick one child, prefer the primary attempt:
   display label (`label` or "Attempt N").
 
 `taskChildRepoLabel` and `composeTaskSessionPrompt` append the attempt label
-only when a task actually has more than one attempt, so single-attempt tasks
-keep today's output.
+only when the same repository is checked out under more than one attempt —
+the sole case where it disambiguates. Single-attempt tasks, and attempts
+that touch disjoint repositories, keep today's output.
 
 ## Extension points and non-goals
 

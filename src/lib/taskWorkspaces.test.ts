@@ -25,6 +25,7 @@ import {
   removeTaskAttempt,
   removeTaskChild,
   reviseTask,
+  setTaskAttemptStatus,
   suggestTaskBranch,
   taskAttemptLabel,
   taskChildRepoLabel,
@@ -107,7 +108,7 @@ describe("loadTaskWorkspaces", () => {
             },
             {
               id: "c2",
-              repositoryId: "r1",
+              repositoryId: "r2",
               sessionIds: ["s1"],
               launch: { state: "ready" },
             },
@@ -511,6 +512,152 @@ describe("attempts", () => {
     );
   });
 
+  it("refuses removals that would leave the task without checkouts", () => {
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo, lib] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id)],
+    });
+    const second = addTaskAttempt(task.id);
+    addTaskChildren(task.id, [{ ...later(lib.id), attemptId: second.id }]);
+    removeTaskChild(task.id, task.children[0].id);
+    // The second attempt now holds the only checkout — removing it would
+    // strand the task record and its sessions on sanitize.
+    expect(() => removeTaskAttempt(task.id, second.id)).toThrow(
+      /last checkouts/,
+    );
+    const [stored] = loadTaskWorkspaces();
+    expect(() =>
+      removeTaskChild(stored.id, stored.children[0].id),
+    ).toThrow(/last repository checkout/);
+    expect(loadTaskWorkspaces()).toHaveLength(1);
+  });
+
+  it("requires a distinct branch per repository across attempts", () => {
+    const project = projectWith("/tmp/app");
+    const [repo] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [
+        {
+          repositoryId: repo.id,
+          mode: "worktree",
+          baseRef: "refs/heads/main",
+          baseCommit: "abc123",
+          branch: "x",
+          path: "/tmp/app-x",
+        },
+      ],
+    });
+    const second = addTaskAttempt(task.id);
+    expect(() =>
+      addTaskChildren(task.id, [
+        {
+          repositoryId: repo.id,
+          attemptId: second.id,
+          mode: "worktree",
+          baseRef: "refs/heads/main",
+          baseCommit: "abc123",
+          branch: "x",
+          path: "/tmp/app-x2",
+        },
+      ]),
+    ).toThrow(/already used/);
+    // A different branch in the second attempt is fine.
+    expect(
+      addTaskChildren(task.id, [
+        {
+          repositoryId: repo.id,
+          attemptId: second.id,
+          mode: "worktree",
+          baseRef: "refs/heads/main",
+          baseCommit: "abc123",
+          branch: "x-minimal",
+          path: "/tmp/app-x2",
+        },
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it("dedupes checkout pairs and repins a moved primary id on load", () => {
+    const project = projectWith("/tmp/app");
+    const [repo] = project.repositories;
+    localStorage.setItem(
+      "monocode.taskWorkspaces.v1",
+      JSON.stringify([
+        {
+          id: "t1",
+          projectId: project.id,
+          name: "Legacy",
+          attempts: [
+            { id: "a2", createdAt: 1 },
+            { id: "a3", createdAt: 2 },
+          ],
+          children: [
+            {
+              id: "c1",
+              repositoryId: repo.id,
+              attemptId: "a2",
+              sessionIds: [],
+              launch: { state: "ready" },
+            },
+            {
+              id: "c2",
+              repositoryId: repo.id,
+              attemptId: "a3",
+              sessionIds: [],
+              launch: { state: "ready" },
+            },
+            {
+              id: "c3",
+              repositoryId: repo.id,
+              attemptId: "gone",
+              sessionIds: [],
+              launch: { state: "ready" },
+            },
+          ],
+        },
+      ]),
+    );
+    const [task] = loadTaskWorkspaces();
+    // attempts[0] is the primary attempt even when stored under another id.
+    expect(task.attempts[0].id).toBe(PRIMARY_ATTEMPT_ID);
+    // "a2" and "gone" both remap onto primary — the manufactured
+    // (primary, r1) duplicate is dropped instead of bricking later writes.
+    expect(task.children.map((child) => child.id)).toEqual(["c1", "c2"]);
+    expect(task.children[0].attemptId).toBe(PRIMARY_ATTEMPT_ID);
+    expect(task.children[1].attemptId).toBe("a3");
+    // The record stays writable — a leftover duplicate would trip the
+    // pair check on every subsequent revision.
+    const revised = reviseTask(task.id, {
+      name: "Renamed",
+      keepRepositoryIds: [repo.id],
+      responsibilities: new Map(),
+      additions: [],
+    });
+    expect(revised.name).toBe("Renamed");
+  });
+
+  it("records attempt verdicts without touching children", () => {
+    const project = projectWith("/tmp/app");
+    const [repo] = project.repositories;
+    const task = createTask({
+      projectId: project.id,
+      name: "X",
+      children: [later(repo.id)],
+    });
+    const second = addTaskAttempt(task.id);
+    setTaskAttemptStatus(task.id, second.id, "discarded");
+    let [stored] = loadTaskWorkspaces();
+    expect(stored.attempts[1].status).toBe("discarded");
+    setTaskAttemptStatus(task.id, second.id);
+    [stored] = loadTaskWorkspaces();
+    expect(stored.attempts[1].status).toBeUndefined();
+  });
+
   it("routes repository lookups to the primary attempt by default", () => {
     const project = projectWith("/tmp/app");
     const [repo] = project.repositories;
@@ -532,9 +679,9 @@ describe("attempts", () => {
     );
   });
 
-  it("disambiguates repo labels once several attempts exist", () => {
-    const project = projectWith("/tmp/app");
-    const [repo] = project.repositories;
+  it("disambiguates labels only for repositories that span attempts", () => {
+    const project = projectWith("/tmp/app", "/tmp/lib");
+    const [repo, lib] = project.repositories;
     const task = createTask({
       projectId: project.id,
       name: "X",
@@ -543,14 +690,22 @@ describe("attempts", () => {
     const [stored] = loadTaskWorkspaces();
     expect(taskChildRepoLabel(stored, stored.children[0])).toBe("app");
     const second = addTaskAttempt(task.id, "Variant B");
-    addTaskChildren(task.id, [
-      { ...later(repo.id), attemptId: second.id },
-    ]);
+    // A second attempt on a *different* repository adds no labels.
+    addTaskChildren(task.id, [{ ...later(lib.id), attemptId: second.id }]);
+    const [withLib] = loadTaskWorkspaces();
+    expect(taskChildRepoLabel(withLib, withLib.children[0])).toBe("app");
+    expect(taskChildRepoLabel(withLib, withLib.children[1])).toBe("lib");
+    // Only once the same repository spans attempts do labels appear.
+    addTaskChildren(task.id, [{ ...later(repo.id), attemptId: second.id }]);
     const [multi] = loadTaskWorkspaces();
     expect(taskAttemptLabel(multi, second.id)).toBe("Variant B");
-    expect(taskChildRepoLabel(multi, multi.children[1])).toContain(
+    expect(taskChildRepoLabel(multi, multi.children[0])).toContain(
+      "Attempt 1",
+    );
+    expect(taskChildRepoLabel(multi, multi.children[2])).toContain(
       "Variant B",
     );
+    expect(taskChildRepoLabel(multi, multi.children[1])).toBe("lib");
   });
 
   it("marks task-created checkouts without mistaking borrowed copies", () => {

@@ -144,12 +144,15 @@ export function TaskCreateSheet({
 
   const [name, setName] = useState(editingTask?.name ?? initialName ?? "");
   const [brief, setBrief] = useState(editingTask?.brief ?? initialBrief ?? "");
-  const [selected, setSelected] = useState<string[]>(
-    () =>
+  const [selected, setSelected] = useState<string[]>(() => [
+    // Dedupe: the same repository can appear once per attempt, but this
+    // sheet edits the task's repository set, not per-attempt checkouts.
+    ...new Set(
       editingTask?.children.map((child) => child.repositoryId) ??
-      initialChildren?.map((child) => child.repositoryId) ??
-      [],
-  );
+        initialChildren?.map((child) => child.repositoryId) ??
+        [],
+    ),
+  ]);
   const [tickets, setTickets] = useState<LinkedWorkItem[]>(() => {
     const first = editingTask?.ticket;
     if (first) return [first, ...(first.additionalItems ?? [])];
@@ -194,8 +197,12 @@ export function TaskCreateSheet({
 
   const existingByRepo = useMemo(() => {
     const map = new Map<string, TaskChild>();
+    const primary = editingTask?.attempts[0]?.id;
+    // A repository can have one child per attempt — the sheet shows the
+    // primary attempt's checkout as the repository's representative.
     for (const child of editingTask?.children ?? [])
-      map.set(child.repositoryId, child);
+      if (!map.has(child.repositoryId) || child.attemptId === primary)
+        map.set(child.repositoryId, child);
     return map;
   }, [editingTask]);
 

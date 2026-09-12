@@ -43,12 +43,15 @@ function seedTask() {
   });
   updateTask(task.id, (current) => ({
     ...current,
+    // A second checkout of the same repository is legal only under its
+    // own attempt — one child per (attempt, repository).
+    attempts: [...current.attempts, { id: "a2", createdAt: Date.now() }],
     children: [
       ...current.children,
       {
         id: "child-2",
         repositoryId: repo.id,
-        attemptId: "primary",
+        attemptId: "a2",
         workingCopy: "/tmp/lib-wt",
         sessionIds: [],
         launch: { state: "pending" as const },
