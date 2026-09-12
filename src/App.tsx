@@ -399,6 +399,7 @@ import { jiraDetails, peekJiraDetails } from "./lib/jira";
 import { azureDetails, peekAzureDetails } from "./lib/azure";
 import { gitlabWorkItemDetails, peekGitlabWorkItemDetails } from "./lib/gitlab";
 import {
+  loadKeepAwakeEnabled,
   loadLiveAgentsEnabled,
   loadNotesEnabled,
   loadDiffViewer,
@@ -406,11 +407,13 @@ import {
   loadSettingsSection,
   isSettingsSectionId,
   saveSettingsSection,
+  subscribeKeepAwakeEnabled,
   subscribeLiveAgentsEnabled,
   subscribeNotesEnabled,
   type SettingsSectionId,
   type FollowUpBehavior,
 } from "./lib/settings";
+import { keepAwakeSessionIds, syncKeepAwake } from "./lib/keepAwake";
 import {
   handleEditorFindKey,
   openFindInActiveEditor,
@@ -726,6 +729,11 @@ export default function App({
     subscribeLiveAgentsEnabled,
     loadLiveAgentsEnabled,
     () => true,
+  );
+  const keepAwakeEnabled = useSyncExternalStore(
+    subscribeKeepAwakeEnabled,
+    loadKeepAwakeEnabled,
+    () => false,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [wslOpening, setWslOpening] = useState<{ path: string; busy: boolean; error?: string } | null>(null);
@@ -1388,6 +1396,18 @@ export default function App({
     }, 650);
     return () => window.clearTimeout(timer);
   }, [persistSession, sessions]);
+
+  // One idle-sleep assertion per runtime, owned by the backend. This window
+  // reports only sessions doing real execution; waiting/idle/finished work
+  // drops out, and a stale window cannot hold the machine awake alone.
+  // syncKeepAwake dedupes internally, so IPC only fires on real changes, and
+  // the block-scan is skipped entirely while the setting is off.
+  useEffect(() => {
+    syncKeepAwake(
+      keepAwakeEnabled,
+      keepAwakeEnabled ? keepAwakeSessionIds(sessions) : [],
+    );
+  }, [keepAwakeEnabled, sessions]);
 
   useEffect(() => {
     const refs = inFlightRefs(sessions, tabs);
