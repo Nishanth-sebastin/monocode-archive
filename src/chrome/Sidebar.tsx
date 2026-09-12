@@ -240,6 +240,13 @@ type Props = {
   onSelectProject?: (path: string) => void;
   onOpenProject?: () => void;
   onNewTask?: (path: string, projectId?: string) => void;
+  /** Opens the saved-commands menu for a project or task row. */
+  onOpenCommands?: (options: {
+    anchor: { x: number; y: number };
+    path?: string;
+    projectId?: string;
+    taskId?: string;
+  }) => void;
   onOpenTask?: (taskId: string) => void;
   /** Just-created task — the rail's current task until a session takes over. */
   focusTaskId?: string;
@@ -322,6 +329,7 @@ function SidebarComponent({
   onSelectProject,
   onOpenProject,
   onNewTask,
+  onOpenCommands,
   onOpenTask,
   focusTaskId,
   onEditTask,
@@ -1617,6 +1625,7 @@ function SidebarComponent({
           onSelectProject={onSelectProject}
           onOpenProject={onOpenProject}
           onNewTask={onNewTask}
+          onOpenCommands={onOpenCommands}
           onOpenTask={onOpenTask}
           focusTaskId={focusTaskId}
           onEditTask={onEditTask}

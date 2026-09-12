@@ -52,6 +52,18 @@ export type DeliveryTabSource = {
   sourceSessionId?: string;
 };
 
+/** A saved project command bound to a terminal tab. `runId` bumps on each
+ * launch; `launched` records the last run actually written to the PTY, so a
+ * remount or app restart never re-runs it silently. */
+export type TerminalCommand = {
+  /** Saved `ProjectCommand`/`ReusableCommand` id the launch came from. */
+  presetId?: string;
+  name: string;
+  text: string;
+  runId: number;
+  launched?: number;
+};
+
 export type FilePaneTab = {
   id: string;
   path: string;
@@ -71,6 +83,8 @@ export type FilePaneTab = {
   terminal?: boolean;
   /** Foreground command when it isn't the shell. Live only — not persisted. */
   foreground?: string;
+  /** Saved command this terminal is bound to. */
+  command?: TerminalCommand;
 };
 
 export type EditorPane = {

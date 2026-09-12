@@ -11,6 +11,7 @@ import {
   Terminal,
   Wrench,
   X,
+  Zap,
 } from "../chrome/icons";
 import {
   memo,
@@ -957,11 +958,12 @@ function UserMessageBlock({
   const textRef = useRef<HTMLDivElement>(null);
   const card = block.secondOpinion;
   const note = block.noteCard;
+  const action = block.action;
   const text = card && card.kind !== "handoff" ? "" : block.text;
   const formatted = /(?:^|\n)`{3,}/.test(text) || text.startsWith("> Selected reference material.");
   const chat = layout === "chat";
   const textOnly =
-    Boolean(text) && !block.attachments?.length && !card && !note;
+    Boolean(text) && !block.attachments?.length && !card && !note && !action;
 
   // Only the chat layout rounds a single line; the document layout always uses
   // the square corners, so it never needs the measurement at all.
@@ -1032,6 +1034,15 @@ function UserMessageBlock({
             {block.attachments.map((file) => (
               <AttachmentChip key={file.id} attachment={file} />
             ))}
+          </div>
+        ) : null}
+        {action ? (
+          <div
+            className={`flex items-center gap-1.5 text-[11px] text-content/50 ${text || card || note ? "mb-1.5" : ""}`}
+            title={`Agent action · context revision ${action.revision}`}
+          >
+            <Zap className="size-3 shrink-0" strokeWidth={1.75} />
+            <span className="truncate">{action.name}</span>
           </div>
         ) : null}
         {note ? (

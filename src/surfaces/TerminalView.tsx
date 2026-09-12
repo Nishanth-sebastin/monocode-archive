@@ -22,6 +22,7 @@ import {
   type TerminalFitMode,
 } from "../lib/terminalLayout";
 import { IS_MAC } from "../lib/platform";
+import type { TerminalCommand } from "../lib/layout";
 import "@xterm/xterm/css/xterm.css";
 
 type Props = {
@@ -29,6 +30,9 @@ type Props = {
   cwd: string;
   active: boolean;
   onMetaChange?: (patch: TerminalMetaPatch) => void;
+  /** Saved command bound to this terminal — written to the PTY once per
+   * `runId`; `launched` makes a remount or restart side-effect-free. */
+  command?: TerminalCommand;
 };
 
 function cssColor(expr: string, fallback: string): string {
@@ -108,11 +112,12 @@ function oscColors() {
   return isLightScheme() ? OSC_LIGHT : OSC_DARK;
 }
 
-export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
+export function TerminalView({ id, cwd, active, onMetaChange, command }: Props) {
   const outerRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const spawned = useRef(false);
+  const startingRef = useRef<Promise<void>>(Promise.resolve());
   const applySizeRef = useRef<() => void>(() => {});
   const onMetaChangeRef = useRef(onMetaChange);
   onMetaChangeRef.current = onMetaChange;
@@ -208,6 +213,7 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
         }
         throw error;
       });
+    startingRef.current = starting;
     void starting.catch(() => undefined);
 
     const dataSub = term.onData((data) => {
@@ -362,6 +368,29 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
       document.removeEventListener("visibilitychange", refresh);
     };
   }, [id, cwd, wantsMeta]);
+
+  // A bound saved command is written to the PTY exactly once per runId.
+  // `launched` is persisted through the meta patch, so remounting the view or
+  // restarting the app re-shows the terminal without re-running the command.
+  useEffect(() => {
+    if (!command || (command.launched ?? 0) >= command.runId) return;
+    const pending = command;
+    let cancelled = false;
+    void startingRef.current
+      .then(() =>
+        cancelled || !spawned.current
+          ? undefined
+          : writePty(id, `${pending.text}\r`),
+      )
+      .then(() => {
+        if (!cancelled)
+          onMetaChangeRef.current?.({ command: { launched: pending.runId } });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [id, command]);
 
   useEffect(() => {
     if (!active) return;

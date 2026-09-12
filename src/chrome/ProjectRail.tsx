@@ -20,6 +20,7 @@ import {
   SquarePlus,
   Task,
   Settings,
+  Terminal,
   Trash2,
 } from "./icons";
 import {
@@ -157,6 +158,11 @@ function projectMenuExtraItems(
       icon: FolderTree,
     },
     {
+      id: "commands",
+      label: "Commands…",
+      icon: Terminal,
+    },
+    {
       id: "background",
       label: "Background image",
       icon: ImagePlus,
@@ -197,6 +203,14 @@ type Props = {
   onSelectProject: (path: string) => void;
   onOpenProject: () => void;
   onNewTask?: (path: string, projectId?: string) => void;
+  /** Opens the saved-commands menu. `taskId` scopes resolution to that task's
+   * working copies; `path`/`projectId` identify the owning project. */
+  onOpenCommands?: (options: {
+    anchor: { x: number; y: number };
+    path?: string;
+    projectId?: string;
+    taskId?: string;
+  }) => void;
   onOpenTask?: (taskId: string) => void;
   /** Just-created task — highlighted as current until a task session takes
    * over. Purely presentational; never launches work. */
@@ -238,6 +252,7 @@ export function ProjectRail({
   onSelectProject,
   onOpenProject,
   onNewTask,
+  onOpenCommands,
   onOpenTask,
   focusTaskId,
   onEditTask,
@@ -606,6 +621,13 @@ export function ProjectRail({
       resolveTabGroupLabel(projectKey, groupLabels, basename(path));
     if (action === "pin" || action === "unpin") onTogglePin(path);
     else if (action === "new-task") onNewTask?.(path, projectId);
+    else if (action === "commands") {
+      onOpenCommands?.({
+        anchor: { x: projectMenu.x, y: projectMenu.y },
+        path: isProjectRailKey(path) ? undefined : path,
+        projectId,
+      });
+    }
     else if (action === "repositories") {
       setRepositoriesProject({ path, projectId });
     } else if (action === "background") {
@@ -948,6 +970,23 @@ export function ProjectRail({
             >
               Edit task…
             </button>
+            {onOpenCommands ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-content hover:bg-content/5"
+                onClick={() => {
+                  onOpenCommands({
+                    anchor: { x: taskMenu.x, y: taskMenu.y },
+                    projectId: taskMenu.task.projectId,
+                    taskId: taskMenu.task.id,
+                  });
+                  setTaskMenu(null);
+                }}
+              >
+                Commands…
+              </button>
+            ) : null}
             <button
               type="button"
               role="menuitem"

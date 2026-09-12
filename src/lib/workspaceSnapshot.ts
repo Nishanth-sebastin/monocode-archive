@@ -496,6 +496,8 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
   ) {
     return null;
   }
+  const command =
+    value.terminal === true ? sanitizeTerminalCommand(value.command) : undefined;
   return {
     id: value.id,
     path: value.path,
@@ -510,6 +512,37 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
       ? { changeKind: value.changeKind }
       : {}),
     ...(value.terminal === true ? { terminal: true } : {}),
+    ...(command ? { command } : {}),
+  };
+}
+
+function sanitizeTerminalCommand(
+  raw: unknown,
+): FilePaneTab["command"] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  if (
+    typeof value.name !== "string" ||
+    !value.name.trim() ||
+    typeof value.text !== "string" ||
+    !value.text.trim() ||
+    typeof value.runId !== "number" ||
+    !Number.isInteger(value.runId) ||
+    value.runId < 1
+  )
+    return undefined;
+  return {
+    ...(typeof value.presetId === "string" && value.presetId
+      ? { presetId: value.presetId.slice(0, 128) }
+      : {}),
+    name: value.name.trim().slice(0, 200),
+    text: value.text.slice(0, 4_000),
+    runId: value.runId,
+    ...(typeof value.launched === "number" &&
+    Number.isInteger(value.launched) &&
+    value.launched >= 0
+      ? { launched: value.launched }
+      : {}),
   };
 }
 

@@ -416,7 +416,26 @@ function sanitizeBlock(block: Block): Block | null {
   if (secondOpinion) next.secondOpinion = secondOpinion;
   const noteCard = sanitizeNoteCard(block.noteCard);
   if (noteCard) next.noteCard = noteCard;
+  const action = sanitizeActionRun(block.action);
+  if (action) next.action = action;
   return next;
+}
+
+function sanitizeActionRun(
+  value: unknown,
+): Block["action"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const actionId =
+    typeof record.actionId === "string" ? record.actionId.slice(0, 128) : "";
+  const name =
+    typeof record.name === "string" ? record.name.slice(0, 120) : "";
+  const revision =
+    typeof record.revision === "string" ? record.revision.slice(0, 32) : "";
+  if (!actionId || !name || !revision) return undefined;
+  return { actionId, name, revision };
 }
 
 function sanitizePlan(value: unknown, text: string): PlanBlockMeta | null {

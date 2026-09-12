@@ -110,6 +110,7 @@ import {
   findProjectTerminal,
   mapProjectTerminal,
   nextDockTerminalTitle,
+  patchDockTerminal,
   patchProjectTerminals,
   reorderDockTerminals,
   selectDockTerminal,
@@ -119,6 +120,11 @@ import {
   type DockSide,
   type ProjectTerminalDock as ProjectTerminal,
 } from "./lib/projectTerminal";
+import { writePty } from "./lib/pty";
+import { resolveCommandTarget } from "./lib/projectCommands";
+import { ProjectCommandsMenu } from "./chrome/ProjectCommandsMenu";
+import { ProjectCommandsSheet } from "./chrome/ProjectCommandsSheet";
+import type { PopoverAnchor } from "./chrome/Popover";
 import {
   applyGroupedReorder,
   insertTabBesideActive,
@@ -238,6 +244,7 @@ import {
   updateTask,
   updateTaskChild,
   type TaskChildDraft,
+  type TaskWorkspace,
 } from "./lib/taskWorkspaces";
 import {
   ensureProjectForPath,
@@ -246,7 +253,9 @@ import {
   isProjectRailKey,
   loadProjects,
   projectContainsPath,
+  projectForPath,
   projectRailKey,
+  type ProjectRecord,
 } from "./lib/projects";
 import { getVerifiedFamilies } from "./lib/repositoryFamilies";
 import { probeRepositoryFamily } from "./hooks/useRepositoryFamilies";
@@ -293,6 +302,7 @@ import {
   type Session,
   type TurnIntent,
 } from "./lib/session";
+import type { ActionRunRef } from "./lib/agentActions";
 
 import {
   canDispatchQueuedHead,
@@ -497,11 +507,13 @@ function scheduleHarnessFlush(run: () => void): ScheduledFlush {
 function userTurnCards(
   noteCard: NoteComposerCard | undefined,
   secondOpinion?: SecondOpinionMeta,
+  action?: ActionRunRef,
 ) {
-  if (!noteCard && !secondOpinion) return undefined;
+  if (!noteCard && !secondOpinion && !action) return undefined;
   return {
     ...(secondOpinion ? { secondOpinion } : {}),
     ...(noteCard ? { noteCard: noteCardMeta(noteCard) } : {}),
+    ...(action ? { action } : {}),
   };
 }
 
@@ -691,6 +703,48 @@ export default function App({
   const [sidebarTab, setSidebarTab] = useState<SidebarTabId>(
     () => loadSidebarTabOrder()[0] ?? "sessions",
   );
+  const [commandsMenu, setCommandsMenu] = useState<{
+    anchor: PopoverAnchor;
+    path?: string;
+    projectId?: string;
+    taskId?: string;
+  } | null>(null);
+  /** ProjectRecord.id of the project whose commands are being edited. */
+  const [commandsSheet, setCommandsSheet] = useState<string | null>(null);
+  // Saved commands resolve their owning project at open: explicit id → rail
+  // path → the active task's project → the current folder's project.
+  const commandsProject = !commandsMenu
+    ? undefined
+    : commandsMenu.projectId
+      ? loadProjects().find((entry) => entry.id === commandsMenu.projectId)
+      : commandsMenu.path
+        ? projectForPath(commandsMenu.path)
+        : (() => {
+            const scope = active
+              ? taskForSession(active.id, sessionWorkCwd(active))
+              : null;
+            return (
+              (scope ? projectForTask(scope.task) : undefined) ??
+              projectForPath(projectCwd)
+            );
+          })();
+  const commandsTask = !commandsMenu
+    ? null
+    : commandsMenu.taskId
+      ? (loadTaskWorkspaces().find(
+          (entry) => entry.id === commandsMenu.taskId,
+        ) ?? null)
+      : (() => {
+          const scope = active
+            ? taskForSession(active.id, sessionWorkCwd(active))
+            : null;
+          return scope && scope.task.projectId === commandsProject?.id
+            ? scope.task
+            : null;
+        })();
+  const commandsSheetProject = commandsSheet
+    ? loadProjects().find((entry) => entry.id === commandsSheet)
+    : undefined;
   const [filesSearchOpen, setFilesSearchOpen] = useState(false);
   const [searchFocusToken, setSearchFocusToken] = useState(0);
   const [searchViewOpen, setSearchViewOpen] = useState(false);
@@ -3862,11 +3916,14 @@ export default function App({
         intent?: TurnIntent;
         planBlockId?: string;
         buildTarget?: PlanBuildTarget;
+        action?: ActionRunRef;
       },
     ) => {
       if (removingSessionIds.current.has(sessionId)) return;
       let storedCurrent = sessionsRef.current.find((s) => s.id === sessionId);
-      const repair = options?.repair ?? storedCurrent?.queuedMessages?.find(row => row.id === options?.queuedMessageId)?.repair;
+      const queuedRow = storedCurrent?.queuedMessages?.find(row => row.id === options?.queuedMessageId);
+      const repair = options?.repair ?? queuedRow?.repair;
+      const action = options?.action ?? queuedRow?.action;
       if (!storedCurrent) return;
       if (repair) {
         if (repairCheckingRef.current.has(sessionId)) return false;
@@ -3965,6 +4022,7 @@ export default function App({
                         noteCard,
                         handoffCard,
                         intent,
+                        action,
                       },
                     ],
                     queueStatus:
@@ -3990,7 +4048,7 @@ export default function App({
           return;
         }
         const visible = displayAttachments(attachments);
-        const cards = userTurnCards(noteCard);
+        const cards = userTurnCards(noteCard, undefined, action);
         setSessions((prev) =>
           prev.map((s) => {
             if (s.id !== sessionId) return s;
@@ -4067,7 +4125,9 @@ export default function App({
           : card
             ? SECOND_OPINION_TITLE
             : submittedText;
-      const cards = rawCommand ? undefined : userTurnCards(noteCard, card);
+      const cards = rawCommand
+        ? undefined
+        : userTurnCards(noteCard, card, action);
       const live = isLiveHarness(current.harness);
       const queuedHandoff =
         live && !pendingSwitch ? pendingHandoff(current) : null;
@@ -5151,6 +5211,7 @@ export default function App({
             noteCard: head.noteCard,
             handoffCard: head.handoffCard,
             intent: head.intent,
+            action: head.action,
           });
         }, 0),
       );
@@ -5222,6 +5283,7 @@ export default function App({
         queuedMessageId: message.id,
         noteCard: message.noteCard,
         handoffCard: message.handoffCard,
+        action: message.action,
       });
     },
     [onSubmit],
@@ -5357,6 +5419,120 @@ export default function App({
     },
     [openSessionBeside],
   );
+
+  const onRunAgentAction = useCallback(
+    (args: {
+      sourceSessionId: string;
+      cwd: string;
+      harness: HarnessId;
+      model: string;
+      text: string;
+      action: ActionRunRef;
+    }) => {
+      const source = sessionsRef.current.find(
+        (session) => session.id === args.sourceSessionId,
+      );
+      const session = {
+        ...newSession(
+          args.harness,
+          args.cwd,
+          args.model,
+          source?.runtimeMode,
+        ),
+        title: formatSessionTitle(args.harness, args.action.name),
+      };
+      openSessionBeside(args.sourceSessionId, session, args.cwd);
+      onSubmit(session.id, args.text, [], {
+        action: args.action,
+        followUpBehavior: "queue",
+      });
+    },
+    [onSubmit, openSessionBeside],
+  );
+
+  const onOpenCommands = useCallback(
+    (options: {
+      anchor: PopoverAnchor;
+      path?: string;
+      projectId?: string;
+      taskId?: string;
+    }) => setCommandsMenu(options),
+    [],
+  );
+
+  /**
+   * Runs a saved command in the project dock. A bound terminal is reused —
+   * running → focus only, idle → rerun in place — so one command can never
+   * launch twice, and a remount or restart never re-fires it.
+   */
+  const onRunProjectCommand = useCallback(
+    (
+      command: {
+        id: string;
+        name: string;
+        command: string;
+        repositoryId?: string;
+        relativeCwd?: string;
+      },
+      project: ProjectRecord | undefined,
+      task: TaskWorkspace | null | undefined,
+    ) => {
+      const target = resolveCommandTarget({ command, project, task });
+      if ("error" in target) return;
+      const projectPath = projectCwdRef.current;
+      if (!looksLikeProject(projectPath)) return;
+      const dock = findProjectTerminal(
+        projectTerminalsRef.current,
+        projectPath,
+      );
+      const bound = dock?.pane.files.find(
+        (file) => file.command?.presetId === command.id,
+      );
+      if (bound) {
+        setProjectTerminals((prev) =>
+          mapProjectTerminal(prev, projectPath, (entry) =>
+            withDockOpen(
+              selectDockTerminal(
+                bound.foreground
+                  ? entry
+                  : patchDockTerminal(entry, bound.id, {
+                      command: { runId: (bound.command?.runId ?? 0) + 1 },
+                    }),
+                bound.id,
+              ),
+              true,
+            ),
+          ),
+        );
+        focusProjectTerminal();
+        return;
+      }
+      const file: FilePaneTab = {
+        ...newTerminalFile(target.cwd, command.name),
+        command: {
+          presetId: command.id,
+          name: command.name,
+          text: command.command,
+          runId: 1,
+        },
+      };
+      setProjectTerminals((prev) =>
+        findProjectTerminal(prev, projectPath)
+          ? mapProjectTerminal(prev, projectPath, (entry) =>
+              addTerminalToDock(entry, file),
+            )
+          : [...prev, createProjectTerminal(projectPath, file)],
+      );
+      focusProjectTerminal();
+    },
+    [focusProjectTerminal],
+  );
+
+  const onStopProjectCommand = useCallback((fileId: string) => {
+    // Ctrl-C — stops the foreground process, keeps the terminal and its
+    // scrollback so the bound command stays re-runnable.
+    void writePty(fileId, "\x03").catch(() => undefined);
+  }, []);
 
   const autoContinueKey = sessions
     .filter(
@@ -6318,6 +6494,7 @@ export default function App({
     onSecondOpinion,
     onHandoff,
     onNewTerminal: onNewTerminalInSession,
+    onRunAgentAction,
   };
 
   return (
@@ -6386,6 +6563,7 @@ export default function App({
         onSelectProject={onSelectProject}
         onOpenProject={pickProject}
         onNewTask={onNewTask}
+        onOpenCommands={onOpenCommands}
         onOpenTask={onOpenTask}
         focusTaskId={focusTaskId}
         onEditTask={onEditTask}
@@ -6453,6 +6631,36 @@ export default function App({
           onClose={() => setTaskSheet(null)}
         />
       )}
+      {commandsMenu ? (
+        <ProjectCommandsMenu
+          anchor={commandsMenu.anchor}
+          project={commandsProject}
+          task={commandsTask}
+          dock={currentProjectDock}
+          onRun={(command) =>
+            onRunProjectCommand(command, commandsProject, commandsTask)
+          }
+          onStop={onStopProjectCommand}
+          onManage={() => {
+            const project =
+              commandsProject ??
+              (commandsMenu.path && looksLikeProject(commandsMenu.path)
+                ? ensureProjectForPath(commandsMenu.path)
+                : undefined) ??
+              (looksLikeProject(projectCwd)
+                ? ensureProjectForPath(projectCwd)
+                : undefined);
+            if (project) setCommandsSheet(project.id);
+          }}
+          onClose={() => setCommandsMenu(null)}
+        />
+      ) : null}
+      {commandsSheetProject ? (
+        <ProjectCommandsSheet
+          project={commandsSheetProject}
+          onClose={() => setCommandsSheet(null)}
+        />
+      ) : null}
       <div className="body-glass flex min-h-0 min-w-0 flex-1 flex-col">
         {wslOpening && (
           <div role={wslOpening.error ? "alert" : "status"} className="flex shrink-0 items-center gap-3 border-b border-content/10 px-4 py-2 text-[12px]">
@@ -6571,6 +6779,11 @@ export default function App({
                       onCloseTerminal={onCloseProjectTerminal}
                       onReorderTerminals={onReorderProjectTerminals}
                       onTerminalMetaChange={onTerminalMetaChange}
+                      onOpenCommands={
+                        show
+                          ? (rect) => onOpenCommands({ anchor: rect })
+                          : undefined
+                      }
                     />
                   </div>
                 );

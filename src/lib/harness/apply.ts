@@ -295,12 +295,14 @@ function lastMatchingBlock(
 type UserTurnExtra = {
   secondOpinion?: Block["secondOpinion"];
   noteCard?: Block["noteCard"];
+  action?: Block["action"];
 };
 
 function userTurnFields(extra?: UserTurnExtra) {
   return {
     ...(extra?.secondOpinion ? { secondOpinion: extra.secondOpinion } : {}),
     ...(extra?.noteCard ? { noteCard: extra.noteCard } : {}),
+    ...(extra?.action ? { action: extra.action } : {}),
   };
 }
 

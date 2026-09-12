@@ -138,6 +138,63 @@ describe("collectWorkspaceSnapshot", () => {
     ]);
     expect(snapshot.projectTerminals[0]?.pane.files[0]?.id).toBe(term.id);
   });
+
+  it("round-trips a bound command so a restart never re-runs it", () => {
+    const term = {
+      ...newTerminalFile("/tmp/a", "Dev"),
+      command: {
+        presetId: "c1",
+        name: "Dev",
+        text: "npm run dev",
+        runId: 2,
+        launched: 2,
+      },
+    };
+    const dock = createProjectTerminal("/tmp/a", term);
+    const snapshot = collectWorkspaceSnapshot(
+      [{ ...newTab("s1"), id: "t1" }],
+      [],
+      "t1",
+      "/tmp/a",
+      [dock],
+    );
+    const restored = hydrateWorkspaceSnapshot(
+      parseWorkspaceSnapshot(snapshot)!,
+      new Map(),
+    );
+    const file = restored?.projectTerminals?.[0]?.pane.files[0];
+    expect(file?.command).toEqual({
+      presetId: "c1",
+      name: "Dev",
+      text: "npm run dev",
+      runId: 2,
+      launched: 2,
+    });
+    // `launched` >= `runId`: the command stays a record, never a re-run.
+    expect((file!.command!.launched ?? 0) >= file!.command!.runId).toBe(true);
+  });
+
+  it("drops a malformed bound command but keeps the terminal", () => {
+    const term = {
+      ...newTerminalFile("/tmp/a", "Dev"),
+      command: { name: "Dev" }, // no text/runId
+    };
+    const dock = createProjectTerminal("/tmp/a", term);
+    const snapshot = collectWorkspaceSnapshot(
+      [{ ...newTab("s1"), id: "t1" }],
+      [],
+      "t1",
+      "/tmp/a",
+      [dock],
+    );
+    const restored = hydrateWorkspaceSnapshot(
+      parseWorkspaceSnapshot(snapshot)!,
+      new Map(),
+    );
+    const file = restored?.projectTerminals?.[0]?.pane.files[0];
+    expect(file?.terminal).toBe(true);
+    expect(file?.command).toBeUndefined();
+  });
 });
 
 describe("parseWorkspaceSnapshot", () => {

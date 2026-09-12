@@ -6,6 +6,8 @@ export type TerminalMetaPatch = {
   cwd?: string;
   /** `null` clears a running command; omit to leave it unchanged. */
   foreground?: string | null;
+  /** Partial update to the bound saved command — merged, not replaced. */
+  command?: Partial<import("./layout").TerminalCommand>;
 };
 
 export type RunningTerminal = {
@@ -39,10 +41,26 @@ export function applyTerminalMeta(
     patch.foreground === undefined
       ? file.foreground
       : (patch.foreground?.trim() || undefined);
+  let command = file.command;
+  if (patch.command && file.command) {
+    const merged = { ...file.command, ...patch.command };
+    if (
+      merged.presetId === file.command.presetId &&
+      merged.name === file.command.name &&
+      merged.text === file.command.text &&
+      merged.runId === file.command.runId &&
+      merged.launched === file.command.launched
+    ) {
+      command = file.command;
+    } else {
+      command = merged;
+    }
+  }
   if (
     path === file.path &&
     cwd === file.cwd &&
-    foreground === file.foreground
+    foreground === file.foreground &&
+    command === file.command
   ) {
     return file;
   }
@@ -51,6 +69,7 @@ export function applyTerminalMeta(
     path,
     cwd,
     foreground,
+    command,
   };
 }
 
