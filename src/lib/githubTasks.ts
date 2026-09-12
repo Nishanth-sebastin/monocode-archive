@@ -1,6 +1,6 @@
 import { listAzureDelivery, type AzureInboxDelivery } from "./azureInbox";
 import { invoke } from "@tauri-apps/api/core";
-import { jiraConnected, listJiraIssues, jiraFilterCacheKey } from "./jira";
+import { atlassianCapable, jiraConnected, listJiraIssues, jiraFilterCacheKey } from "./jira";
 import { azureConnected, listAzureItems, azureFilterCacheKey } from "./azure";
 import {
   linearConnected,
@@ -578,8 +578,10 @@ async function fetchInboxItems(
   let jiraItems: InboxItem[] = [];
   try {
     const status = await jiraConnected();
-    if (status.connected) jiraItems = (await listJiraIssues(status.site, query.state)).map(item => ({ ...item, account: status.account }));
-    else errors.jira = "Connect Jira Cloud in Settings to see assigned issues.";
+    if (status.connected && atlassianCapable(status, "Jira"))
+      jiraItems = (await listJiraIssues(status.site, query.state)).map(item => ({ ...item, account: status.account }));
+    else if (!status.connected)
+      errors.jira = "Connect Jira Cloud in Settings to see assigned issues.";
   } catch (error) {
     errors.jira = inboxErrorMessage(error);
   }

@@ -18,7 +18,7 @@ import { wslLocation } from "../lib/paths";
 import { Modal } from "./Modal";
 import { CwdPicker } from "./CwdPicker";
 import { SecondOpinionButton } from "./SecondOpinionButton";
-import { Check, Plus } from "./icons";
+import { Check, File, Plus } from "./icons";
 
 export function AgentContextPicker({
   request,
@@ -155,6 +155,23 @@ export function AgentContextPicker({
       className="max-h-[80vh] [&_header_h2]:text-base"
     >
       <div ref={body} className="space-y-3 p-3 text-[12px] text-content">
+        {!request.repair && request.context.entries.length ? (
+          <div className="flex flex-wrap gap-1.5">
+            {request.context.entries.map((entry) => (
+              <span
+                key={entry.id}
+                title={entry.origin}
+                className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-content/10 px-1.5 py-0.5 text-[11px] text-content/75"
+              >
+                <File className="size-3 shrink-0" strokeWidth={1.75} />
+                <span className="truncate">{entry.title}</span>
+                {entry.truncated ? (
+                  <span className="shrink-0 text-amber-500">Truncated</span>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        ) : null}
         {request.repair ? <div className="space-y-3">
           <div className="flex items-center justify-between text-content/60"><span>{request.repair.kind === "comments" ? "Comments" : "Log evidence"} · {selected.length} selected</span><button type="button" className="rounded px-1.5 py-1 hover:bg-content/5" disabled={pending} onClick={() => setSelected(selected.length === request.context.entries.length ? [] : request.context.entries.map(entry => entry.id))}>{selected.length === request.context.entries.length ? "Clear selection" : "Select all"}</button></div>
           <div className="max-h-52 overflow-auto rounded-md border border-content/10">{request.context.entries.map(entry => {

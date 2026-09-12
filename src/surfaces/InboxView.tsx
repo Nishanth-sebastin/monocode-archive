@@ -44,6 +44,7 @@ import {
 import { InboxConnectMenu } from "../chrome/InboxConnectMenu";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
 import { ContextCheckbox, InboxContextPicker, useInboxContext } from "../chrome/InboxContextPicker";
+import { InboxRelated } from "../chrome/InboxRelated";
 import type { InboxComposerCard } from "../lib/githubTasks";
 import { ProjectLogoIcon } from "../chrome/ProjectLogoIcon";
 import { ProjectMascot } from "../chrome/ProjectMascot";
@@ -178,6 +179,7 @@ import {
 import { inboxAskKey } from "../lib/inboxAsk";
 import {
   JIRA_CHANGE_EVENT,
+  atlassianCapable,
   jiraConnected,
   jiraDetails,
   jiraThread,
@@ -574,7 +576,10 @@ export function InboxView({
       void jiraConnected().then(status => {
         if (cancelled) return;
         setJiraSite(status.site);
-        setConnections(prev => ({ ...prev, jira: status.connected }));
+        setConnections(prev => ({
+          ...prev,
+          jira: status.connected && atlassianCapable(status, "Jira"),
+        }));
         setJiraProjects([]);
         setJiraFavorites([]);
         setJiraFilter(loadJiraFilter(status.site));
@@ -2106,6 +2111,7 @@ export function InboxDetail({
             <p className="text-[13px] text-content/45">No description</p>
           )}
           {(jira || azure) && galleryAttachments.length ? <TicketImages key={`${item.site}:${item.id}:${revision}`} item={item} attachments={galleryAttachments} /> : null}
+          <InboxRelated key={`related:${inboxItemKey(item)}:${revision}`} item={item} />
           <InboxComments
             thread={thread}
             loading={threadLoading}
