@@ -44,6 +44,8 @@ import {
   type NativeCommand,
   type NativeCommandProvider,
 } from "./nativeCommands";
+import { acquireSharedStart } from "./liveStart";
+import { markTurn } from "../turnTiming";
 import type {
   ApprovalDecision,
   CompactContextInput,
@@ -107,7 +109,7 @@ const commandListeners = new Map<
 export async function sendDevinTurn(input: SendTurnInput): Promise<void> {
   let live: Live;
   try {
-    live = await ensureLive(input);
+    live = await acquireLive(input);
   } catch (error) {
     cancelledThreads.delete(input.sessionId);
     throw error;
@@ -123,14 +125,18 @@ export async function sendDevinTurn(input: SendTurnInput): Promise<void> {
       live.cancelled = false;
       live.muteUpdates = false;
       try {
-        await applyModelSelection(live, input);
+        // Model and mode are independent session settings; issue them
+        // together so a loaded session pays one round trip, not two.
+        await Promise.all([
+          applyModelSelection(live, input),
+          applyRuntimeMode(
+            live,
+            input.runtimeMode,
+            input.intent === "plan",
+          ),
+        ]);
         if (live.cancelled) return;
-        await applyRuntimeMode(
-          live,
-          input.runtimeMode,
-          input.intent === "plan",
-        );
-        if (live.cancelled) return;
+        markTurn(input.sessionId, "devin controls applied");
         await prompt(live, input);
       } catch (error) {
         if (live.cancelled) return;
@@ -155,7 +161,7 @@ export async function compactDevinContext(
   let live = liveByThread.get(input.sessionId);
   if (!live || pathKey(live.cwd) !== pathKey(input.cwd)) {
     try {
-      live = await ensureLive(input);
+      live = await acquireLive(input);
     } catch (error) {
       cancelledThreads.delete(input.sessionId);
       throw error;
@@ -297,8 +303,12 @@ export async function stopDevinSession(sessionId: string): Promise<void> {
     settlePending(live);
   }
   live?.acp.close();
-  unwatchChild(sessionId);
-  await killChild(sessionId).catch(() => undefined);
+  // Only kill a child this adapter owns — after a harness switch another
+  // adapter may hold a live child under the same session id.
+  if (live || startingByThread.has(sessionId)) {
+    unwatchChild(sessionId);
+    await killChild(sessionId).catch(() => undefined);
+  }
 }
 
 export async function forgetDevinSession(sessionId: string): Promise<void> {
@@ -356,6 +366,35 @@ function commandContextKey(context: CommandContext): string {
   return `${context.sessionId ?? ""}\n${pathKey(context.cwd)}`;
 }
 
+/** In-flight cold starts: a prewarm and a send share one spawn. */
+const startingByThread = new Map<string, Promise<Live>>();
+
+/** ensureLive wrapper that dedupes concurrent cold starts of one thread. */
+async function acquireLive(
+  input: HarnessSessionInput,
+  keepExisting = false,
+): Promise<Live> {
+  return acquireSharedStart(
+    input.sessionId,
+    liveByThread,
+    startingByThread,
+    () => ensureLive(input),
+    keepExisting,
+  );
+}
+
+/**
+ * Warm the provider session ahead of a prompt. No-ops when a live host
+ * already serves the thread so a prewarm cannot steal a running turn's
+ * event sink — or recycle the host a racing send just spawned.
+ */
+export async function prewarmDevinSession(
+  input: HarnessSessionInput,
+): Promise<void> {
+  if (liveByThread.has(input.sessionId)) return;
+  await acquireLive(input, true);
+}
+
 async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   const existing = liveByThread.get(input.sessionId);
   if (existing && pathKey(existing.cwd) === pathKey(input.cwd)) {
@@ -374,6 +413,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   }
 
   const { path } = await resolveDevinBinary(input.cwd);
+  markTurn(input.sessionId, "devin binary resolved");
   const handlers: AcpHandlers = {};
   const acp = new AcpClient(input.sessionId, handlers);
   const liveRef: { current: Live | null } = { current: null };
@@ -446,6 +486,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
 
   try {
     await spawnChild(input.sessionId, path, devinSpawnArgs(), input.cwd);
+    markTurn(input.sessionId, "devin spawned");
   } catch (error) {
     unwatchChild(input.sessionId);
     throw error;
@@ -468,6 +509,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     }
     const agentCaps = asRecord(asRecord(initResult)?.agentCapabilities);
     const supportsLoad = agentCaps?.loadSession === true;
+    markTurn(input.sessionId, "devin initialized");
 
     let setup: unknown;
     let acpSessionId: string | undefined;
@@ -510,6 +552,10 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       acpSessionId = sessionIdFromResult(setup);
     }
     if (!acpSessionId) throw new Error("Devin did not return a session id");
+    markTurn(
+      input.sessionId,
+      didLoad ? "devin session loaded" : "devin session started",
+    );
 
     const configOptions = devinConfigOptions(asRecord(setup)?.configOptions);
     const modes = devinModesFromSetup(setup);
@@ -638,6 +684,7 @@ async function prompt(live: Live, input: SendTurnInput): Promise<void> {
         },
         PROMPT_TIMEOUT_MS,
       );
+      markTurn(input.sessionId, "devin prompt resolved");
     } finally {
       live.promptInFlight -= 1;
     }

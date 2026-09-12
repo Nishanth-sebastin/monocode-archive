@@ -21,7 +21,6 @@ export type HarnessId =
   | "omp"
   | "fx"
   | "devin"
-  | "devin"
   | "copilot"
   | "muse";
 

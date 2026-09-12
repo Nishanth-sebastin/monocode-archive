@@ -47,6 +47,8 @@ import {
   type MuseItemState,
   type MuseUserInput,
 } from "./museProtocol";
+import { acquireSharedStart } from "./liveStart";
+import { markTurn } from "../turnTiming";
 import type {
   ApprovalDecision,
   CompactContextInput,
@@ -134,6 +136,8 @@ type Resume = {
 const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
 const cancelledThreads = new Set<string>();
+/** In-flight cold starts: a prewarm and a send share one spawn. */
+const startingByThread = new Map<string, Promise<Live>>();
 
 export async function sendMuseTurn(input: SendTurnInput): Promise<void> {
   const live = await acquireLive(input);
@@ -403,8 +407,12 @@ export async function stopMuseSession(sessionId: string): Promise<void> {
     live.compactionWait = null;
     live.rpc.close();
   }
-  unwatchChild(sessionId);
-  await killChild(sessionId).catch(() => undefined);
+  // Only kill a child this adapter owns — after a harness switch another
+  // adapter may hold a live child under the same session id.
+  if (live || startingByThread.has(sessionId)) {
+    unwatchChild(sessionId);
+    await killChild(sessionId).catch(() => undefined);
+  }
 }
 
 export async function forgetMuseSession(sessionId: string): Promise<void> {
@@ -423,13 +431,34 @@ export function bindMuseSession(
 }
 
 /** ensureLive wrapper: a pending cancel must not leak past a failed startup. */
-async function acquireLive(input: HarnessSessionInput): Promise<Live> {
+async function acquireLive(
+  input: HarnessSessionInput,
+  keepExisting = false,
+): Promise<Live> {
   try {
-    return await ensureLive(input);
+    return await acquireSharedStart(
+      input.sessionId,
+      liveByThread,
+      startingByThread,
+      () => ensureLive(input),
+      keepExisting,
+    );
   } catch (error) {
     cancelledThreads.delete(input.sessionId);
     throw error;
   }
+}
+
+/**
+ * Warm the provider session ahead of a prompt. No-ops when a live host
+ * already serves the thread so a prewarm cannot steal a running turn's
+ * event sink — or recycle the host a racing send just spawned.
+ */
+export async function prewarmMuseSession(
+  input: HarnessSessionInput,
+): Promise<void> {
+  if (liveByThread.has(input.sessionId)) return;
+  await acquireLive(input, true);
 }
 
 async function ensureLive(input: HarnessSessionInput): Promise<Live> {
@@ -451,6 +480,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   }
 
   const { path } = await resolveMuseBinary(input.cwd);
+  markTurn(input.sessionId, "muse binary resolved");
   const liveRef: { current: Live | null } = { current: null };
   // session/resume re-issues pending approvals/questions as server requests
   // before `live` is bound; hold them until the session object exists.
@@ -527,6 +557,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       }),
       input.cwd,
     );
+    markTurn(input.sessionId, "muse spawned");
 
     try {
       const result = await rpc.request(
@@ -543,6 +574,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       throw museAuthError(error, "start");
     }
     void rpc.notify("initialized");
+    markTurn(input.sessionId, "muse initialized");
 
     // "muse:default" is the picker placeholder, not a servable model id.
     const wantedModel = museNativeModel(input.model, input.cwd);
@@ -597,6 +629,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     if (!museSessionId) {
       throw new Error("Muse did not return a session id");
     }
+    markTurn(input.sessionId, resumed ? "muse resumed" : "muse session started");
 
     const live: Live = {
       rpc,
@@ -683,36 +716,54 @@ function museNativeModel(model: string, cwd: string): string | undefined {
 }
 
 async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
+  // Model and approval mode are independent session settings; issue them
+  // together so a resumed turn pays one round trip, not two.
   const native = museNativeModel(input.model, input.cwd);
-  if (native && native !== live.appliedModelId) {
-    try {
-      await live.rpc.request(
-        "session/setModel",
-        {
-          commandId: newCommandId(),
-          model: { modelId: native },
-          sessionId: live.museSessionId,
-        },
-        CONTROL_TIMEOUT_MS,
-      );
-      live.appliedModelId = native;
-    } catch (error) {
-      ignoreUnsupportedControl("session/setModel", error);
-    }
-  }
   const mode = museApprovalMode(live.runtimeMode, live.planning);
-  if (mode !== live.appliedMode) {
-    try {
-      await live.rpc.request(
-        "session/setApprovalMode",
-        { commandId: newCommandId(), mode, sessionId: live.museSessionId },
-        CONTROL_TIMEOUT_MS,
-      );
-      live.appliedMode = mode;
-    } catch (error) {
-      ignoreUnsupportedControl("session/setApprovalMode", error);
-    }
+  const controls: Promise<void>[] = [];
+  if (native && native !== live.appliedModelId) {
+    controls.push(
+      live.rpc
+        .request(
+          "session/setModel",
+          {
+            commandId: newCommandId(),
+            model: { modelId: native },
+            sessionId: live.museSessionId,
+          },
+          CONTROL_TIMEOUT_MS,
+        )
+        .then(() => {
+          live.appliedModelId = native;
+        })
+        .catch((error: unknown) =>
+          ignoreUnsupportedControl("session/setModel", error),
+        ),
+    );
   }
+  if (mode !== live.appliedMode) {
+    controls.push(
+      live.rpc
+        .request(
+          "session/setApprovalMode",
+          { commandId: newCommandId(), mode, sessionId: live.museSessionId },
+          CONTROL_TIMEOUT_MS,
+        )
+        .then(() => {
+          live.appliedMode = mode;
+        })
+        .catch((error: unknown) =>
+          ignoreUnsupportedControl("session/setApprovalMode", error),
+        ),
+    );
+  }
+  if (controls.length) {
+    await Promise.all(controls);
+    markTurn(live.sessionId, "muse controls applied");
+  }
+  // The parallel controls widened the cancel window — check again before
+  // launching a turn the user already stopped.
+  if (live.cancelled) return;
 
   const parts = museTurnInput(input.text, input.attachments ?? []);
   if (parts.length === 0) return;
@@ -742,6 +793,7 @@ async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
   }
   const rec = asRecord(ack);
   const turnId = stringField(rec, "turnId");
+  markTurn(live.sessionId, "muse turn/start ack");
   if (!turnId) {
     throw new Error("Muse turn/start returned no turn id");
   }

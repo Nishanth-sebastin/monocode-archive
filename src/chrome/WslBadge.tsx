@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { pathKey, wslLocation } from "../lib/paths";
 import { connectWslProject } from "../lib/wsl";
+import { setWslStatus, useWslStatus, wslStatusFor } from "../lib/wslStatus";
 import { Popover } from "./Popover";
 
 export function WslBadge({
@@ -14,31 +15,47 @@ export function WslBadge({
   const location = wslLocation(cwd);
   const anchor = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
-  const [connected, setConnected] = useState<boolean | null>(null);
+  const status = useWslStatus(location?.distribution);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const request = useRef<AbortController | null>(null);
   useEffect(() => {
-    if (!open || !location) return;
+    if (!location) return;
     let cancelled = false;
-    setConnected(null);
-    setBusy(false);
-    setError("");
+    // Probes take time; only publish when nothing fresher landed meanwhile
+    // (a connect in flight or a finished one outranks an older probe).
+    const before = wslStatusFor(location.distribution);
     void invoke<boolean>("wsl_connected", {
       distribution: location.distribution,
     })
       .then((value) => {
-        if (!cancelled) setConnected(value);
+        if (cancelled || wslStatusFor(location.distribution) !== before) return;
+        setWslStatus(location.distribution, {
+          state: value ? "connected" : "disconnected",
+        });
       })
       .catch((reason) => {
-        if (!cancelled) setError(String(reason));
+        if (cancelled || wslStatusFor(location.distribution) !== before) return;
+        setWslStatus(location.distribution, {
+          state: "error",
+          error: String(reason),
+        });
       });
     return () => {
       cancelled = true;
-      request.current?.abort();
     };
-  }, [open, cwd]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location?.distribution]);
   if (!location) return null;
+  const offline =
+    status.state === "disconnected" || status.state === "error";
+  const label =
+    status.state === "connecting"
+      ? "WSL · connecting…"
+      : offline
+        ? "WSL · offline"
+        : compact
+          ? "WSL"
+          : `WSL · ${location.distribution}`;
   return (
     <>
       <button
@@ -53,9 +70,11 @@ export function WslBadge({
           event.stopPropagation();
           setOpen((value) => !value);
         }}
-        className="my-auto max-w-28 shrink-0 truncate rounded bg-content/5 px-1.5 py-0.5 text-[10px] text-content outline-none hover:bg-content/10 focus-visible:ring-1 focus-visible:ring-content/30"
+        className={`my-auto max-w-28 shrink-0 truncate rounded bg-content/5 px-1.5 py-0.5 text-[10px] outline-none hover:bg-content/10 focus-visible:ring-1 focus-visible:ring-content/30 ${
+          offline ? "italic text-content/80" : "text-content"
+        }`}
       >
-        {compact ? "WSL" : `WSL · ${location.distribution}`}
+        {label}
       </button>
       {open && (
         <Popover
@@ -77,50 +96,56 @@ export function WslBadge({
           </p>
           <p className="break-all text-content/60">{location.path}</p>
           <p className="text-content/60">
-            {connected == null
-              ? "Checking connection…"
-              : connected
+            {status.state === "connecting"
+              ? "Connecting…"
+              : status.state === "connected"
                 ? "Connected · Linux files, Git and agents"
-                : "Disconnected"}
+                : status.state === "disconnected"
+                  ? "Disconnected"
+                  : status.state === "error"
+                    ? "Connection failed"
+                    : "Checking connection…"}
           </p>
           <p className="text-content/75">
             Browser links open on Windows. Localhost access depends on WSL
             networking; MonoCode does not forward ports. Open Linux editors from
             the terminal.
           </p>
-          {error && (
+          {status.error && (
             <p role="alert" className="break-words text-content/80">
-              {error}
+              {status.error}
             </p>
           )}
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || status.state === "connecting"}
             className="rounded-md bg-content/8 px-2 py-1 text-content/75 hover:bg-content/12 disabled:opacity-40"
             onClick={() => {
               const controller = new AbortController();
               request.current = controller;
               setBusy(true);
-              setError("");
               void connectWslProject(cwd, controller.signal, true)
                 .then((canonical) => {
                   if (pathKey(canonical) !== pathKey(cwd))
                     throw new Error(
                       "This folder resolves to a different path. Choose it again from Open project.",
                     );
-                  setConnected(true);
                 })
-                .catch((reason) => {
-                  if (!controller.signal.aborted) setError(String(reason));
+                .catch(() => {
+                  // The shared store already carries the failure for this
+                  // distribution; the popover renders it above.
                 })
                 .finally(() => {
-                  if (!controller.signal.aborted) setBusy(false);
+                  // Unconditional: an aborted connect still settles, and the
+                  // popover may have closed without aborting the request.
+                  if (request.current === controller) request.current = null;
+                  setBusy(false);
                 });
             }}
           >
-            {busy
+            {busy || status.state === "connecting"
               ? "Connecting…"
-              : connected
+              : status.state === "connected"
                 ? "Check connection"
                 : "Reconnect"}
           </button>
