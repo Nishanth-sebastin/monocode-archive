@@ -7,6 +7,12 @@
 //! - Windows: a dedicated thread holds `ES_CONTINUOUS | ES_SYSTEM_REQUIRED`
 //!   via `SetThreadExecutionState` and clears it on release.
 //! - Other platforms report `supported: false`; agent work is unaffected.
+//!
+//! Accepted residuals: a renderer that dies without `WindowEvent::Destroyed`
+//! keeps its refs until the webview reloads or the runtime exits (WKWebView
+//! self-heals by reloading, which re-pushes under the same label); and a
+//! release racing the monitor's reap→flag store can still signal a just-reaped
+//! pid in a nanosecond window, before the OS can realistically recycle it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -288,13 +294,8 @@ impl PowerHost {
     }
 }
 
-impl Drop for PowerHost {
-    fn drop(&mut self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            let _ = inner.assertion.take();
-        }
-    }
-}
+// No explicit Drop: PowerHost's fields release the held assertion when the
+// Mutex is dropped, and RunEvent::Exit calls release() first anyway.
 
 // These commands stay synchronous: main-thread dispatch keeps them ordered
 // relative to each other and to `WindowEvent::Destroyed` in lib.rs, so a

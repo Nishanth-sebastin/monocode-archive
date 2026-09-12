@@ -10,10 +10,13 @@ export type PowerStatus = {
   held: boolean;
   /** Qualifying sessions across all windows. */
   working: number;
-  error?: string;
+  error: string | null;
   /** False until the first backend status arrives; gates "not available". */
   loaded: boolean;
 };
+
+/** Status as the backend emits it; `loaded` is added frontend-side. */
+type BackendPowerStatus = Omit<PowerStatus, "loaded">;
 
 const POWER_EVENT = "power-assertion";
 
@@ -22,6 +25,7 @@ const EMPTY_STATUS: PowerStatus = {
   enabled: false,
   held: false,
   working: 0,
+  error: null,
   loaded: false,
 };
 
@@ -63,8 +67,8 @@ export function syncKeepAwake(enabled: boolean, sessionIds: string[]) {
   });
 }
 
-export function retryKeepAwake(): Promise<PowerStatus> {
-  return invoke<PowerStatus>("power_retry");
+export function retryKeepAwake(): Promise<BackendPowerStatus> {
+  return invoke<BackendPowerStatus>("power_retry");
 }
 
 let statusSnapshot: PowerStatus = EMPTY_STATUS;
@@ -87,21 +91,23 @@ function notifyStatus() {
   for (const listener of statusListeners) listener();
 }
 
-function applyStatus(status: Omit<PowerStatus, "loaded">) {
+function applyStatus(status: BackendPowerStatus) {
   statusSnapshot = { ...status, loaded: true };
   notifyStatus();
 }
 
 function ensureStatusBridge() {
   if (statusBridge) return;
-  const bridge = Promise.all([
-    listen<Omit<PowerStatus, "loaded">>(POWER_EVENT, (event) => {
-      applyStatus(event.payload);
-    }),
-    invoke<Omit<PowerStatus, "loaded">>("power_status")
+  // Register the listener before fetching: a status event landing between
+  // registration and the fetch resolving must not be overwritten by the
+  // older snapshot.
+  const bridge = listen<BackendPowerStatus>(POWER_EVENT, (event) => {
+    applyStatus(event.payload);
+  }).then(() =>
+    invoke<BackendPowerStatus>("power_status")
       .then(applyStatus)
       .catch(() => undefined),
-  ]);
+  );
   statusBridge = bridge;
   // A failed bridge must not wedge status for the session lifetime; the next
   // subscriber tries again.

@@ -573,7 +573,7 @@ function GeneralPage({
             Not available on this platform
           </span>
         ) : null}
-        {keepAwakeEnabled && powerStatus.error ? (
+        {keepAwakeEnabled && powerStatus.supported && powerStatus.error ? (
           <span className="flex items-center gap-2 text-[12px] text-content/45">
             {powerStatus.error}
             <SecondaryButton onClick={() => void retryKeepAwake()}>
