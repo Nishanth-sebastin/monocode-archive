@@ -180,7 +180,7 @@ def bounded_tree(path):
                     pending.append(Path(entry.path))
 
 
-AGENT_PROVIDERS = ["claude", "codex", "cursor", "opencode", "pi", "omp", "fx", "grok", "devin"]
+AGENT_PROVIDERS = ["claude", "codex", "cursor", "opencode", "pi", "omp", "fx", "grok", "devin", "muse"]
 AGENT_NAMES = {
     "claude": ["claude"],
     "codex": ["codex"],
@@ -191,6 +191,7 @@ AGENT_NAMES = {
     "fx": ["fx"],
     "grok": ["grok"],
     "devin": ["devin"],
+    "muse": ["muse"],
 }
 # Linux tool folders that are not always exported to the login PATH.
 AGENT_FOLDERS = [
@@ -229,6 +230,11 @@ AGENT_AUTH = {
     "devin": {
         "env": ("WINDSURF_API_KEY", "DEVIN_API_KEY"),
         "files": (".local/share/devin/credentials.toml",),
+        "strict": True,
+    },
+    "muse": {
+        "env": ("META_API_KEY",),
+        "files": (".config/muse/auth.json",),
         "strict": True,
     },
 }
@@ -285,16 +291,31 @@ def verify_agent(provider, name, candidate, resolved, home):
             return True
         code, text = agent_help(candidate, home)
         return code == 0 and "acp" in text and ("devin" in text or "agent client protocol" in text)
+    if provider == "muse":
+        if name.startswith("muse-bin-") and ".local" in Path(resolved).parts:
+            return True
+        if file_mentions(candidate, (b"muse_channel_url", b"muse-bin-", b"msp session host")):
+            return True
+        code, text = agent_help(candidate, home)
+        return code == 0 and "serve" in text and ("msp" in text or "session host" in text)
     return True
 
 
 def find_agent(provider):
     if provider == "opencode":
         raise ValueError("OpenCode's HTTP transport is not supported in WSL yet. Choose a stdio agent such as Claude or Codex.")
-    names = AGENT_NAMES.get(provider)
-    if names is None:
+    names = list(AGENT_NAMES.get(provider) or [])
+    if not names:
         raise ValueError("Unknown agent provider")
     home = Path.home()
+    if provider == "muse":
+        # The pinned runtime can outlive a broken launcher shim.
+        try:
+            version = (home / ".local/bin/.muse-version").read_text().strip()
+        except OSError:
+            version = ""
+        if version:
+            names = names + ["muse-bin-" + version]
     folders = [home / suffix for suffix in AGENT_FOLDERS]
     folders = [Path(folder) for folder in os.environ.get("PATH", "").split(":") if folder.startswith("/") and not folder.startswith("/mnt/")] + folders
     for name in names:

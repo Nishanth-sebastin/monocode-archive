@@ -173,11 +173,12 @@ export class JsonRpcClient {
       if (!pending) return;
       this.pending.delete(key);
       if (msg.error) {
-        pending.reject(
-          new Error(
-            msg.error.message || `${this.label} error ${msg.error.code ?? ""}`,
-          ),
-        );
+        const failure = new Error(
+          msg.error.message || `${this.label} error ${msg.error.code ?? ""}`,
+        ) as Error & { code?: number; data?: unknown };
+        failure.code = msg.error.code;
+        failure.data = msg.error.data;
+        pending.reject(failure);
         return;
       }
       pending.resolve(msg.result);

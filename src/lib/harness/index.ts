@@ -115,6 +115,7 @@ export { refreshClaudeCatalog } from "./claudeCatalog";
 export { refreshPiCatalog, refreshOmpCatalog } from "./piCatalog";
 export { refreshFxCatalog } from "./fxCatalog";
 export { refreshGrokCatalog } from "./grokCatalog";
+export { refreshMuseCatalog } from "./museCatalog";
 export { registerBuiltinHarnesses } from "./register";
 export {
   getHarnessAvailabilitySnapshot,
