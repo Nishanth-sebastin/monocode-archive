@@ -27,6 +27,7 @@ vi.mock("./child", () => ({
 
 const {
   sendMuseTurn,
+  steerMuseTurn,
   cancelMuseTurn,
   compactMuseContext,
   respondMuseApproval,
@@ -905,6 +906,297 @@ describe("muse live turn sequence", () => {
     });
     await turn;
     await stopMuseSession("t11");
+  });
+
+  it("renders reminder children as a status line, never a tool row", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "tr1");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: {
+        itemId: "rc1",
+        kind: "reminderChild",
+        status: "inProgress",
+        fallbackText: "Reminder child session",
+      },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "rc1", kind: "reminderChild", status: "completed" },
+    });
+    await waitFor(
+      () => events.some((e) => e.type === "status"),
+      "reminder status",
+    );
+    expect(
+      events.some(
+        (e) =>
+          e.type === "status" && e.text === "Reminder child session",
+      ),
+    ).toBe(true);
+    expect(events.some((e) => e.type === "tool.started")).toBe(false);
+    expect(events.some((e) => e.type === "tool.updated")).toBe(false);
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("tr1");
+  });
+
+  it("settles the send when the end-of-turn drain begins", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "td1");
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "inProgress" },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "completed" },
+    });
+    // The drain's reminder child opens after the answer: the send must
+    // resolve without waiting out turn/completed.
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "rc1", kind: "reminderChild", status: "inProgress" },
+    });
+    await waitFor(() => settled, "drain settle");
+    expect(
+      events.some(
+        (e) =>
+          e.type === "status" &&
+          e.text.includes("memory/reminder bookkeeping"),
+      ),
+    ).toBe(true);
+
+    // The trailing turn/completed still lands; nothing double-settles.
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await turn;
+    await stopMuseSession("td1");
+  });
+
+  it("settles on single-shot reminder children observed during the drain", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "td2");
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "inProgress" },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "completed" },
+    });
+    // Echo-fast children arrive as item/completed only — the event itself
+    // while no real item is open is drain evidence.
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "rc1", kind: "reminderChild", status: "completed" },
+    });
+    await waitFor(() => settled, "single-shot drain settle");
+    await stopMuseSession("td2");
+  });
+
+  it("does not settle on turn-start recall before any real item", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "td3");
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    // Memory recall runs before the model call: a reminder child while no
+    // real item has completed must not free the turn.
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "rc0", kind: "reminderChild", status: "inProgress" },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "rc0", kind: "reminderChild", status: "completed" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "inProgress" },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "completed" },
+    });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "rc1", kind: "reminderChild", status: "inProgress" },
+    });
+    await waitFor(() => settled, "drain settle after answer");
+    await stopMuseSession("td3");
+  });
+
+  it("does not settle while a real item is still open", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "td4");
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "inProgress" },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "completed" },
+    });
+    // A mid-turn reminder child while a tool call runs is not the drain.
+    notify("item/started", {
+      sessionId: "MS1",
+      item: {
+        itemId: "c1",
+        kind: "toolCall",
+        status: "inProgress",
+        tool: "bash",
+      },
+    });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "rc1", kind: "reminderChild", status: "inProgress" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: {
+        itemId: "c1",
+        kind: "toolCall",
+        status: "completed",
+        tool: "bash",
+      },
+    });
+    await waitFor(() => settled, "settle once real work closes");
+    await stopMuseSession("td4");
+  });
+
+  it("holds drain settlement while a model retry is pending", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "td5");
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "inProgress" },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "completed" },
+    });
+    notify("turn/retryScheduled", {
+      sessionId: "MS1",
+      turnId: "T1",
+      attempt: 1,
+      nextAttempt: 2,
+      maxAttempts: 3,
+      retryDelayMs: 5000,
+    });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "rc1", kind: "reminderChild", status: "inProgress" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+
+    // The retry produces real work; once it closes with the reminder child
+    // still open, the drain is real and the send settles.
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "m2", kind: "agentMessage", status: "inProgress" },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "m2", kind: "agentMessage", status: "completed" },
+    });
+    await waitFor(() => settled, "settle after retried work closes");
+    await stopMuseSession("td5");
+  });
+
+  it("still waits out a drain that emits no reminder items", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "td6");
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "inProgress" },
+    });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "completed" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+
+    notify("turn/completed", {
+      sessionId: "MS1",
+      turnId: "T1",
+      terminal: "completed",
+    });
+    await waitFor(() => settled, "backstop settle");
+    await stopMuseSession("td6");
+  });
+
+  it("keeps the drained turn as the steer/interrupt target", async () => {
+    const events: HarnessEvent[] = [];
+    const { turn } = await startTurn(events, "hey", "td7");
+    notify("turn/started", { sessionId: "MS1", turnId: "T1" });
+    notify("item/completed", {
+      sessionId: "MS1",
+      item: { itemId: "m1", kind: "agentMessage", status: "completed" },
+    });
+    notify("item/started", {
+      sessionId: "MS1",
+      item: { itemId: "rc1", kind: "reminderChild", status: "inProgress" },
+    });
+    // The send resolves on the drain, but the turn still runs host-side:
+    // steer/interrupt must keep addressing T1 until turn/completed lands.
+    await turn;
+    const steer = steerMuseTurn({
+      sessionId: "td7",
+      cwd: "/repo",
+      model: "muse:default",
+      text: "one more thing",
+    });
+    await waitFor(() => byMethod("turn/steer").length > 0, "turn/steer");
+    const steerMsg = lastByMethod("turn/steer")!;
+    expect(steerMsg.params.expectedTurnId).toBe("T1");
+    reply(steerMsg.id, { commandId: steerMsg.params.commandId, disposition: "queued" });
+    await steer;
+    await stopMuseSession("td7");
   });
 
   it("ignores routine stderr lines that merely contain auth-like words", async () => {

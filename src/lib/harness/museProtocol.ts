@@ -491,7 +491,27 @@ export function museItemEvent(
     ];
   }
 
-  // workflow, reminderChild, and unknown kinds render generically.
+  if (kind === "reminderChild") {
+    // Memory/reminder child sessions are host bookkeeping — recall runs at
+    // turn start, reconciliation holds turn/completed behind the end-of-turn
+    // drain. A status line on open explains the gap without stacking tool
+    // rows the user cannot act on; the item is still tracked in `items` so
+    // the live session can detect the drain.
+    if (phase === "started") {
+      return [
+        {
+          type: "status",
+          text:
+            stringField(rec, "fallbackText") ??
+            stringField(rec, "summary") ??
+            "Muse is running memory/reminder bookkeeping.",
+        },
+      ];
+    }
+    return [];
+  }
+
+  // workflow and unknown kinds render generically.
   const status = museItemStatus(rec.status, terminal);
   return [
     {
@@ -519,6 +539,8 @@ export function museDeltaEvent(
   const field = stringField(rec, "field") ?? "text";
   const state = items.get(itemId);
   if (!state) return [];
+  // Reminder children render as status only; no field streams a tool row.
+  if (state.kind === "reminderChild") return [];
 
   if (field === "text") {
     if (state.kind !== "agentMessage" && state.kind !== "reasoning") return [];

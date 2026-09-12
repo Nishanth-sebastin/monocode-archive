@@ -127,6 +127,14 @@ type Live = {
   compactionWait: { resolve: () => void; reject: (e: Error) => void } | null;
   /** Throttles model/list re-warms triggered by route failures. */
   catalogRefreshedAt: number;
+  /** A non-bookkeeping item reached terminal — enables drain detection. */
+  hasCompletedReal: boolean;
+  /** A reminderChild event arrived while no real item was open. */
+  reminderIdleSeen: boolean;
+  /** A model retry is scheduled; its real item has not started yet. */
+  retryPending: boolean;
+  /** The turn whose wait already resolved on drain detection. */
+  drainSettledFor: string | null;
 };
 
 type Resume = {
@@ -681,6 +689,10 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       lastGoal: undefined,
       compactionWait: null,
       catalogRefreshedAt: 0,
+      hasCompletedReal: false,
+      reminderIdleSeen: false,
+      retryPending: false,
+      drainSettledFor: null,
     };
     liveRef.current = live;
     liveByThread.set(input.sessionId, live);
@@ -917,6 +929,26 @@ function waitTurn(
   return wait.promise;
 }
 
+/**
+ * Resolve a turn's registered wait without clearing `activeTurnId` — the
+ * turn still runs host-side (draining), so steer and interrupt must keep
+ * their target until the real turn/completed lands.
+ */
+function resolveTurnWait(live: Live, turnId: string, outcome: Error | undefined): void {
+  const wait = live.turnWaits.get(turnId);
+  if (wait) {
+    live.turnWaits.delete(turnId);
+    if (outcome) wait.reject(outcome);
+    else wait.resolve();
+    return;
+  }
+  if (live.finishedTurns.size >= MAX_FINISHED_TURNS) {
+    const oldest = live.finishedTurns.keys().next().value;
+    if (oldest !== undefined) live.finishedTurns.delete(oldest);
+  }
+  live.finishedTurns.set(turnId, outcome);
+}
+
 /** turn/completed and turn/unqueued settle the matching waiter. */
 function settleTurn(live: Live, turnId: string, outcome: Error | undefined): void {
   live.queuedTurnIds.delete(turnId);
@@ -976,6 +1008,82 @@ function emit(live: Live, events: HarnessEvent[]): void {
   for (const event of events) live.onEvent(event);
 }
 
+/**
+ * Open items by visibility class. `reminderChild` is memory bookkeeping;
+ * the `userMessage` echo is not work either. Everything else — including
+ * unknown kinds — counts as real work for drain detection.
+ */
+function openWorkCounts(live: Live): { real: number; reminders: number } {
+  let real = 0;
+  let reminders = 0;
+  for (const state of live.items.values()) {
+    if (state.kind === "reminderChild") {
+      reminders += 1;
+    } else if (state.kind !== "userMessage") {
+      real += 1;
+    }
+  }
+  return { real, reminders };
+}
+
+/**
+ * `turn/completed` trails the answer while Muse drains memory/reminder child
+ * sessions (the eot gate — ~60s on real models), and the wire exposes no
+ * "answer is done" signal. A drain is detected by shape instead: a real item
+ * already completed, no non-bookkeeping item is still open, and reminder
+ * children are running (or were observed while the real set was empty).
+ * Turn-start recall cannot trip it — no real item has completed yet — and a
+ * scheduled model retry holds it off until the retry's real item starts.
+ * `turn/completed` stays the backstop for drains that emit no reminder items;
+ * a late `terminal: "failed"` still surfaces through its own session.error.
+ */
+function settleOnDrain(live: Live): void {
+  const turnId = live.activeTurnId;
+  if (!turnId || live.retryPending || live.drainSettledFor === turnId) return;
+  const { real, reminders } = openWorkCounts(live);
+  if (
+    real > 0 ||
+    !live.hasCompletedReal ||
+    (reminders === 0 && !live.reminderIdleSeen)
+  ) {
+    return;
+  }
+  live.drainSettledFor = turnId;
+  if (!live.muteUpdates) {
+    live.onEvent({ type: "message.completed" });
+    live.onEvent({ type: "reasoning.completed" });
+    live.onEvent({
+      type: "status",
+      text: "Muse is finishing up — memory/reminder bookkeeping.",
+    });
+  }
+  resolveTurnWait(live, turnId, undefined);
+}
+
+/**
+ * Record drain evidence from an item notification after `museItemEvent` has
+ * applied it. A reminderChild event while no real item is open marks the
+ * drain even when the child completes too fast to sit in `items`.
+ */
+function noteDrainEvidence(
+  live: Live,
+  item: unknown,
+  phase: "started" | "updated" | "completed",
+): void {
+  const kind = stringField(asRecord(item), "kind") ?? "";
+  if (kind !== "reminderChild") {
+    if (kind !== "userMessage" && kind !== "") {
+      // A real item starting means a scheduled retry has produced work again.
+      if (phase === "started") live.retryPending = false;
+      if (phase === "completed") live.hasCompletedReal = true;
+    }
+    return;
+  }
+  if (live.hasCompletedReal && openWorkCounts(live).real === 0) {
+    live.reminderIdleSeen = true;
+  }
+}
+
 function handleNotification(live: Live, method: string, params: unknown): void {
   const rec = asRecord(params);
   const sessionId = stringField(rec, "sessionId");
@@ -984,9 +1092,13 @@ function handleNotification(live: Live, method: string, params: unknown): void {
   switch (method) {
     case "item/started":
       emit(live, museItemEvent(rec?.item, "started", live.items));
+      noteDrainEvidence(live, rec?.item, "started");
+      settleOnDrain(live);
       return;
     case "item/updated":
       emit(live, museItemEvent(rec?.item, "updated", live.items));
+      noteDrainEvidence(live, rec?.item, "updated");
+      settleOnDrain(live);
       return;
     case "item/completed": {
       const item = asRecord(rec?.item);
@@ -1017,6 +1129,8 @@ function handleNotification(live: Live, method: string, params: unknown): void {
         live.compactionWait = null;
       }
       emit(live, events);
+      noteDrainEvidence(live, item, "completed");
+      settleOnDrain(live);
       return;
     }
     case "item/delta":
@@ -1027,6 +1141,10 @@ function handleNotification(live: Live, method: string, params: unknown): void {
       if (turnId) {
         live.activeTurnId = turnId;
         live.queuedTurnIds.delete(turnId);
+        live.hasCompletedReal = false;
+        live.reminderIdleSeen = false;
+        live.retryPending = false;
+        live.drainSettledFor = null;
       }
       return;
     }
@@ -1087,6 +1205,10 @@ function handleNotification(live: Live, method: string, params: unknown): void {
       return;
     }
     case "turn/retryScheduled": {
+      // A model retry is pending: all real items may be closed during the
+      // backoff without the turn being done — hold off drain settlement
+      // until the retry's real item starts.
+      live.retryPending = true;
       const attempt = rec?.attempt;
       const next = rec?.nextAttempt;
       const max = rec?.maxAttempts;
