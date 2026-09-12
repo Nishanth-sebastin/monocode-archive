@@ -1,4 +1,5 @@
-import type { HarnessId } from "./session";
+import { HARNESSES, type HarnessId } from "./session";
+import { removeAttention, resolveAttentionWhere } from "./attention";
 import type { AzurePrTarget } from "./azureRepos";
 import type { CiTarget } from "./azurePipelines";
 import type { JiraFilter } from "./jira";
@@ -184,7 +185,9 @@ function sanitize(value: unknown): Watcher | null {
     isRecord(value.target) && clean(value.target.cwd)
       ? {
           cwd: clean(value.target.cwd)!,
-          harness: value.target.harness as HarnessId,
+          harness: HARNESSES.includes(value.target.harness as HarnessId)
+            ? (value.target.harness as HarnessId)
+            : HARNESSES[0],
           model: clean(value.target.model, 120) ?? "",
           ...(clean(value.target.sessionId, 128)
             ? { sessionId: clean(value.target.sessionId, 128) }
@@ -368,11 +371,23 @@ export function saveWatcher(
     : [...watchers, next];
   if (list.length > MAX_WATCHERS) return { error: "Too many watchers." };
   writeWatchers(list);
+  // A re-pointed watcher's old rows describe a source it no longer polls —
+  // nothing can resolve them, so drop them with the watermark.
+  if (existing && !sameSource(existing.source, next.source)) {
+    resolveAttentionWhere(
+      (row) => row.source?.kind === "watcher" && row.source.id === existing.id,
+    );
+  }
   return { watcher: next };
 }
 
 export function removeWatcher(id: string) {
   writeWatchers(loadWatchers().filter((row) => row.id !== id));
+  // Emitted rows can never resolve once their watcher is gone — remove them
+  // instead of leaving dead rows in the queue.
+  resolveAttentionWhere(
+    (row) => row.source?.kind === "watcher" && row.source.id === id,
+  );
 }
 
 export function setWatcherEnabled(id: string, enabled: boolean) {
@@ -383,6 +398,11 @@ export function setWatcherEnabled(id: string, enabled: boolean) {
     nextPollAt: enabled ? 0 : watcher.nextPollAt,
     failures: enabled ? 0 : watcher.failures,
   }));
+  if (!enabled) {
+    // A paused watcher never recovers, so a stale "check failed" row would
+    // linger forever; condition rows stay — they remain true remotely.
+    removeAttention(`watcher-error:${id}`);
+  }
 }
 
 /** Single-writer update helper — engine and UI both go through this. */
@@ -424,9 +444,9 @@ export function watcherPollKey(watcher: Watcher): string {
     case "azure-boards":
       return `boards:${source.site}:${source.project}:${JSON.stringify(source.filter)}`;
     case "azure-pr":
-      return `azure-pr:${source.target.site}:${source.target.repository}:${source.target.number}:${source.cwd}:${source.branch}${session}`;
+      return `azure-pr:${source.target.site}:${source.target.accountId}:${source.target.project}:${source.target.repository}:${source.target.number}:${source.projectName}:${source.repositoryName}:${source.cwd}:${source.branch}${session}`;
     case "azure-ci":
-      return `azure-ci:${source.target.site}:${source.target.project}:${source.target.definition}:${source.cwd}:${source.branch}${session}`;
+      return `azure-ci:${source.target.site}:${source.target.accountId}:${source.target.project}:${source.target.definition}:${source.target.repositoryId}:${source.remote}:${source.definitionName}:${source.cwd}:${source.branch}${session}`;
   }
 }
 

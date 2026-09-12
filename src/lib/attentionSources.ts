@@ -170,7 +170,11 @@ export function deriveLocalAttention(input: {
     items.push(...pendingApprovals(session));
     if (byId.has(session.id)) items.push(...finishedItems(session));
   }
+  const liveSessions = new Set(input.sessions.map((session) => session.id));
   for (const reminder of input.reminders) {
+    // A reminder whose session is gone produces a dead row — drop it like
+    // repairItems does for orphaned records.
+    if (!liveSessions.has(reminder.sessionId)) continue;
     items.push(...reminderItems(reminder));
   }
   for (const record of input.repairs) {

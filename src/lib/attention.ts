@@ -92,7 +92,15 @@ export type AttentionAction =
       number: number;
       sessionId?: string;
     }
-  | { kind: "update-branch"; cwd: string; sessionId?: string }
+  | {
+      kind: "update-branch";
+      cwd: string;
+      /** The checkout's expected branch — verified before mutating. */
+      branch?: string;
+      /** The PR's base branch — merged/rebased in, not the repo default. */
+      base?: string;
+      sessionId?: string;
+    }
   | { kind: "open-automations"; watcherId?: string }
   | { kind: "reconnect"; source: ConnectableInboxSource }
   | { kind: "open-url"; url: string };
@@ -145,8 +153,14 @@ const MAX_TEXT = 2000;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-const clean = (value: unknown, max = MAX_TEXT): string | undefined =>
-  typeof value === "string" && value.trim() ? value.trim().slice(0, max) : undefined;
+const clean = (value: unknown, max = MAX_TEXT): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  // Truncate on code points — `.slice` can split a surrogate pair and leave
+  // a lone surrogate that renders as.
+  return trimmed.length > max ? [...trimmed].slice(0, max).join("") : trimmed;
+};
 
 const KINDS: AttentionKind[] = [
   "approval",
@@ -171,6 +185,48 @@ const PROVIDERS: InboxProvider[] = [
   "jira",
   "azure",
 ];
+
+const ACTION_KINDS = new Set([
+  "open-session",
+  "open-changes",
+  "open-item",
+  "start-task",
+  "open-delivery",
+  "send-context",
+  "repair",
+  "azure-pr-comments",
+  "github-pr-comments",
+  "azure-ci-fix",
+  "github-ci-fix",
+  "update-branch",
+  "open-automations",
+  "reconnect",
+  "open-url",
+]);
+
+/** Persisted actions are rebuilt by the dispatcher — they only carry binding
+ * fields — so a corrupt store must not smuggle oversized payloads or
+ * non-web URLs through the queue. */
+function sanitizeAction(value: unknown): AttentionAction | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.kind !== "string" ||
+    !ACTION_KINDS.has(value.kind)
+  ) {
+    return undefined;
+  }
+  if (value.kind === "open-url") {
+    const url = clean(value.url, 2000);
+    if (!url || !/^https?:\/\//i.test(url)) return undefined;
+    return { kind: "open-url", url };
+  }
+  try {
+    if (JSON.stringify(value).length > 8000) return undefined;
+  } catch {
+    return undefined;
+  }
+  return value as unknown as AttentionAction;
+}
 
 function sanitizeItem(value: unknown): AttentionItem | null {
   if (!isRecord(value)) return null;
@@ -214,7 +270,7 @@ function sanitizeItem(value: unknown): AttentionItem | null {
     ...(clean(value.url, 2000) ? { url: clean(value.url, 2000) } : {}),
     // `action` is carried for emitted rows but rebuilt by the dispatcher —
     // trust only its serializable binding fields at click time.
-    ...(isRecord(value.action) ? { action: value.action as AttentionAction } : {}),
+    ...(sanitizeAction(value.action) ? { action: sanitizeAction(value.action)! } : {}),
     ...(source ? { source } : {}),
   };
 }
@@ -228,12 +284,13 @@ function sanitizeStore(value: unknown): Store {
   const items: AttentionItem[] = [];
   const seen = new Set<string>();
   if (isRecord(value) && Array.isArray(value.items)) {
-    for (const raw of value.items) {
+    // Keep the newest rows — an over-cap store would otherwise drop the
+    // freshest emits and preserve stale ones.
+    for (const raw of value.items.slice(-MAX_ITEMS)) {
       const item = sanitizeItem(raw);
       if (!item || seen.has(item.key)) continue;
       seen.add(item.key);
       items.push(item);
-      if (items.length >= MAX_ITEMS) break;
     }
   }
   const muted: Record<string, AttentionMute> = {};
@@ -253,21 +310,37 @@ function sanitizeStore(value: unknown): Store {
   return { items, muted };
 }
 
-function readStore(): Store {
+/** In-memory fallback once a write has failed (quota/denied storage) — keeps
+ * emits, mutes, and the render snapshot consistent for the session. */
+let memoryRaw: string | null = null;
+let writeFailed = false;
+
+function parseStore(raw: string | null): Store {
+  if (!raw) return { items: [], muted: {} };
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return { items: [], muted: {} };
     return sanitizeStore(JSON.parse(raw));
   } catch {
     return { items: [], muted: {} };
   }
 }
 
-function writeStore(store: Store) {
+function readStore(): Store {
+  if (writeFailed && memoryRaw) return parseStore(memoryRaw);
   try {
-    localStorage.setItem(KEY, JSON.stringify(store));
+    return parseStore(localStorage.getItem(KEY));
   } catch {
-    /* storage full or unavailable — keep the in-memory view */
+    return { items: [], muted: {} };
+  }
+}
+
+function writeStore(store: Store) {
+  const raw = JSON.stringify(store);
+  try {
+    localStorage.setItem(KEY, raw);
+  } catch {
+    // Storage full or unavailable — serve reads from memory this session.
+    writeFailed = true;
+    memoryRaw = raw;
   }
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(ATTENTION_CHANGED));
@@ -276,21 +349,17 @@ function writeStore(store: Store) {
 
 /** Raw snapshot for useSyncExternalStore — stable until a write lands. */
 export function attentionSnapshot(): string | null {
+  if (writeFailed && memoryRaw) return memoryRaw;
   try {
     return localStorage.getItem(KEY);
   } catch {
-    return null;
+    return memoryRaw;
   }
 }
 
 /** Parse a snapshot string — memoize on the raw string so renders stay cheap. */
 export function attentionStoreFromSnapshot(raw: string | null): Store {
-  if (!raw) return { items: [], muted: {} };
-  try {
-    return sanitizeStore(JSON.parse(raw));
-  } catch {
-    return { items: [], muted: {} };
-  }
+  return parseStore(raw);
 }
 
 export function subscribeAttention(listener: () => void): () => void {
@@ -312,30 +381,44 @@ export function emittedAttention(): AttentionItem[] {
 }
 
 /**
- * Insert or update an emitted row. Same key → the row updates in place; a new
- * signature refreshes `at` and resurfaces muted rows, a replayed signature
- * preserves the original timestamp.
+ * Insert or update emitted rows in one store read/write — a poll group can
+ * produce dozens of conditions, so batching avoids a stringify+event storm
+ * per row. Same key → the row updates in place; a new signature refreshes
+ * `at` and resurfaces muted rows, a replayed signature preserves the
+ * original timestamp.
  */
-export function emitAttention(item: AttentionItem) {
+export function emitAttentionAll(items: AttentionItem[]) {
+  if (!items.length) return;
   const store = readStore();
-  const next = sanitizeItem(item);
-  if (!next) return;
-  const previous = store.items.find((row) => row.key === next.key);
-  const items = store.items.filter((row) => row.key !== next.key);
-  // A replay of the same state must not churn ordering or defeat mutes — keep
-  // the first-seen timestamp when the signature has not moved.
-  items.push(
-    previous && previous.signature === next.signature
-      ? { ...next, at: previous.at }
-      : next,
-  );
+  const prevByKey = new Map(store.items.map((row) => [row.key, row]));
+  const incoming = new Set(items.map((item) => item.key));
+  const merged = store.items.filter((row) => !incoming.has(row.key));
+  const written = new Set<string>();
+  for (const raw of items) {
+    const next = sanitizeItem(raw);
+    if (!next || written.has(next.key)) continue;
+    written.add(next.key);
+    const previous = prevByKey.get(next.key);
+    // A replay of the same state must not churn ordering or defeat mutes —
+    // keep the first-seen timestamp when the signature has not moved.
+    merged.push(
+      previous && previous.signature === next.signature
+        ? { ...next, at: previous.at }
+        : next,
+    );
+  }
   // Evict the oldest rows first; mute entries for them go too.
-  while (items.length > MAX_ITEMS) {
-    const oldest = items.reduce((a, b) => (a.at <= b.at ? a : b));
-    items.splice(items.indexOf(oldest), 1);
+  while (merged.length > MAX_ITEMS) {
+    const oldest = merged.reduce((a, b) => (a.at <= b.at ? a : b));
+    merged.splice(merged.indexOf(oldest), 1);
     delete store.muted[oldest.key];
   }
-  writeStore({ ...store, items });
+  writeStore({ ...store, items: merged });
+}
+
+/** Single-row convenience over {@link emitAttentionAll}. */
+export function emitAttention(item: AttentionItem) {
+  emitAttentionAll([item]);
 }
 
 /** The condition resolved — the row disappears and its mute state drops. */
@@ -394,6 +477,9 @@ function muteAttention(
  * the underlying event can never recur with a different signature. */
 export function removeAttention(key: string) {
   const store = readStore();
+  if (!store.items.some((row) => row.key === key) && !(key in store.muted)) {
+    return;
+  }
   const items = store.items.filter((row) => row.key !== key);
   const muted = { ...store.muted };
   delete muted[key];
@@ -433,12 +519,4 @@ export function visibleAttention(
   return sortAttention(
     merged.filter((row) => !isAttentionMuted(row, store.muted)),
   );
-}
-
-/** Unsnooze count for the badge — what the rail shows. */
-export function attentionCount(
-  derived: AttentionItem[],
-  store?: Store,
-): number {
-  return visibleAttention(derived, store).length;
 }

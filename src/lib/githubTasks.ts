@@ -443,6 +443,16 @@ export type GithubPrCheck = {
   outputText: string;
 };
 
+/** Check conclusions that count as CI failures — shared by the watcher
+ * adapter and repair evidence so they never drift apart. */
+export const FAILING_CHECK_CONCLUSIONS = [
+  "failure",
+  "timed_out",
+  "action_required",
+  "startup_failure",
+  "cancelled",
+];
+
 export type GithubPrState = {
   number: number;
   title: string;

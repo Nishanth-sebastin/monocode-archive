@@ -81,13 +81,16 @@ export function attentionActionLabel(item: AttentionItem): string {
   }
 }
 
-/** Compact where/who line under the title. */
+/** Compact where/who line under the title — deduped so a repo equal to the
+ * checkout path doesn't read twice. */
 function itemMeta(item: AttentionItem): string {
   const parts = [
-    item.repo,
-    item.cwd ? displayPath(item.cwd) : "",
-    item.account,
-  ].filter(Boolean);
+    ...new Set(
+      [item.repo, item.cwd ? displayPath(item.cwd) : "", item.account].filter(
+        Boolean,
+      ),
+    ),
+  ];
   return parts.slice(0, 3).join(" · ");
 }
 
@@ -108,9 +111,19 @@ export function AttentionQueue({
   onDismissItem: (item: AttentionItem) => void;
   onOpenAutomations: () => void;
 }) {
-  const [active, setActive] = useState(0);
+  // Selection is tracked by row key, not index — a poll resolving a row
+  // above the cursor must not silently re-point the next keystroke at a
+  // different item.
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const position = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const clamped = Math.min(active, Math.max(0, items.length - 1));
+  const found = items.findIndex((item) => item.key === activeKey);
+  const clamped = items.length
+    ? found >= 0
+      ? found
+      : Math.min(position.current, items.length - 1)
+    : 0;
+  position.current = clamped;
   const current = items[clamped];
 
   useEffect(() => {
@@ -121,10 +134,22 @@ export function AttentionQueue({
 
   const move = (delta: number) => {
     if (!items.length) return;
-    setActive((clamped + delta + items.length) % items.length);
+    const next = items[(clamped + delta + items.length) % items.length];
+    setActiveKey(next.key);
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {
+    // Modified chords belong to the app. Enter/Space on a focused row button
+    // must click that button natively — `current` tracks the same row via
+    // onFocusCapture, so s/d/arrows below stay consistent with focus.
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (
+      (event.key === "Enter" || event.key === " ") &&
+      event.target instanceof HTMLElement &&
+      event.target.closest("button")
+    ) {
+      return;
+    }
     switch (event.key) {
       case "ArrowDown":
       case "j":
@@ -168,9 +193,13 @@ export function AttentionQueue({
       maxHeight={440}
       onDismiss={onDismiss}
       autoFocus
+      tabIndex={-1}
       className="flex flex-col text-content"
       role="dialog"
       aria-label="Attention queue"
+      aria-activedescendant={
+        current ? `attention-opt-${current.key}` : undefined
+      }
       onKeyDown={onKeyDown}
     >
       <div className="flex items-center justify-between border-b border-content/10 px-3 py-2">
@@ -192,16 +221,21 @@ export function AttentionQueue({
           items.map((item, index) => {
             const Icon = KIND_ICON[item.kind] ?? Zap;
             const selected = index === clamped;
+            const meta = [item.detail, itemMeta(item)]
+              .filter(Boolean)
+              .join(" · ");
             return (
               <div
                 key={item.key}
+                id={`attention-opt-${item.key}`}
                 data-index={index}
                 role="option"
                 aria-selected={selected}
                 className={`group flex items-start gap-2 rounded-lg px-2 py-2 ${
                   selected ? "bg-content/8" : ""
                 }`}
-                onPointerEnter={() => setActive(index)}
+                onPointerEnter={() => setActiveKey(item.key)}
+                onFocusCapture={() => setActiveKey(item.key)}
               >
                 <span className="relative mt-0.5 grid size-5 shrink-0 place-items-center">
                   {item.provider ? (
@@ -228,11 +262,11 @@ export function AttentionQueue({
                   <p className="truncate text-[12px] leading-tight text-content/90">
                     {item.title}
                   </p>
-                  <p className="mt-0.5 truncate text-[11px] text-content/45">
-                    {[item.detail, itemMeta(item)]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </p>
+                  {meta ? (
+                    <p className="mt-0.5 truncate text-[11px] text-content/45">
+                      {meta}
+                    </p>
+                  ) : null}
                 </button>
                 <span className="flex shrink-0 items-center gap-0.5">
                   {item.action ? (

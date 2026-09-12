@@ -1,7 +1,9 @@
 // @vitest-environment happy-dom
 import { beforeEach, expect, it } from "vitest";
+import { emitAttention, emittedAttention } from "./attention";
 import {
   loadWatchers,
+  removeWatcher,
   saveWatcher,
   setWatcherEnabled,
   updateWatcher,
@@ -83,6 +85,46 @@ it("editing a watcher keeps the cursor when the source is unchanged, resets it w
   ).watcher!;
   expect(repointed.cursor).toBeUndefined();
   expect(repointed.seen).toEqual([]);
+});
+
+it("removing a watcher clears its emitted rows — nothing can resolve them later", () => {
+  const { watcher } = saveWatcher(draft());
+  const other = saveWatcher(draft({ name: "Other" })).watcher!;
+  for (const id of [watcher!.id, other.id]) {
+    emitAttention({
+      key: `watcher:${id}:cond`,
+      kind: "ticket",
+      title: `Row ${id}`,
+      urgency: 1,
+      at: Date.now(),
+      signature: "sig",
+      source: { kind: "watcher", id },
+    });
+  }
+  removeWatcher(watcher!.id);
+  expect(emittedAttention().map((row) => row.key)).toEqual([
+    `watcher:${other.id}:cond`,
+  ]);
+});
+
+it("re-pointing a watcher clears rows bound to the old source", () => {
+  const { watcher } = saveWatcher(draft());
+  emitAttention({
+    key: `watcher:${watcher!.id}:old`,
+    kind: "ticket",
+    title: "Old row",
+    urgency: 1,
+    at: Date.now(),
+    signature: "sig",
+    source: { kind: "watcher", id: watcher!.id },
+  });
+  saveWatcher(
+    draft({
+      source: { ...JIRA_SOURCE, filter: { ...JIRA_SOURCE.filter, project: "OPS" } },
+    }),
+    watcher!.id,
+  );
+  expect(emittedAttention()).toEqual([]);
 });
 
 it("pause clears backoff and resume polls promptly", () => {
