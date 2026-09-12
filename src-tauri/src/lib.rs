@@ -9,6 +9,7 @@ mod azure_repos;
 mod chat_background;
 mod checkpoint;
 mod cursor_store;
+pub mod dictation;
 mod fs;
 mod gitlab;
 mod harness;
@@ -183,6 +184,7 @@ pub fn run() {
         .manage(harness::HarnessHost::new())
         .manage(pty::PtyHost::new())
         .manage(window_transfer::WindowTransferState::new())
+        .manage(dictation::DictationHost::new())
         .setup(|app| {
             harness::reap_orphaned_harness_processes();
             session_store::init(app.handle())?;
@@ -402,6 +404,17 @@ pub fn run() {
             project_logo::save_project_logo,
             project_logo::remove_project_logo,
             project_logo::forget_logo_file,
+            dictation::dictation_catalog,
+            dictation::dictation_model_install,
+            dictation::dictation_model_cancel_download,
+            dictation::dictation_model_remove,
+            dictation::dictation_status,
+            dictation::dictation_request_mic_permission,
+            dictation::dictation_open_mic_settings,
+            dictation::dictation_start,
+            dictation::dictation_stop,
+            dictation::dictation_cancel,
+            dictation::dictation_transcribe_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building MonoCode");

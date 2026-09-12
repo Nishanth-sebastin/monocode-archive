@@ -626,6 +626,8 @@ const DEV_BUNDLE_PLIST: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MonoCode transcribes your dictation locally on this device. Audio never leaves your Mac.</string>
 </dict>
 </plist>
 "#;
