@@ -46,10 +46,14 @@ export type DictationPhase = "idle" | "starting" | "recording" | "finishing";
 type SessionTrack = {
   id: number;
   range: DictationRange;
-  /** The dictated text currently occupying `range`. */
+  /** The dictated text currently occupying `range` (includes pads). */
   text: string;
   /** Trailing chars of `text` still provisional (dimmed in the highlight). */
   partialLen: number;
+  /** Separators inserted once at the anchor so dictation doesn't jam onto
+   * neighbouring text — kept inside the range so rewrites preserve them. */
+  padBefore?: string;
+  padAfter?: string;
 };
 
 export type Dictation = ReturnType<typeof useDictation>;
@@ -139,23 +143,32 @@ export function useDictation({
         session.range,
         session.text,
       );
+      if (session.padBefore === undefined) {
+        const before = range.start > 0 ? el.value[range.start - 1] : undefined;
+        const after = range.end < el.value.length ? el.value[range.end] : undefined;
+        session.padBefore = before != null && !/\s/.test(before) ? " " : "";
+        session.padAfter = after != null && !/\s/.test(after) ? " " : "";
+      }
+      const insert = session.padBefore + text + session.padAfter;
       const selStart = el.selectionStart ?? 0;
       const selEnd = el.selectionEnd ?? selStart;
       const following = selStart === range.end && selEnd === range.end;
-      const next = spliceDictationText(el.value, range, text);
+      const next = spliceDictationText(el.value, range, insert);
       el.value = next.value;
       resizeComposer(el);
+      const padAfterLen = session.padAfter?.length ?? 0;
       const caret = following
-        ? next.range.end
-        : caretAfterSplice(selStart, range, text.length);
+        ? next.range.end - padAfterLen
+        : caretAfterSplice(selStart, range, insert.length);
       el.setSelectionRange(caret, caret);
       session.range = next.range;
-      session.text = text;
+      session.text = insert;
       session.partialLen = partialLen;
       valueRef.current = next.value;
+      const dimEnd = next.range.end - padAfterLen;
       setDim(
         partialLen > 0
-          ? { start: next.range.end - partialLen, end: next.range.end }
+          ? { start: dimEnd - partialLen, end: dimEnd }
           : null,
       );
       commitRef.current(next.value);
@@ -468,7 +481,10 @@ export function useDictation({
 
   const stop = useCallback(async () => {
     const session = sessionRef.current;
-    if (!session) return;
+    // Re-entrant stop (double-click, release after toggle) would lose the
+    // final transcript — the second call's finally clears the session before
+    // the first's result lands.
+    if (!session || stoppingRef.current != null) return;
     setPhase("finishing");
     stoppingRef.current = session.id;
     try {
@@ -531,6 +547,9 @@ export function useDictation({
     (open: boolean) => {
       setMenuOpenState(open);
       if (!open) return;
+      // Show the freshest snapshot immediately — progress events keep the
+      // ref patched even while the menu is closed.
+      if (catalogRef.current) setCatalog(catalogRef.current);
       void refreshCatalog();
       void dictationStatus()
         .then((status) => setMicPermission(status.micPermission))

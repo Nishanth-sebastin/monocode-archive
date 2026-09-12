@@ -229,6 +229,9 @@ fn download_from(
     }
 
     emit(app, spec, "verifying", downloaded);
+    if cancel.load(Ordering::Relaxed) {
+        return Err(DownloadError::new("cancelled", downloaded));
+    }
     verify_and_install(&part, &final_path, spec, hasher, downloaded)
 }
 

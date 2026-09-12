@@ -167,6 +167,24 @@ impl DictationHost {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Abort any live session and download on window teardown or exit. The
+    /// webview is gone, so events no longer matter — workers are detached
+    /// (join handles dropped) and exit on their own, dropping the engine and
+    /// releasing the mic. Without this a destroyed window leaves capture
+    /// running indefinitely.
+    pub fn shutdown(&self) {
+        let mut state = self.inner.lock().unwrap();
+        if let Some(session) = state.session.take() {
+            session.cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some((_, cancel)) = state.finishing.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        for (_, download) in state.downloads.drain() {
+            download.cancel.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -391,7 +409,7 @@ pub fn dictation_status(app: AppHandle, host: State<'_, DictationHost>) -> Dicta
         "recording"
     } else if state.starting {
         "starting"
-    } else if state.finishing.is_some() || state.session.is_some() {
+    } else if state.finishing.is_some() {
         "finishing"
     } else {
         "idle"
@@ -530,14 +548,14 @@ pub fn dictation_start(
 pub fn dictation_stop(
     app: AppHandle,
     host: State<'_, DictationHost>,
-    session_id: Option<u64>,
+    session_id: u64,
 ) -> Result<DictationResult, String> {
     let session = {
         let mut state = host.inner.lock().unwrap();
         // A stop for a session that isn't current must not take over whatever
         // session replaced it — the caller's session is already gone.
         match state.session.as_ref() {
-            Some(session) if session_id.is_some_and(|id| id != session.id) => {
+            Some(session) if session_id != session.id => {
                 return Err("No dictation in progress".into());
             }
             _ => {}

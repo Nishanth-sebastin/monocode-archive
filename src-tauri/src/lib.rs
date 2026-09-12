@@ -490,6 +490,9 @@ fn reap_harness_children(handle: &tauri::AppHandle) {
     if let Some(host) = handle.try_state::<pty::PtyHost>() {
         host.kill_all();
     }
+    if let Some(host) = handle.try_state::<dictation::DictationHost>() {
+        host.shutdown();
+    }
 }
 
 #[cfg(all(debug_assertions, target_os = "macos"))]

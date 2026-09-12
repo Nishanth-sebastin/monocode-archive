@@ -136,13 +136,27 @@ function ModelRow({
  * layout-independent. */
 const DICTATION_HOTKEY_CODE = "KeyM";
 
+/** Mirrors the archive-shortcut rule: terminals and editors swallow keys,
+ * inputs other than the composer own their typing, and any open overlay
+ * (popover, dialog, menu) wins over global hotkeys. */
 function inBlockingUi(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
-  if (target.closest(".monocode-terminal")) return true;
-  return Boolean(
-    target.closest(
-      "[data-file-picker], [data-branch-picker], [data-skill-picker], [data-mention-picker], [data-access-picker], [data-model-picker], [data-dictation-menu]",
+  if (target.closest(".cm-editor, .monocode-terminal")) return true;
+  if (
+    target.closest('input, textarea, select, [contenteditable="true"]') &&
+    !target.closest("[data-composer]")
+  ) {
+    return true;
+  }
+  return Array.from(
+    document.querySelectorAll(
+      '[data-popover-side], [role="dialog"], [role="alertdialog"], [role="menu"], [data-skill-picker], [data-mention-picker]',
     ),
+  ).some(
+    (element) =>
+      element.getClientRects().length > 0 &&
+      getComputedStyle(element).visibility !== "hidden" &&
+      !element.closest('[hidden], [inert], [aria-hidden="true"]'),
   );
 }
 
@@ -283,7 +297,18 @@ export function DictationControl({
       !event.altKey &&
       event.code === DICTATION_HOTKEY_CODE;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.isComposing || !isHotkey(event) || event.repeat) return;
+      if (event.isComposing) return;
+      if (event.key === "Escape") {
+        // Cancel an active session — unless an overlay owns this Escape.
+        const current = dictationRef.current;
+        if (current.sessionActive && !inBlockingUi(event.target)) {
+          event.preventDefault();
+          event.stopPropagation();
+          current.cancel();
+        }
+        return;
+      }
+      if (!isHotkey(event) || event.repeat) return;
       const current = dictationRef.current;
       if (current.phase === "idle" && inBlockingUi(event.target)) return;
       event.preventDefault();
@@ -300,6 +325,9 @@ export function DictationControl({
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
+      // Pane focus changed mid-hold — treat as a release so the mic doesn't
+      // keep recording while the keyup goes to another pane.
+      if (hold) dictationRef.current.release();
     };
   }, [hotkeys, hold]);
 
@@ -319,20 +347,34 @@ export function DictationControl({
           onPointerDown={
             hold
               ? (event) => {
-                  event.currentTarget.setPointerCapture(event.pointerId);
+                  if (event.button !== 0) return;
                   dictation.press();
+                  // The button unmounts as soon as the phase changes, so the
+                  // release has to be heard at window level.
+                  const done = () => {
+                    window.removeEventListener("pointerup", done, true);
+                    window.removeEventListener("pointercancel", done, true);
+                    dictationRef.current.release();
+                  };
+                  window.addEventListener("pointerup", done, true);
+                  window.addEventListener("pointercancel", done, true);
                 }
               : undefined
           }
-          onPointerUp={hold ? () => dictation.release() : undefined}
-          onPointerCancel={hold ? () => dictation.release() : undefined}
-          onClick={hold ? undefined : dictation.toggle}
+          onClick={(event) => {
+            // In hold mode a mouse click already ran press+release; only
+            // keyboard activation (detail 0) toggles so Enter/Space work.
+            if (hold && event.detail !== 0) return;
+            dictation.toggle();
+          }}
           className={TOOL_BUTTON}
         >
           <Mic className="size-3.5" strokeWidth={1.5} />
         </button>
       ) : (
         <div
+          role="status"
+          aria-live="polite"
           className="flex h-6.5 items-center gap-1 rounded-md bg-red-500/15 pl-1.5 pr-0.5 text-[11px] text-red-300"
           data-dictation-recording
         >
