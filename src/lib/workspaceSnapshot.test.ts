@@ -306,6 +306,7 @@ describe("collectWorkspaceSnapshot", () => {
       [],
       "t1",
       "/tmp/a",
+      new Map(),
       [dock],
     );
     const restored = hydrateWorkspaceSnapshot(
@@ -335,6 +336,7 @@ describe("collectWorkspaceSnapshot", () => {
       [],
       "t1",
       "/tmp/a",
+      new Map(),
       [dock],
     );
     const restored = hydrateWorkspaceSnapshot(
