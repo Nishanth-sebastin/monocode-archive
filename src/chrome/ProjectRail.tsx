@@ -347,9 +347,10 @@ export function ProjectRail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeSessionId, tasksRaw],
   );
-  // The session's task wins; a just-created task fills the gap so it reads
-  // as current in the rail before any session exists.
-  const currentTaskId = activeTask?.id ?? focusTaskId;
+  // A just-armed task (created or explicitly opened) wins while the user is
+  // still looking at another task's session; otherwise the focused
+  // session's task is current.
+  const currentTaskId = focusTaskId ?? activeTask?.id;
   const scopeRepoIds = useMemo(
     () =>
       new Set(activeTask?.children.map((entry) => entry.repositoryId) ?? []),

@@ -108,7 +108,15 @@ export const MODELS: AgentModel[] = [
     name: "Cursor Grok 4.6",
     nativeId: "grok-4.6",
   },
-
+  // Codex advertises its real catalog over `model/list` once the app-server
+  // is up; this entry is only the pre-probe placeholder that selects Codex's
+  // own default model.
+  {
+    id: "codex:default",
+    harness: "codex",
+    name: "Default",
+    nativeId: "",
+  },
   {
     id: "grok:grok-4.6",
     harness: "grok",
@@ -224,7 +232,7 @@ export const MODELS: AgentModel[] = [
 
 export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
   claude: "claude:sonnet-5",
-  codex: "",
+  codex: "codex:default",
   cursor: "cursor:composer-2.5",
   grok: "grok:grok-4.6",
   opencode: "opencode:glm-5",
@@ -496,7 +504,9 @@ export function resolveModel(
     (fallbackId ? findModel(fallbackId, cwd) : undefined) ??
     available[0] ??
     MODELS.find((model) => model.harness === harness) ??
-    MODELS[0]
+    // Never surface another harness's model: an unprobed catalog still gets a
+    // placeholder that means "the provider's own default".
+    { id: `${harness}:default`, harness, name: "Default", nativeId: "" }
   );
 }
 

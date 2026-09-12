@@ -126,6 +126,20 @@ describe("historyWithLiveSessions", () => {
     const rows = historyWithLiveSessions(history, [], "/tmp/project-a");
     expect(rows.map((row) => row.id)).toEqual(["a1"]);
   });
+
+  it("lets a live session override its stale persisted harness/model", () => {
+    const session = newSession("codex", "/tmp/project-a");
+    session.blocks = [{ id: "u1", role: "user", text: "hello" }];
+    const history = [
+      { ...summary(session.id, "/tmp/project-a"), harness: "claude", model: "claude:opus" },
+    ];
+
+    const rows = historyWithLiveSessions(history, [session], "/tmp/project-a");
+    const row = rows.find((entry) => entry.id === session.id);
+    expect(row?.harness).toBe("codex");
+    expect(row?.model).toBe(session.model);
+    expect(rows).toHaveLength(1);
+  });
 });
 
 describe("filterSessionsByArchive", () => {
