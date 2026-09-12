@@ -59,6 +59,8 @@ import {
 } from "./claudeProtocol";
 import { isAgentToolName } from "./preview";
 import { joinStreamText, snapshotRemainder } from "./streamText";
+import { acquireSharedStart } from "./liveStart";
+import { markTurn } from "../turnTiming";
 import {
   questionPromptTitle,
   questionsFromUnknown,
@@ -159,10 +161,39 @@ export function setClaudeBinaryResolver(
   resolveClaudeBinaryImpl = fn;
 }
 
+/** In-flight cold starts: a prewarm and a send share one spawn. */
+const startingByThread = new Map<string, Promise<Live>>();
+
+/** ensureLive wrapper that dedupes concurrent cold starts of one thread. */
+async function acquireLive(
+  input: HarnessSessionInput,
+  keepExisting = false,
+): Promise<Live> {
+  return acquireSharedStart(
+    input.sessionId,
+    liveByThread,
+    startingByThread,
+    () => ensureLive(input),
+    keepExisting,
+  );
+}
+
+/**
+ * Warm the provider session ahead of a prompt. No-ops when a live host
+ * already serves the thread so a prewarm cannot steal a running turn's
+ * event sink — or recycle the host a racing send just spawned.
+ */
+export async function prewarmClaudeSession(
+  input: HarnessSessionInput,
+): Promise<void> {
+  if (liveByThread.has(input.sessionId)) return;
+  await acquireLive(input, true);
+}
+
 export async function sendClaudeTurn(input: SendTurnInput): Promise<void> {
   let live: Live;
   try {
-    live = await ensureLive(input);
+    live = await acquireLive(input);
   } catch (error) {
     cancelledThreads.delete(input.sessionId);
     throw error;
@@ -192,7 +223,7 @@ export async function compactClaudeContext(
   const settingsKey = settingsKeyFor(input);
   let live = liveByThread.get(input.sessionId);
   if (!live || live.cwd !== input.cwd || live.settingsKey !== settingsKey) {
-    live = await ensureLive(input);
+    live = await acquireLive(input);
   }
   if (cancelledThreads.delete(input.sessionId)) return;
 
@@ -303,8 +334,12 @@ export async function stopClaudeSession(sessionId: string): Promise<void> {
     live.initDone?.();
     live.initDone = null;
   }
-  unwatchChild(sessionId);
-  await killChild(sessionId).catch(() => undefined);
+  // Only kill a child this adapter owns — after a harness switch another
+  // adapter may hold a live child under the same session id.
+  if (live || startingByThread.has(sessionId)) {
+    unwatchChild(sessionId);
+    await killChild(sessionId).catch(() => undefined);
+  }
 }
 
 export async function forgetClaudeSession(sessionId: string): Promise<void> {
@@ -351,6 +386,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   }
 
   const { path } = await resolveClaudeBinaryImpl(input.cwd);
+  markTurn(input.sessionId, "claude binary resolved");
   const liveRef: { current: Live | null } = { current: null };
   const claudeSessionId =
     canResume && resume ? resume.sessionId : crypto.randomUUID();
@@ -421,6 +457,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     buildClaudeSpawnArgs(launch),
     input.cwd,
   );
+  markTurn(input.sessionId, "claude spawned");
 
   liveByThread.set(input.sessionId, live);
   resumeByThread.set(input.sessionId, {
@@ -434,6 +471,10 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       buildControlRequest(nextControlId(live), { subtype: "initialize" }),
     );
     await waitForInit(live, INIT_TIMEOUT_MS);
+    markTurn(
+      input.sessionId,
+      canResume ? "claude resumed" : "claude initialized",
+    );
     live.onEvent({
       type: "session.providerBound",
       providerSessionId: live.claudeSessionId,
@@ -472,6 +513,7 @@ async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
 
   try {
     await writeJson(input.sessionId, message);
+    markTurn(input.sessionId, "claude prompt written");
     settlePendingTurn(live);
     await turnPromise;
   } catch (error) {

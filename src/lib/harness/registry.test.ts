@@ -7,10 +7,13 @@ import {
   compactHarnessContext,
   isLiveHarness,
   listHarnesses,
+  prewarmHarness,
   refreshHarnessCatalogs,
   registerHarness,
   resetHarnessIdlePark,
   sendHarnessTurn,
+  cancelHarnessTurn,
+  steerHarnessTurn,
   type HarnessAdapter,
 } from "./registry";
 import type { SendTurnInput, SteerTurnInput } from "./types";
@@ -171,5 +174,105 @@ describe("harness registry", () => {
     expect(stopSession).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(stopSession).toHaveBeenCalledWith("s1");
+  });
+
+  it("prewarms through the adapter and parks the warmed child on idle", async () => {
+    vi.useFakeTimers();
+    const prewarm = vi.fn(async () => undefined);
+    const stopSession = vi.fn(async () => undefined);
+    registerHarness(stub("cursor", { prewarm, stopSession }));
+
+    await prewarmHarness({
+      harness: "cursor",
+      sessionId: "s2",
+      cwd: "/tmp",
+      model: "cursor:composer-2.5",
+      runtimeMode: "supervised",
+      onEvent: () => undefined,
+    });
+
+    expect(prewarm).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(HARNESS_IDLE_PARK_MS);
+    expect(stopSession).toHaveBeenCalledWith("s2");
+  });
+
+  it("prewarm is a no-op for adapters without support", async () => {
+    registerHarness(stub("cursor"));
+    await expect(
+      prewarmHarness({
+        harness: "cursor",
+        sessionId: "s3",
+        cwd: "/tmp",
+        model: "cursor:composer-2.5",
+        runtimeMode: "supervised",
+        onEvent: () => undefined,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("a park timer armed mid-turn cannot kill the running session", async () => {
+    vi.useFakeTimers();
+    const stopSession = vi.fn(async () => undefined);
+    const cancelTurn = vi.fn(async () => undefined);
+    let finishTurn: () => void = () => undefined;
+    const sendTurn = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishTurn = resolve;
+        }),
+    );
+    registerHarness(stub("cursor", { sendTurn, cancelTurn, stopSession }));
+
+    const send = sendHarnessTurn({
+      harness: "cursor",
+      sessionId: "s4",
+      cwd: "/tmp",
+      model: "cursor:composer-2.5",
+      text: "hi",
+      runtimeMode: "supervised",
+      onEvent: () => undefined,
+    });
+    // cancelTurn arms a fresh park timer while the turn is still running.
+    await cancelHarnessTurn("cursor", "s4");
+
+    await vi.advanceTimersByTimeAsync(HARNESS_IDLE_PARK_MS * 2);
+    expect(stopSession).not.toHaveBeenCalled();
+
+    finishTurn();
+    await send;
+    await vi.advanceTimersByTimeAsync(HARNESS_IDLE_PARK_MS);
+    expect(stopSession).toHaveBeenCalledWith("s4");
+  });
+
+  it("a failed steer still leaves the child on an idle-park timer", async () => {
+    vi.useFakeTimers();
+    const stopSession = vi.fn(async () => undefined);
+    const steerTurn = vi.fn(async () => {
+      throw new Error("no active turn");
+    });
+    registerHarness(stub("cursor", { steerTurn, stopSession }));
+
+    await sendHarnessTurn({
+      harness: "cursor",
+      sessionId: "s5",
+      cwd: "/tmp",
+      model: "cursor:composer-2.5",
+      text: "hi",
+      runtimeMode: "supervised",
+      onEvent: () => undefined,
+    });
+    await expect(
+      steerHarnessTurn({
+        harness: "cursor",
+        sessionId: "s5",
+        cwd: "/tmp",
+        model: "cursor:composer-2.5",
+        text: "steer",
+        runtimeMode: "supervised",
+      }),
+    ).rejects.toThrow("no active turn");
+
+    await vi.advanceTimersByTimeAsync(HARNESS_IDLE_PARK_MS);
+    expect(stopSession).toHaveBeenCalledWith("s5");
   });
 });

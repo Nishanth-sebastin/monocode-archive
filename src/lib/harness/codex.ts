@@ -29,6 +29,8 @@ import {
 import { codexQuestions, codexQuestionResponse } from "./codexQuestions";
 import { codexMcpConfirmation } from "./codexElicitation";
 import { joinStreamText, snapshotRemainder } from "./streamText";
+import { acquireSharedStart } from "./liveStart";
+import { markTurn } from "../turnTiming";
 import type {
   ApprovalDecision,
   CompactContextInput,
@@ -106,7 +108,7 @@ export function setCodexBinaryResolver(
 export async function sendCodexTurn(input: SendTurnInput): Promise<void> {
   let live: Live;
   try {
-    live = await ensureLive(input);
+    live = await acquireLive(input);
   } catch (error) {
     cancelledThreads.delete(input.sessionId);
     throw error;
@@ -136,7 +138,7 @@ export async function compactCodexContext(
 ): Promise<void> {
   let live: Live;
   try {
-    live = await ensureLive(input);
+    live = await acquireLive(input);
   } catch (error) {
     cancelledThreads.delete(input.sessionId);
     throw error;
@@ -277,8 +279,12 @@ export async function stopCodexSession(sessionId: string): Promise<void> {
     live.turnFailed = null;
     live.rpc.close();
   }
-  unwatchChild(sessionId);
-  await killChild(sessionId).catch(() => undefined);
+  // Only kill a child this adapter owns — after a harness switch another
+  // adapter may hold a live child under the same session id.
+  if (live || startingByThread.has(sessionId)) {
+    unwatchChild(sessionId);
+    await killChild(sessionId).catch(() => undefined);
+  }
 }
 
 export async function forgetCodexSession(sessionId: string): Promise<void> {
@@ -294,6 +300,35 @@ export function bindCodexSession(
   const providerThreadId = providerSessionId.trim();
   if (!threadId || !providerThreadId || !cwd.trim()) return;
   resumeByThread.set(threadId, { threadId: providerThreadId, cwd });
+}
+
+/** In-flight cold starts: a prewarm and a send share one spawn. */
+const startingByThread = new Map<string, Promise<Live>>();
+
+/** ensureLive wrapper that dedupes concurrent cold starts of one thread. */
+async function acquireLive(
+  input: HarnessSessionInput,
+  keepExisting = false,
+): Promise<Live> {
+  return acquireSharedStart(
+    input.sessionId,
+    liveByThread,
+    startingByThread,
+    () => ensureLive(input),
+    keepExisting,
+  );
+}
+
+/**
+ * Warm the provider session ahead of a prompt. No-ops when a live host
+ * already serves the thread so a prewarm cannot steal a running turn's
+ * event sink — or recycle the host a racing send just spawned.
+ */
+export async function prewarmCodexSession(
+  input: HarnessSessionInput,
+): Promise<void> {
+  if (liveByThread.has(input.sessionId)) return;
+  await acquireLive(input, true);
 }
 
 async function ensureLive(input: HarnessSessionInput): Promise<Live> {
@@ -314,6 +349,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   }
 
   const { path } = await resolveCodexBinaryImpl(input.cwd);
+  markTurn(input.sessionId, "codex binary resolved");
   const liveRef: { current: Live | null } = { current: null };
 
   const rpc = new JsonRpcClient(
@@ -373,6 +409,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   );
 
   await spawnChild(input.sessionId, path, ["app-server"], input.cwd);
+  markTurn(input.sessionId, "codex spawned");
 
   try {
     await rpc.request("initialize", {
@@ -388,10 +425,10 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       },
     });
     await rpc.notify("initialized", undefined);
+    markTurn(input.sessionId, "codex initialized");
 
     const model = nativeModelId(input.model, input.cwd);
     const serviceTier = input.modelSettings?.serviceTier;
-    const effort = input.modelSettings?.reasoningEffort;
 
     let threadId: string | undefined;
     let didResume = false;
@@ -432,9 +469,10 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     }
 
     if (!threadId) throw new Error("Codex did not return a thread id");
-
-    // Suppress unused warning for effort until first turn applies it.
-    void effort;
+    markTurn(
+      input.sessionId,
+      didResume ? "codex thread resumed" : "codex thread started",
+    );
 
     const live: Live = {
       rpc,
@@ -539,6 +577,7 @@ async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
       "turn/start",
       params,
     );
+    markTurn(input.sessionId, "codex turn/start ack");
     const turnId = response.turn?.id;
     if (turnId) {
       live.activeTurnId = live.activeTurnId ?? turnId;

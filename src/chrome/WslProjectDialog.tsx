@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { wslLocation, wslPath } from "../lib/paths";
 import { connectWslProject } from "../lib/wsl";
+import { useWslStatus } from "../lib/wslStatus";
 import { pickFolder } from "../lib/fs";
 import { Select } from "./Select";
 import { Modal } from "./Modal";
@@ -51,6 +52,7 @@ export function WslProjectDialog({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const wslStatus = useWslStatus(distribution || undefined);
   const request = useRef<AbortController | null>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -156,6 +158,20 @@ export function WslProjectDialog({
             ]}
           />
         </div>
+        {distribution &&
+          wslStatus.state !== "unknown" &&
+          !(wslStatus.state === "error" && error) && (
+            <p className="text-[12px] text-content/50">
+              {wslStatus.state === "connecting"
+                ? `Connecting to ${distribution}…`
+                : wslStatus.state === "connected"
+                  ? `${distribution} is connected.`
+                  : wslStatus.state === "disconnected"
+                    ? `${distribution} is not connected — opening reconnects it.`
+                    : (wslStatus.error ??
+                      `Could not reach ${distribution} — opening retries.`)}
+            </p>
+          )}
         {distribution && (
           <label className="block space-y-1 text-[12px] text-content/75">
             <span>Linux folder</span>

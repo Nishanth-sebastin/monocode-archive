@@ -131,6 +131,7 @@ export {
   requireHarness,
   isLiveHarness,
   sendHarnessTurn,
+  prewarmHarness,
   compactHarnessContext,
   canCompactHarnessContext,
   steerHarnessTurn,

@@ -370,6 +370,17 @@ it("resolveModel maps a persisted variant-level id to its grouped model", () => 
   }
 });
 
+it("resolveModel never falls back to another harness's model", () => {
+  // Codex sessions persisted before a catalog probe must not resolve to
+  // claude:sonnet-5 (MODELS[0]) — the fallback stays harness-scoped.
+  const resolved = resolveModel("codex", "codex:no-such-model");
+  expect(resolved.harness).toBe("codex");
+  expect(resolved.id).toBe("codex:default");
+
+  const claude = resolveModel("claude", "claude:no-such-model");
+  expect(claude.harness).toBe("claude");
+});
+
 it("keeps Windows-discovered model catalogs out of WSL pickers", () => {
   const cwd = "//wsl.localhost/Ubuntu/home/me/repo";
   const builtin = modelsFor("claude", cwd);

@@ -192,6 +192,90 @@ pub async fn linear_issue_thread(app: AppHandle, id: String) -> Result<LinearIss
     .map_err(|error| error.to_string())?
 }
 
+/// Direction is positional in Linear: `relations` holds outgoing edges,
+/// `inverseRelations` the incoming ones. The label keeps that direction.
+fn relation_label(kind: &str, inverse: bool) -> (String, String) {
+    match (kind, inverse) {
+        ("blocks", false) => ("blocks".into(), "blocks".into()),
+        ("blocks", true) => ("blocked-by".into(), "is blocked by".into()),
+        ("duplicate", false) => ("duplicate".into(), "duplicates".into()),
+        ("duplicate", true) => ("duplicate".into(), "is duplicated by".into()),
+        ("related", _) => ("related".into(), "related".into()),
+        (other, _) => (other.to_string(), other.to_string()),
+    }
+}
+
+fn has_next_page(issue: &Value, field: &str) -> bool {
+    issue
+        .pointer(&format!("/{field}/pageInfo/hasNextPage"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn parse_linear_relations(data: &Value) -> Result<Value, String> {
+    let issue = data
+        .get("issue")
+        .ok_or_else(|| "Linear did not return that issue".to_string())?;
+    let mut edges = Vec::new();
+    let mut truncated = false;
+    // Returns false only when the cap dropped the edge so `truncated` stays
+    // honest; unparseable targets are not truncation.
+    let mut push = |key: &str, label: &str, node: &Value| -> bool {
+        if edges.len() >= 50 {
+            return false;
+        }
+        if let Some(item) = parse_linear_issue(node) {
+            edges.push(json!({
+                "key": key,
+                "label": label,
+                "ref": item.identifier,
+                "item": item,
+            }));
+        }
+        true
+    };
+    if let Some(parent) = issue.get("parent") {
+        truncated |= !push("parent", "Parent", parent);
+    }
+    truncated |= has_next_page(issue, "children");
+    if let Some(nodes) = issue.pointer("/children/nodes").and_then(Value::as_array) {
+        for node in nodes {
+            truncated |= !push("children", "Sub-issue", node);
+        }
+    }
+    for (field, inverse) in [("relations", false), ("inverseRelations", true)] {
+        truncated |= has_next_page(issue, field);
+        let Some(nodes) = issue
+            .pointer(&format!("/{field}/nodes"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for node in nodes {
+            let kind = string_field(node, "type").unwrap_or_else(|| "related".into());
+            let counterpart = if inverse { "issue" } else { "relatedIssue" };
+            let (key, label) = relation_label(&kind, inverse);
+            truncated |= !push(&key, &label, &node[counterpart]);
+        }
+    }
+    Ok(json!({ "edges": edges, "truncated": truncated }))
+}
+
+#[tauri::command]
+pub async fn linear_issue_relations(app: AppHandle, id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let token = require_token(&app)?;
+        let id = id.trim();
+        if !valid_linear_id(id) {
+            return Err("Missing Linear issue".into());
+        }
+        let data = graphql_with_token(&token, RELATIONS_QUERY, json!({ "id": id }))?;
+        parse_linear_relations(&data)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub async fn linear_issue_comment(
     app: AppHandle,
@@ -280,6 +364,33 @@ query InboxIssueComments($id: String!) {
         user { name displayName avatarUrl }
         parent { id }
       }
+    }
+  }
+}
+"#;
+const RELATIONS_QUERY: &str = r#"
+fragment IssueRow on Issue {
+  id identifier number title url updatedAt
+  state { name type }
+  team { id key name }
+  project { id name }
+  labels { nodes { name color } }
+  assignee { name displayName avatarUrl }
+}
+query InboxIssueRelations($id: String!) {
+  issue(id: $id) {
+    parent { ...IssueRow }
+    children(first: 50) {
+      pageInfo { hasNextPage }
+      nodes { ...IssueRow }
+    }
+    relations(first: 50) {
+      pageInfo { hasNextPage }
+      nodes { type relatedIssue { ...IssueRow } }
+    }
+    inverseRelations(first: 50) {
+      pageInfo { hasNextPage }
+      nodes { type issue { ...IssueRow } }
     }
   }
 }
@@ -801,6 +912,57 @@ mod tests {
                 key: "ENG".into(),
                 name: "Engineering".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn parse_linear_relations_keeps_edge_direction() {
+        let row = |id: &str, identifier: &str| {
+            json!({
+                "id": id, "identifier": identifier, "number": 1,
+                "title": "T", "url": "https://linear.app/x", "updatedAt": "",
+                "state": {"name":"Todo","type":"unstarted"},
+                "team": {"id":"t","key":"ENG","name":"Engineering"},
+            })
+        };
+        let data = json!({
+            "issue": {
+                "parent": row("p", "ENG-1"),
+                "children": {"pageInfo":{"hasNextPage":true},"nodes":[row("c","ENG-2")]},
+                "relations": {"pageInfo":{"hasNextPage":false},"nodes":[
+                    {"type":"blocks","relatedIssue":row("b","ENG-3")},
+                    {"type":"similar","relatedIssue":row("s","ENG-4")},
+                ]},
+                "inverseRelations": {"pageInfo":{"hasNextPage":false},"nodes":[
+                    {"type":"blocks","issue":row("u","ENG-5")},
+                    {"type":"duplicate","issue":row("d","ENG-6")},
+                ]},
+            }
+        });
+        let parsed = parse_linear_relations(&data).unwrap();
+        assert_eq!(parsed["truncated"], true);
+        let rows: Vec<(&str, &str, &str)> = parsed["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|edge| {
+                (
+                    edge["key"].as_str().unwrap(),
+                    edge["label"].as_str().unwrap(),
+                    edge["ref"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("parent", "Parent", "ENG-1"),
+                ("children", "Sub-issue", "ENG-2"),
+                ("blocks", "blocks", "ENG-3"),
+                ("similar", "similar", "ENG-4"),
+                ("blocked-by", "is blocked by", "ENG-5"),
+                ("duplicate", "is duplicated by", "ENG-6"),
+            ]
         );
     }
 

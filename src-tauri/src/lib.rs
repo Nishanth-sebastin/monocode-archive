@@ -8,6 +8,7 @@ mod azure_pipelines;
 mod azure_repos;
 mod chat_background;
 mod checkpoint;
+mod confluence;
 mod cursor_store;
 mod fs;
 mod gitlab;
@@ -261,6 +262,7 @@ pub fn run() {
             fs::git_github_work_item,
             fs::git_github_work_items,
             fs::git_github_work_item_details,
+            fs::git_github_issue_relations,
             fs::git_github_work_item_thread,
             fs::git_github_work_item_comment,
             fs::git_github_pr_state,
@@ -277,6 +279,7 @@ pub fn run() {
             gitlab::gitlab_work_item_details,
             gitlab::gitlab_work_item_thread,
             gitlab::gitlab_work_item_comment,
+            gitlab::gitlab_issue_relations,
             gitlab::gitlab_mr_diff,
             linear::linear_status,
             jira::jira_status,
@@ -284,7 +287,11 @@ pub fn run() {
             jira::jira_list_issues,
             jira::jira_options,
             jira::jira_issue_content,
+            jira::jira_issue_relations,
             jira::jira_image,
+            confluence::confluence_spaces,
+            confluence::confluence_search,
+            confluence::confluence_page,
             azure::azure_status,
             azure_inbox::azure_delivery_inbox,
             azure_inbox::azure_ci_inbox_summary,
@@ -292,6 +299,7 @@ pub fn run() {
             azure::azure_list_items,
             azure::azure_options,
             azure::azure_item_content,
+            azure::azure_item_relations,
             azure::azure_image,
             azure_pipelines::azure_ci_context,
             azure_pipelines::azure_ci_lookup,
@@ -308,10 +316,12 @@ pub fn run() {
             linear::linear_list_teams,
             linear::linear_list_issues,
             linear::linear_issue_details,
+            linear::linear_issue_relations,
             linear::linear_issue_thread,
             linear::linear_issue_comment,
             fs::git_branches,
             fs::worktrees::git_worktrees,
+            fs::worktrees::git_branch_changed_files,
             fs::worktrees::git_repository_family,
             fs::worktrees::git_worktree_refs,
             fs::worktrees::git_worktree_create,
