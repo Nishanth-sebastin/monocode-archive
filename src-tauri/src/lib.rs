@@ -355,6 +355,7 @@ pub fn run() {
             harness::harness_sse_close,
             harness::harness_exec,
             power::power_sync,
+            power::power_set_enabled,
             power::power_status,
             power::power_retry,
             rate_limits::fetch_claude_usage,
@@ -435,7 +436,7 @@ pub fn run() {
             ..
         } => {
             if let Some(host) = handle.try_state::<power::PowerHost>() {
-                host.drop_window(handle, &label);
+                host.drop_window(Some(handle), &label);
             }
             let other_window = handle.webview_windows().keys().any(|name| name != &label);
             if !other_window {

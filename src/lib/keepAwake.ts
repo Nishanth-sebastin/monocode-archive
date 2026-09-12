@@ -11,6 +11,8 @@ export type PowerStatus = {
   /** Qualifying sessions across all windows. */
   working: number;
   error?: string;
+  /** False until the first backend status arrives; gates "not available". */
+  loaded: boolean;
 };
 
 const POWER_EVENT = "power-assertion";
@@ -20,6 +22,7 @@ const EMPTY_STATUS: PowerStatus = {
   enabled: false,
   held: false,
   working: 0,
+  loaded: false,
 };
 
 /**
@@ -35,16 +38,28 @@ export function keepAwakeSessionIds(sessions: Session[]): string[] {
   return [...ids].sort();
 }
 
-let lastSyncKey: string | null = null;
+let lastEnabledPush: boolean | null = null;
+let lastIdsKey: string | null = null;
 
-/** Push this window's qualifying set; runs only on membership/flag changes. */
+/**
+ * Push the shared setting and this window's qualifying set; each runs only
+ * when its own value changes. The enabled flag travels on its own command so
+ * a window whose localStorage has not converged yet cannot release another
+ * window's legitimate hold through a routine ref sync.
+ */
 export function syncKeepAwake(enabled: boolean, sessionIds: string[]) {
-  const key = `${enabled ? "1" : "0"}${sessionIds.join(",")}`;
-  if (key === lastSyncKey) return;
-  lastSyncKey = key;
-  void invoke("power_sync", { enabled, sessionIds }).catch(() => {
+  if (enabled !== lastEnabledPush) {
+    lastEnabledPush = enabled;
+    void invoke("power_set_enabled", { enabled }).catch(() => {
+      lastEnabledPush = null;
+    });
+  }
+  const key = sessionIds.join("\n");
+  if (key === lastIdsKey) return;
+  lastIdsKey = key;
+  void invoke("power_sync", { sessionIds }).catch(() => {
     // A lost push must not wedge the key: the next change sends again.
-    lastSyncKey = null;
+    lastIdsKey = null;
   });
 }
 
@@ -72,18 +87,25 @@ function notifyStatus() {
   for (const listener of statusListeners) listener();
 }
 
+function applyStatus(status: Omit<PowerStatus, "loaded">) {
+  statusSnapshot = { ...status, loaded: true };
+  notifyStatus();
+}
+
 function ensureStatusBridge() {
   if (statusBridge) return;
-  statusBridge = Promise.all([
-    listen<PowerStatus>(POWER_EVENT, (event) => {
-      statusSnapshot = event.payload;
-      notifyStatus();
+  const bridge = Promise.all([
+    listen<Omit<PowerStatus, "loaded">>(POWER_EVENT, (event) => {
+      applyStatus(event.payload);
     }),
-    invoke<PowerStatus>("power_status")
-      .then((status) => {
-        statusSnapshot = status;
-        notifyStatus();
-      })
+    invoke<Omit<PowerStatus, "loaded">>("power_status")
+      .then(applyStatus)
       .catch(() => undefined),
-  ]).catch(() => undefined);
+  ]);
+  statusBridge = bridge;
+  // A failed bridge must not wedge status for the session lifetime; the next
+  // subscriber tries again.
+  void bridge.catch(() => {
+    if (statusBridge === bridge) statusBridge = null;
+  });
 }

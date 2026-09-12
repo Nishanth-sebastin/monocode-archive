@@ -1400,16 +1400,10 @@ export default function App({
   // One idle-sleep assertion per runtime, owned by the backend. This window
   // reports only sessions doing real execution; waiting/idle/finished work
   // drops out, and a stale window cannot hold the machine awake alone.
-  const keepAwakeIds = useMemo(
-    () => keepAwakeSessionIds(sessions).join("\n"),
-    [sessions],
-  );
+  // syncKeepAwake dedupes internally, so IPC only fires on real changes.
   useEffect(() => {
-    syncKeepAwake(
-      keepAwakeEnabled,
-      keepAwakeIds ? keepAwakeIds.split("\n") : [],
-    );
-  }, [keepAwakeEnabled, keepAwakeIds]);
+    syncKeepAwake(keepAwakeEnabled, keepAwakeSessionIds(sessions));
+  }, [keepAwakeEnabled, sessions]);
 
   useEffect(() => {
     const refs = inFlightRefs(sessions, tabs);

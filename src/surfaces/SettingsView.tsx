@@ -568,7 +568,7 @@ function GeneralPage({
             working
           </span>
         ) : null}
-        {keepAwakeEnabled && !powerStatus.supported ? (
+        {keepAwakeEnabled && powerStatus.loaded && !powerStatus.supported ? (
           <span className="text-[12px] text-content/45">
             Not available on this platform
           </span>
