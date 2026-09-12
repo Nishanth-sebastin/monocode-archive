@@ -301,6 +301,416 @@ it("updates PR and CI rows when their exact conversation associations change", a
   } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
 });
 
+it("lets a task session switch the panel between child working copies", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => rows.get(key) ?? null,
+    setItem: (key: string, value: string) => rows.set(key, value),
+  });
+  rows.set(
+    "monocode.taskWorkspaces.v1",
+    JSON.stringify([
+      {
+        id: "t1",
+        projectId: "p1",
+        name: "Ship it",
+        sessionIds: ["s1"],
+        createdAt: 1,
+        children: [
+          {
+            id: "c1",
+            repositoryId: "r1",
+            workingCopy: "/repo-a",
+            branch: "feat/a",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+          {
+            id: "c2",
+            repositoryId: "r2",
+            workingCopy: "/repo-b",
+            branch: "feat/b",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+        ],
+      },
+    ]),
+  );
+  const { invoke } = await import("@tauri-apps/api/core");
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  const indexed: string[] = [];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_diff_index") {
+      const cwd = (args as { cwd: string }).cwd;
+      indexed.push(cwd);
+      return {
+        branch: cwd === "/repo-b" ? "feat/b" : "feat/a",
+        ahead: 0,
+        behind: 0,
+        files: [
+          {
+            path: `${cwd}/only.ts`,
+            relative: cwd === "/repo-b" ? "b-only.ts" : "a-only.ts",
+            status: "modified",
+            staged: false,
+            unstaged: true,
+            additions: 1,
+            deletions: 0,
+          },
+        ],
+      };
+    }
+    return original(command, args);
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const chip = (name: string) =>
+    [...host.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes(name),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-a",
+          sourceSessionId: "s1",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    // A chip per child; the session's own copy is selected by default.
+    expect(chip("repo-a")).toBeTruthy();
+    expect(chip("repo-b")).toBeTruthy();
+    expect(host.querySelector("header")?.textContent).toContain("feat/a");
+    // The sibling child's index is prefetched while the strip is open, so
+    // switching swaps to cached content instead of blanking the list.
+    expect(indexed).toContain("/repo-b");
+    await act(async () => chip("repo-b")!.click());
+    expect(host.querySelector("header")?.textContent).toContain("feat/b");
+    // The file list shows the selected child's files — never repo A's rows
+    // under repo B's chip.
+    expect(host.querySelector('button[title="b-only.ts"]')).not.toBeNull();
+    expect(host.querySelector('button[title="a-only.ts"]')).toBeNull();
+    // Switching back is served from the warm cache too.
+    await act(async () => chip("repo-a")!.click());
+    expect(host.querySelector("header")?.textContent).toContain("feat/a");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.mocked(invoke).mockImplementation(original);
+    vi.unstubAllGlobals();
+  }
+});
+
+it("uses the selector instead of chips for more than two children", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => rows.get(key) ?? null,
+    setItem: (key: string, value: string) => rows.set(key, value),
+  });
+  rows.set(
+    "monocode.taskWorkspaces.v1",
+    JSON.stringify([
+      {
+        id: "t1",
+        projectId: "p1",
+        name: "Ship it",
+        sessionIds: ["s1"],
+        createdAt: 1,
+        children: ["a", "b", "c"].map((name, index) => ({
+          id: `c${index + 1}`,
+          repositoryId: `r${index + 1}`,
+          workingCopy: `/repo-${name}`,
+          branch: `feat/${name}`,
+          sessionIds: [],
+          launch: { state: "ready" },
+        })),
+      },
+    ]),
+  );
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const selector = () =>
+    host.querySelector('button[aria-haspopup="menu"]') as HTMLButtonElement | null;
+  const menuRow = (name: string) =>
+    [...document.querySelectorAll('ul[role="menu"] button')].find((button) =>
+      button.textContent?.includes(name),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-a",
+          sourceSessionId: "s1",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    // No chip row — a compact selector shows the active child and count.
+    expect(selector()?.textContent).toContain("repo-a");
+    expect(selector()?.textContent).toContain("3 repos");
+    await act(async () => selector()!.click());
+    expect(menuRow("repo-c")).toBeTruthy();
+    await act(async () => (menuRow("repo-c") as HTMLButtonElement).click());
+    expect(host.querySelector("header")?.textContent).toContain("feature");
+    expect(selector()?.textContent).toContain("repo-c");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("collapses the child chips into a selector menu when they overflow", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => rows.get(key) ?? null,
+    setItem: (key: string, value: string) => rows.set(key, value),
+  });
+  rows.set(
+    "monocode.taskWorkspaces.v1",
+    JSON.stringify([
+      {
+        id: "t1",
+        projectId: "p1",
+        name: "Ship it",
+        sessionIds: ["s1"],
+        createdAt: 1,
+        children: [
+          {
+            id: "c1",
+            repositoryId: "r1",
+            workingCopy: "/repo-a",
+            branch: "feat/a",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+          {
+            id: "c2",
+            repositoryId: "r2",
+            workingCopy: "/repo-b",
+            branch: "feat/b",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+        ],
+      },
+    ]),
+  );
+  // A strip narrower than its chips reports scrollWidth > clientWidth.
+  const sizeDesc = (name: "scrollWidth" | "clientWidth") =>
+    Object.getOwnPropertyDescriptor(HTMLElement.prototype, name);
+  const savedScroll = sizeDesc("scrollWidth");
+  const savedClient = sizeDesc("clientWidth");
+  const restore = (name: "scrollWidth" | "clientWidth", desc?: PropertyDescriptor) => {
+    if (desc) Object.defineProperty(HTMLElement.prototype, name, desc);
+    else
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>)[
+        name
+      ];
+  };
+  Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+    configurable: true,
+    get() {
+      return 800;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get() {
+      return 120;
+    },
+  });
+  const { invoke } = await import("@tauri-apps/api/core");
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_diff_index") {
+      const cwd = (args as { cwd: string }).cwd;
+      return {
+        branch: cwd === "/repo-b" ? "feat/b" : "feat/a",
+        ahead: 0,
+        behind: 0,
+        files: [],
+      };
+    }
+    return original(command, args);
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const selector = () =>
+    host.querySelector('button[aria-haspopup="menu"]') as HTMLButtonElement | null;
+  const menuRow = (name: string) =>
+    [...document.querySelectorAll('ul[role="menu"] button')].find((button) =>
+      button.textContent?.includes(name),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-a",
+          sourceSessionId: "s1",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    // The chip row cannot fit — a compact selector shows the active child
+    // and the repo count instead of a clipped list.
+    expect(selector()?.textContent).toContain("repo-a");
+    expect(selector()?.textContent).toContain("2 repos");
+    await act(async () => selector()!.click());
+    expect(menuRow("repo-a")).toBeTruthy();
+    expect(menuRow("repo-b")).toBeTruthy();
+    await act(async () => (menuRow("repo-b") as HTMLButtonElement).click());
+    expect(host.querySelector("header")?.textContent).toContain("feat/b");
+    // The menu closed on selection and the selector follows the new child.
+    expect(document.querySelector('ul[role="menu"]')).toBeNull();
+    expect(selector()?.textContent).toContain("repo-b");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.mocked(invoke).mockImplementation(original);
+    restore("scrollWidth", savedScroll);
+    restore("clientWidth", savedClient);
+    vi.unstubAllGlobals();
+  }
+});
+
+it("applies an in-flight mutation to the repo it ran on after a child switch", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const rows = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => rows.get(key) ?? null,
+    setItem: (key: string, value: string) => rows.set(key, value),
+  });
+  rows.set(
+    "monocode.taskWorkspaces.v1",
+    JSON.stringify([
+      {
+        id: "t1",
+        projectId: "p1",
+        name: "Ship it",
+        sessionIds: ["s1"],
+        createdAt: 1,
+        children: [
+          {
+            id: "c1",
+            repositoryId: "r1",
+            workingCopy: "/repo-a",
+            branch: "feat/a",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+          {
+            id: "c2",
+            repositoryId: "r2",
+            workingCopy: "/repo-b",
+            branch: "feat/b",
+            sessionIds: [],
+            launch: { state: "ready" },
+          },
+        ],
+      },
+    ]),
+  );
+  const { invoke } = await import("@tauri-apps/api/core");
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  const stagedAll = new Set<string>();
+  let release: (() => void) | undefined;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_stage_file") {
+      const cwd = (args as { cwd: string }).cwd;
+      // Hold repo A's mutation open so the child switch lands mid-flight.
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      stagedAll.add(cwd);
+      return null;
+    }
+    if (command === "git_diff_index") {
+      const cwd = (args as { cwd: string }).cwd;
+      return {
+        branch: cwd === "/repo-b" ? "feat/b" : "feat/a",
+        ahead: 0,
+        behind: 0,
+        files: [
+          {
+            path: `${cwd}/only.ts`,
+            relative: cwd === "/repo-b" ? "b-only.ts" : "a-only.ts",
+            status: "modified",
+            staged: stagedAll.has(cwd),
+            unstaged: !stagedAll.has(cwd),
+            additions: 1,
+            deletions: 0,
+          },
+        ],
+      };
+    }
+    return original(command, args);
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const chip = (name: string) =>
+    [...host.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes(name),
+    );
+  try {
+    await act(async () =>
+      root.render(
+        createElement(GitChangesPanel, {
+          cwd: "/repo-a",
+          sourceSessionId: "s1",
+          enabled: true,
+          onOpenFile: vi.fn(),
+          onOpenAllChanges: vi.fn(),
+          onOpenCommit: vi.fn(),
+        }),
+      ),
+    );
+    const stageButton = () =>
+      host.querySelector('button[aria-label="Stage Changes"]');
+    const unstageButton = () =>
+      host.querySelector('button[aria-label="Unstage Changes"]');
+    // Start staging repo A, then switch to repo B before it resolves.
+    await act(async () => {
+      (stageButton() as HTMLButtonElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => chip("repo-b")!.click());
+    expect(host.querySelector("header")?.textContent).toContain("feat/b");
+    await act(async () => release?.());
+    // Repo B's displayed index is untouched by repo A's mutation.
+    expect(host.querySelector('button[title="b-only.ts"]')).not.toBeNull();
+    expect(stageButton()).not.toBeNull();
+    expect(unstageButton()).toBeNull();
+    // Repo A's own cache picked it up — switching back shows it staged.
+    await act(async () => chip("repo-a")!.click());
+    expect(host.querySelector('button[title="a-only.ts"]')).not.toBeNull();
+    expect(unstageButton()).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.mocked(invoke).mockImplementation(original);
+    vi.unstubAllGlobals();
+  }
+});
+
 it("routes GitHub rows externally and keeps an Azure CI override independent", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const rows = new Map<string, string>();

@@ -4690,6 +4690,10 @@ export default function App({
               if (!exists) throw error;
             }
             notifyGitChanged(anchor);
+            // The anchor's notification does not reach subscribers keyed by
+            // the new worktree path — refresh it so task-child views stop
+            // showing the pre-creation empty state.
+            if (current.workingCopy) notifyGitChanged(current.workingCopy);
           } else if (current.workingCopy) {
             // Existing/main copy: re-verify it still exists before starting a
             // session at a path that may have been moved or deleted.

@@ -430,11 +430,9 @@ export function azurePrContext(
 const ASSOCIATIONS_KEY = "monocode.azurePrAssociations.v1";
 export const azurePrScope = (cwd: string, branch: string, session?: string) =>
   JSON.stringify([cwd, branch, session ?? null]);
-export function loadAzurePrAssociations(
-  cwd: string,
-  branch: string,
-  session?: string,
-): AzurePrAssociation[] {
+/** Every saved association, validated — one storage read for callers that
+ * aggregate several scopes (e.g. a task's repository children). */
+export function allAzurePrAssociations(): AzurePrAssociation[] {
   try {
     const rows: unknown = JSON.parse(
       localStorage.getItem(ASSOCIATIONS_KEY) ?? "[]",
@@ -442,12 +440,6 @@ export function loadAzurePrAssociations(
     if (!Array.isArray(rows)) return [];
     return rows
       .slice(0, 100)
-      .filter(
-        (row) =>
-          row?.cwd === cwd &&
-          row?.branch === branch &&
-          row?.sourceSessionId === session,
-      )
       .filter((value) => {
         try {
           if (
@@ -491,6 +483,18 @@ export function loadAzurePrAssociations(
   } catch {
     return [];
   }
+}
+export function loadAzurePrAssociations(
+  cwd: string,
+  branch: string,
+  session?: string,
+): AzurePrAssociation[] {
+  return allAzurePrAssociations().filter(
+    (row) =>
+      row.cwd === cwd &&
+      row.branch === branch &&
+      row.sourceSessionId === session,
+  );
 }
 export const loadAzurePrAssociation = (
   cwd: string,

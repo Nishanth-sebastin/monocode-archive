@@ -19,6 +19,22 @@ type Entry = {
 
 const entries = new Map<string, Entry>();
 
+/** Bumped on every publish so peek-based aggregates (task rail, chip dots)
+ * can re-derive without subscribing to a stats entry per child. */
+let version = 0;
+const versionListeners = new Set<() => void>();
+
+export function subscribeDiffStatsVersion(listener: () => void) {
+  versionListeners.add(listener);
+  return () => {
+    versionListeners.delete(listener);
+  };
+}
+
+export function diffStatsVersion(): number {
+  return version;
+}
+
 function entryFor(cwd: string): Entry {
   const existing = entries.get(pathKey(cwd));
   if (existing) return existing;
@@ -40,12 +56,15 @@ function publish(entry: Entry, stats: GitDiffStats | null) {
   if (
     entry.stats?.files === stats?.files &&
     entry.stats?.additions === stats?.additions &&
-    entry.stats?.deletions === stats?.deletions
+    entry.stats?.deletions === stats?.deletions &&
+    entry.stats?.branch === stats?.branch
   ) {
     return;
   }
   entry.stats = stats;
+  version += 1;
   for (const listener of entry.listeners) listener();
+  for (const listener of versionListeners) listener();
 }
 
 async function load(entry: Entry, force = false) {
@@ -76,6 +95,13 @@ export function applyProjectDiffStats(cwd: string, stats: GitDiffStats) {
   const entry = entryFor(cwd);
   entry.epoch += 1;
   publish(entry, stats);
+}
+
+/** Last published stats without subscribing or fetching — for aggregates
+ * (task rail rows) that must stay cheap and quiet. */
+export function peekProjectDiffStats(cwd: string): GitDiffStats | null {
+  if (!cwd || cwd === "~") return null;
+  return entries.get(pathKey(cwd))?.stats ?? null;
 }
 
 function start(entry: Entry) {

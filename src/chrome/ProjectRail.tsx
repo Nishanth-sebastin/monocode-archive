@@ -61,7 +61,17 @@ import {
 } from "../lib/repositoryFamilies";
 import { useDragResize } from "../hooks/useDragResize";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
-import { useProjectDiffStats } from "../hooks/useProjectDiffStats";
+import {
+  diffStatsVersion,
+  peekProjectDiffStats,
+  subscribeDiffStatsVersion,
+  useProjectDiffStats,
+} from "../hooks/useProjectDiffStats";
+import {
+  branchPrVersion,
+  cachedBranchPr,
+  subscribeBranchPrVersion,
+} from "../hooks/useBranchPr";
 import { useSortable } from "../hooks/useSortable";
 import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
 import {
@@ -133,6 +143,15 @@ import {
   type TaskChild,
   type TaskWorkspace,
 } from "../lib/taskWorkspaces";
+import {
+  childDelivery,
+  deliveryStores,
+  taskStatusSegments,
+  type DeliveryStores,
+  type TaskChildDelivery,
+} from "../lib/taskDelivery";
+import { AZURE_PR_ASSOCIATIONS_CHANGED } from "../lib/azureRepos";
+import { AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
 import type { SettingsSectionId } from "../lib/settings";
 
 const REVEAL_LABEL = IS_MAC
@@ -330,10 +349,14 @@ export function ProjectRail({
       new Set(activeTask?.children.map((entry) => entry.repositoryId) ?? []),
     [activeTask],
   );
+  const busySessionIds = useMemo(
+    () =>
+      new Set(
+        liveAgents.filter((agent) => !agent.done).map((agent) => agent.id),
+      ),
+    [liveAgents],
+  );
   const taskBusyIds = useMemo(() => {
-    const busyIds = new Set(
-      liveAgents.filter((agent) => !agent.done).map((agent) => agent.id),
-    );
     const set = new Set<string>();
     for (const task of loadTaskWorkspaces()) {
       if (task.archived) continue;
@@ -341,26 +364,20 @@ export function ProjectRail({
         ...(task.sessionIds ?? []),
         ...task.children.flatMap((entry) => entry.sessionIds),
       ];
-      if (ids.some((id) => busyIds.has(id))) set.add(task.id);
+      if (ids.some((id) => busySessionIds.has(id))) set.add(task.id);
     }
     return set;
     // tasksRaw changes on every store write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasksRaw, liveAgents]);
+  }, [tasksRaw, busySessionIds]);
   const railTasks = useMemo(() => {
     const live = loadTaskWorkspaces().filter((task) => !task.archived);
-    const rank = (task: TaskWorkspace) =>
-      task.id === currentTaskId
-        ? 0
-        : taskBusyIds.has(task.id)
-          ? 1
-          : 2;
-    return [...live].sort(
-      (a, b) => rank(a) - rank(b) || b.createdAt - a.createdAt,
-    );
+    // Stable newest-first order — selecting or working on a task must not
+    // move its row; state shows through the row's indicators instead.
+    return [...live].sort((a, b) => b.createdAt - a.createdAt);
     // tasksRaw changes on every store write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasksRaw, currentTaskId, taskBusyIds]);
+  }, [tasksRaw]);
   const archivedTasks = useMemo(
     () =>
       loadTaskWorkspaces()
@@ -732,6 +749,7 @@ export function ProjectRail({
               archivedTasks={archivedTasks}
               currentTaskId={currentTaskId}
               busyIds={taskBusyIds}
+              busySessionIds={busySessionIds}
               needsInputIds={needsInputSessionIds}
               onOpen={onOpenTask}
               onMenu={openTaskMenu}
@@ -1657,6 +1675,7 @@ function TasksSection({
   archivedTasks,
   currentTaskId,
   busyIds,
+  busySessionIds,
   needsInputIds,
   onOpen,
   onMenu,
@@ -1666,6 +1685,7 @@ function TasksSection({
   archivedTasks: TaskWorkspace[];
   currentTaskId?: string;
   busyIds: ReadonlySet<string>;
+  busySessionIds: ReadonlySet<string>;
   needsInputIds?: ReadonlySet<string>;
   onOpen?: (taskId: string) => void;
   onMenu: (task: TaskWorkspace, x: number, y: number) => void;
@@ -1673,6 +1693,23 @@ function TasksSection({
 }) {
   const [showArchived, setShowArchived] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  // Re-read saved provider links when they change — one parse shared by all
+  // rows; the rail never fetches live provider data itself.
+  const [deliveryTick, setDeliveryTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setDeliveryTick((value) => value + 1);
+    window.addEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, bump);
+    window.addEventListener(AZURE_CI_SOURCES_CHANGED, bump);
+    return () => {
+      window.removeEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, bump);
+      window.removeEventListener(AZURE_CI_SOURCES_CHANGED, bump);
+    };
+  }, []);
+  const stores = useMemo(
+    () => deliveryStores(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deliveryTick],
+  );
   if (!tasks.length && !archivedTasks.length) return null;
   // The rail stays compact — current and working tasks sort first, the
   // long tail hides behind a toggle like the archived list.
@@ -1694,6 +1731,9 @@ function TasksSection({
           ) ||
           false
         }
+        busySessionIds={busySessionIds}
+        needsInputIds={needsInputIds}
+        stores={stores}
         project={project}
         onOpen={() => onOpen?.(task.id)}
         onMenu={(event) => {
@@ -1760,13 +1800,18 @@ function TasksSection({
 }
 
 /** One task row in the Tasks section — name, ticket ref, project +
- * repository meta, needs-input and working markers. Opens the task. */
+ * repository meta, needs-input and working markers, plus a compact
+ * delivery aggregate (failing CI, PRs needing review, launches to retry)
+ * derived from saved provider links — never a live fetch. Opens the task. */
 function TaskRailRow({
   task,
   active = false,
   busy = false,
   archived = false,
   needsInput,
+  busySessionIds,
+  needsInputIds,
+  stores,
   project,
   onOpen,
   onMenu,
@@ -1779,6 +1824,9 @@ function TaskRailRow({
   /** Dimmed row under the section's archived expander. */
   archived?: boolean;
   needsInput: boolean;
+  busySessionIds: ReadonlySet<string>;
+  needsInputIds?: ReadonlySet<string>;
+  stores: DeliveryStores;
   /** Owning project — already resolved by the caller, shown for context. */
   project?: ProjectRecord;
   onOpen: () => void;
@@ -1795,11 +1843,55 @@ function TaskRailRow({
       return repo ? repositoryDisplayName(repo) : "Repository";
     })
     .join(" · ");
+  // Delivery per child, from saved links and already-cached data only —
+  // the rail must stay cheap even with several tasks expanded. The version
+  // ticks re-derive when a stats or PR cache publish lands — the peeks
+  // themselves never subscribe or fetch.
+  const statsV = useSyncExternalStore(
+    subscribeDiffStatsVersion,
+    diffStatsVersion,
+  );
+  const prV = useSyncExternalStore(subscribeBranchPrVersion, branchPrVersion);
+  const deliveryMap = useMemo(() => {
+    const map = new Map<string, TaskChildDelivery>();
+    for (const entry of task.children) {
+      if (!entry.workingCopy) continue;
+      const branch =
+        peekProjectDiffStats(entry.workingCopy)?.branch ?? entry.branch;
+      map.set(
+        entry.id,
+        childDelivery(
+          task,
+          entry,
+          [branch, entry.branch],
+          cachedBranchPr(entry.workingCopy, branch),
+          stores,
+        ),
+      );
+    }
+    return map;
+    // statsV/prV only tick the caches — the peeks re-read inside.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task, stores, statsV, prV]);
+  const failing = task.children.some(
+    (entry) =>
+      entry.launch.state === "failed" ||
+      deliveryMap.get(entry.id)?.ciFailing ||
+      deliveryMap.get(entry.id)?.prNeedsAttention,
+  );
+  // The "Working" badge already covers the busy segment — don't repeat it.
+  const segments = taskStatusSegments(task, {
+    busySessionIds,
+    needsInputIds,
+    delivery: deliveryMap,
+    dropWorking: true,
+  });
+  const statusText = segments.join(" · ");
   const title = [
     ticket,
     task.name,
     repoNames || `${task.children.length} repos`,
-    needsInput ? "Needs input" : undefined,
+    ...segments,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -1846,14 +1938,19 @@ function TaskRailRow({
         <span className="mt-0.5 flex min-w-0 items-center gap-1.5 pl-5 text-[11px] leading-tight">
           {needsInput ? (
             <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
+          ) : failing ? (
+            <span className="size-1.5 shrink-0 rounded-full bg-red-400" />
           ) : null}
           <span
             className={`min-w-0 flex-1 truncate ${
-              needsInput ? "text-amber-400" : "text-content/45"
+              needsInput
+                ? "text-amber-400"
+                : failing
+                  ? "text-red-400/90"
+                  : "text-content/45"
             }`}
           >
-            {needsInput ? "Needs input" : ""}
-            {needsInput && repoNames ? " · " : ""}
+            {statusText ? `${statusText} · ` : ""}
             {repoNames || `${task.children.length} repos`}
             {projectLabel ? ` · ${projectLabel}` : ""}
           </span>

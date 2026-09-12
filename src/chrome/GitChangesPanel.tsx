@@ -7,10 +7,22 @@ import { contextFromChanges, requestAgentContext } from "../lib/agentContext";
 import {
   loadTaskWorkspaces,
   projectForTask,
+  repositoryForChild,
   subscribeTaskWorkspaces,
+  taskForSession,
   taskWorkspacesSnapshot,
+  type TaskChild,
+  type TaskWorkspace,
 } from "../lib/taskWorkspaces";
-import { projectName } from "../lib/paths";
+import {
+  childDelivery,
+  deliveryStores,
+  EMPTY_DELIVERY,
+  type DeliveryStores,
+  type TaskChildDelivery,
+} from "../lib/taskDelivery";
+import { projectsSnapshot, repositoryDisplayName, subscribeProjects } from "../lib/projects";
+import { pathKey, projectName } from "../lib/paths";
 import { Popover } from "./Popover";
 import { ContextCheckbox } from "./InboxContextPicker";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -64,7 +76,6 @@ import {
   gitDiscardAll,
   gitDiscardFile,
   gitPrCreate,
-  gitPrStatus,
   gitPush,
   gitStageAll,
   gitStageFile,
@@ -75,6 +86,7 @@ import {
   subscribeGitChanged,
   type GitChangedFile,
   type GitDiffIndex,
+  type GitDiffStats,
   type GitFileDiffKind,
   type GitHistoryCommit,
   type GitPr,
@@ -88,7 +100,11 @@ import {
 import { generateCommitMessage, generatePrContent } from "../lib/harness";
 import { invalidateWatchedFiles } from "../lib/fileWatch";
 import { MOD } from "../lib/platform";
-import { applyProjectDiffStats } from "../hooks/useProjectDiffStats";
+import {
+  applyProjectDiffStats,
+  useProjectDiffStats,
+} from "../hooks/useProjectDiffStats";
+import { useBranchPr, useCachedBranchPr } from "../hooks/useBranchPr";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 
 const GIT_POLL_MS = 2000;
@@ -108,7 +124,8 @@ let changesView: ChangesView = loadChangesView();
 /** Folders the user collapsed in tree view, keyed `<kind>:<dir>`. */
 const collapsedDirs = new Set<string>();
 const indexByCwd = new Map<string, GitDiffIndex>();
-const prByCwd = new Map<string, GitPr | null>();
+const warmInFlight = new Set<string>();
+
 const EMPTY_FILES: GitChangedFile[] = [];
 
 type Props = {
@@ -138,9 +155,92 @@ export function GitChangesPanel({
   onOpenDelivery,
   onOpenCommit,
 }: Props) {
-  const { index, patch } = useDiffIndex(cwd, enabled);
+  // A task session's panel can inspect any prepared child working copy —
+  // everything below keys off viewCwd so Git, PR and CI state never mixes
+  // two children.
+  const tasksRaw = useSyncExternalStore(
+    subscribeTaskWorkspaces,
+    taskWorkspacesSnapshot,
+  );
+  const projectsRaw = useSyncExternalStore(subscribeProjects, projectsSnapshot);
+  const task = useMemo(
+    () =>
+      sourceSessionId
+        ? (taskForSession(sourceSessionId, cwd)?.task ?? null)
+        : null,
+    // Stores re-read on every write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sourceSessionId, cwd, tasksRaw, projectsRaw],
+  );
+  const [viewCwd, setViewCwd] = useState(cwd);
+  const prevCwd = useRef(cwd);
+  useEffect(() => {
+    if (prevCwd.current !== cwd) {
+      prevCwd.current = cwd;
+      setViewCwd(cwd);
+      return;
+    }
+    // Drop a selection whose child lost its working copy (task revised).
+    if (
+      viewCwd !== cwd &&
+      !task?.children.some(
+        (entry) =>
+          entry.workingCopy && pathKey(entry.workingCopy) === pathKey(viewCwd),
+      )
+    ) {
+      setViewCwd(cwd);
+    }
+  }, [cwd, task, viewCwd]);
+
+  // Warm every prepared child's index once so switching chips swaps to
+  // cached content instead of flashing an empty list. Writes go to the
+  // shared cache only — the live hook picks them up on selection. A git
+  // change under a child drops its warm entry so a stale index is never
+  // served, and a copy that became the displayed one mid-fetch keeps the
+  // live hook's fresher result.
+  const viewCwdRef = useRef(viewCwd);
+  viewCwdRef.current = viewCwd;
+  useEffect(() => {
+    if (!enabled || !task) return;
+    const unsubs: (() => void)[] = [];
+    for (const entry of task.children) {
+      const copy = entry.workingCopy;
+      if (!copy || copy === "~") continue;
+      const key = pathKey(copy);
+      unsubs.push(
+        subscribeGitChanged(() => indexByCwd.delete(key), copy),
+      );
+      if (
+        indexByCwd.has(key) ||
+        warmInFlight.has(key) ||
+        key === pathKey(viewCwd)
+      )
+        continue;
+      warmInFlight.add(key);
+      void gitDiffIndex(copy)
+        .then((next) => {
+          if (key === pathKey(viewCwdRef.current)) return;
+          indexByCwd.set(key, next);
+          applyProjectDiffStats(copy, {
+            files: next.files.length,
+            additions: next.additions,
+            deletions: next.deletions,
+            branch: next.branch,
+          });
+        })
+        .catch(() => {
+          /* The live hook reports its own errors on selection. */
+        })
+        .finally(() => warmInFlight.delete(key));
+    }
+    return () => {
+      for (const unsub of unsubs) unsub();
+    };
+  }, [enabled, task, viewCwd]);
+
+  const { index, patch } = useDiffIndex(viewCwd, enabled);
   const files = index?.files ?? EMPTY_FILES;
-  const [, refreshDelivery] = useState(0);
+  const [deliveryTick, refreshDelivery] = useState(0);
   useEffect(() => {
     const refresh = () => refreshDelivery(value => value + 1);
     window.addEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, refresh);
@@ -154,8 +254,24 @@ export function GitChangesPanel({
       window.removeEventListener(DELIVERY_PROVIDERS_CHANGED, refresh);
     };
   }, []);
-  const prs = loadAzurePrAssociations(cwd, index?.branch ?? "", sourceSessionId);
-  const pipelines = loadCiSources(cwd, index?.branch ?? "", sourceSessionId);
+  // Parsed once per scope/store change — this render runs on every poll.
+  const prs = useMemo(
+    () =>
+      loadAzurePrAssociations(viewCwd, index?.branch ?? "", sourceSessionId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [viewCwd, index?.branch, sourceSessionId, deliveryTick],
+  );
+  const pipelines = useMemo(
+    () => loadCiSources(viewCwd, index?.branch ?? "", sourceSessionId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [viewCwd, index?.branch, sourceSessionId, deliveryTick],
+  );
+  const stores = useMemo(
+    () => deliveryStores(),
+    // Re-parsed when any delivery store signals a change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deliveryTick],
+  );
 
   const [repository, setRepository] = useState<{cwd: string; branch: string; provider?: DeliveryProvider}>();
   const [choosingProviders, setChoosingProviders] = useState(false);
@@ -169,14 +285,14 @@ export function GitChangesPanel({
     setDeliveryError("");
     setDeliveryBusy(false);
     deliveryPending.current = false;
-    if (enabled && index?.branch) void ciContext(cwd).then(context => {
+    if (enabled && index?.branch) void ciContext(viewCwd).then(context => {
       if (generation === deliveryGeneration.current && context?.branch === index.branch)
-        setRepository({cwd, branch: context.branch, provider: repositoryProvider(context.remotes, index.remote)});
+        setRepository({cwd: viewCwd, branch: context.branch, provider: repositoryProvider(context.remotes, index.remote)});
     }).catch(() => { /* Explicit provider selection remains available. */ });
     return () => { deliveryGeneration.current++; };
-  }, [cwd, index?.branch, index?.remote, sourceSessionId, enabled]);
-  const defaultProvider = repository?.cwd === cwd && repository.branch === index?.branch ? repository.provider : undefined;
-  const providerFor = (kind: "pr" | "ci") => deliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind)
+  }, [viewCwd, index?.branch, index?.remote, sourceSessionId, enabled]);
+  const defaultProvider = repository?.cwd === viewCwd && repository.branch === index?.branch ? repository.provider : undefined;
+  const providerFor = (kind: "pr" | "ci") => deliveryProvider(viewCwd, index?.branch ?? "", sourceSessionId, kind)
     ?? ((kind === "pr" ? prs.length : pipelines.length) ? "azure" : defaultProvider);
   const openDelivery = async (kind: "pr" | "ci") => {
     const provider = providerFor(kind);
@@ -186,8 +302,8 @@ export function GitChangesPanel({
     const generation = deliveryGeneration.current;
     setDeliveryBusy(true); setDeliveryError("");
     try {
-      if (provider === "github") await openGitHubDelivery(cwd, kind, () => generation === deliveryGeneration.current);
-      else onOpenDelivery?.(cwd, {kind, branch: index?.branch ?? "", sourceSessionId});
+      if (provider === "github") await openGitHubDelivery(viewCwd, kind, () => generation === deliveryGeneration.current);
+      else onOpenDelivery?.(viewCwd, {kind, branch: index?.branch ?? "", sourceSessionId});
     } catch (error) { if (generation === deliveryGeneration.current) setDeliveryError(String(error instanceof Error ? error.message : error)); }
     finally { if (generation === deliveryGeneration.current) { deliveryPending.current = false; setDeliveryBusy(false); } }
   };
@@ -238,6 +354,15 @@ export function GitChangesPanel({
           <span className="ml-auto" />
         )}
       </header>
+      {task && task.children.length > 1 ? (
+        <TaskChildStrip
+          task={task}
+          viewCwd={viewCwd}
+          enabled={enabled}
+          stores={stores}
+          onSelect={setViewCwd}
+        />
+      ) : null}
       <div className="shrink-0 border-b border-content/10 py-1">
         {(
           [
@@ -285,15 +410,15 @@ export function GitChangesPanel({
         );})}
         <details open={choosingProviders} onToggle={event => setChoosingProviders(event.currentTarget.open)} className="px-3 text-[11px] text-content/45">
           <summary className="cursor-pointer py-1">Providers</summary>
-          <div className="space-y-1 pb-2">{(["pr", "ci"] as const).map(kind => <div key={kind} className="flex items-center justify-between gap-2"><span>{kind === "pr" ? "PR" : "CI"}</span><Select disabled={!enabled || !index || deliveryBusy} label={kind === "pr" ? "PR provider" : "CI provider"} value={deliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind) ?? ""} options={[{value:"",label:"Automatic"},{value:"github",label:kind === "pr" ? "GitHub" : "GitHub checks"},{value:"azure",label:kind === "pr" ? "Azure Repos" : "Azure Pipelines"}]} onChange={value => {
-            try { saveDeliveryProvider(cwd, index?.branch ?? "", sourceSessionId, kind, value as DeliveryProvider | ""); setDeliveryError(""); }
+          <div className="space-y-1 pb-2">{(["pr", "ci"] as const).map(kind => <div key={kind} className="flex items-center justify-between gap-2"><span>{kind === "pr" ? "PR" : "CI"}</span><Select disabled={!enabled || !index || deliveryBusy} label={kind === "pr" ? "PR provider" : "CI provider"} value={deliveryProvider(viewCwd, index?.branch ?? "", sourceSessionId, kind) ?? ""} options={[{value:"",label:"Automatic"},{value:"github",label:kind === "pr" ? "GitHub" : "GitHub checks"},{value:"azure",label:kind === "pr" ? "Azure Repos" : "Azure Pipelines"}]} onChange={value => {
+            try { saveDeliveryProvider(viewCwd, index?.branch ?? "", sourceSessionId, kind, value as DeliveryProvider | ""); setDeliveryError(""); }
             catch { setDeliveryError("Could not save provider choice. Try again."); }
           }} /></div>)}</div>
         </details>
         {deliveryError ? <p role="alert" className="px-3 py-1 text-[11px] text-red-400">{deliveryError}</p> : null}
       </div>
       <ChangedFiles
-        cwd={cwd}
+        cwd={viewCwd}
         textHarness={textHarness}
         sourceSessionId={sourceSessionId}
         index={index}
@@ -304,9 +429,20 @@ export function GitChangesPanel({
         fill
         onOpenFile={onOpenFile}
         onOpenAllChanges={onOpenAllChanges}
-        onMutated={(paths, apply, touchWorktree) => {
-          if (apply) patch(apply);
-          notifyGitChanged(cwd);
+        onMutated={(paths, apply, touchWorktree, mutationCwd) => {
+          // A mutation resolving after a child switch belongs to the repo it
+          // ran on — patch the displayed index only when it still is, and
+          // keep that repo's own cache optimistic so switching back is right.
+          if (apply) {
+            if (pathKey(mutationCwd) === pathKey(viewCwd)) {
+              patch(apply);
+            } else {
+              const prev = indexByCwd.get(pathKey(mutationCwd));
+              if (prev)
+                indexByCwd.set(pathKey(mutationCwd), apply(prev));
+            }
+          }
+          notifyGitChanged(mutationCwd);
           // Only discard and sync rewrite worktree bytes; staging and
           // committing must not reload open editors.
           if (touchWorktree) {
@@ -337,7 +473,7 @@ export function GitChangesPanel({
         style={graphExpanded ? { height: graphHeight } : undefined}
       >
         <GitHistoryGraph
-          cwd={cwd}
+          cwd={viewCwd}
           enabled={enabled}
           expanded={graphExpanded}
           selectedSha={selectedSha}
@@ -349,6 +485,345 @@ export function GitChangesPanel({
         />
       </div>
     </div>
+  );
+}
+
+/** Compact per-repository selector for a task session: each chip shows the
+ * child's repo, branch, change stats and delivery attention; selecting one
+ * retargets the whole panel at that working copy. */
+function TaskChildStrip({
+  task,
+  viewCwd,
+  enabled,
+  stores,
+  onSelect,
+}: {
+  task: TaskWorkspace;
+  viewCwd: string;
+  enabled: boolean;
+  stores: DeliveryStores;
+  onSelect: (cwd: string) => void;
+}) {
+  const stripRef = useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState(false);
+  const selectedEntry =
+    task.children.find(
+      (entry) =>
+        entry.workingCopy && pathKey(entry.workingCopy) === pathKey(viewCwd),
+    ) ?? null;
+  // Beyond two children the chips never read well in the sidebar — go
+  // straight to the selector; at two, measured overflow still collapses.
+  const many = task.children.length > 2;
+  const collapse = many || overflow;
+
+  // Chip widths grow as branch and diff stats land, so the fit is re-measured
+  // on every render; the observer catches sidebar resizes. In selector mode
+  // the strip stays mounted but clipped so a wider panel restores the chips.
+  useLayoutEffect(() => {
+    const el = stripRef.current;
+    if (el) setOverflow(el.scrollWidth > el.clientWidth + 1);
+  });
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      setOverflow(el.scrollWidth > el.clientWidth + 1);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+    // The strip unmounts while collapsed by count — re-attach when it returns.
+  }, [many]);
+
+  return (
+    <div className="min-w-0 shrink-0 border-b border-content/10">
+      {task.children.length > 2 ? null : (
+        <div
+          ref={stripRef}
+          aria-hidden={collapse || undefined}
+          inert={collapse}
+          className={
+            collapse
+              ? "invisible flex h-0 items-center gap-1 overflow-hidden px-2"
+              : "flex items-center gap-1 overflow-x-auto px-2 py-1.5"
+          }
+        >
+          {task.children.map((entry) => (
+            <TaskChildChip
+              key={entry.id}
+              task={task}
+              entry={entry}
+              selected={
+                !!entry.workingCopy &&
+                pathKey(entry.workingCopy) === pathKey(viewCwd)
+              }
+              enabled={enabled}
+              stores={stores}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      )}
+      {collapse ? (
+        <TaskChildSelector
+          task={task}
+          viewCwd={viewCwd}
+          selectedEntry={selectedEntry}
+          enabled={enabled}
+          stores={stores}
+          onSelect={onSelect}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** Change stats and PR/CI attention shared by the chips, selector and menu. */
+function ChildBadges({
+  stats,
+  delivery,
+}: {
+  stats: GitDiffStats | null;
+  delivery: TaskChildDelivery;
+}) {
+  return (
+    <>
+      {stats?.files ? (
+        <span className="shrink-0 tabular-nums">
+          <span className="text-emerald-400/80">+{stats.additions}</span>{" "}
+          <span className="text-red-400/80">−{stats.deletions}</span>
+        </span>
+      ) : null}
+      {delivery.prs ? (
+        <GitPullRequest
+          className={`size-3 shrink-0 ${delivery.prNeedsAttention ? "text-red-400" : "text-content/45"}`}
+          strokeWidth={1.75}
+        />
+      ) : null}
+      {delivery.ci ? (
+        <CircleDashed
+          className={`size-3 shrink-0 ${delivery.ciFailing ? "text-red-400" : delivery.ciRunning ? "text-amber-400" : "text-content/45"}`}
+          strokeWidth={1.75}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/** Compact dropdown shown when the chip row cannot fit the sidebar width. */
+function TaskChildSelector({
+  task,
+  viewCwd,
+  selectedEntry,
+  enabled,
+  stores,
+  onSelect,
+}: {
+  task: TaskWorkspace;
+  viewCwd: string;
+  selectedEntry: TaskChild | null;
+  enabled: boolean;
+  stores: DeliveryStores;
+  onSelect: (cwd: string) => void;
+}) {
+  const anchor = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const data = useTaskChildData(task, selectedEntry, enabled, stores);
+  // The session copy may sit outside any child working copy — show it.
+  const name = selectedEntry
+    ? data.repoName
+    : basename(viewCwd) || "Repository";
+  return (
+    <div className="flex items-center px-2 py-1.5">
+      <button
+        ref={anchor}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={
+          selectedEntry?.workingCopy
+            ? `${name} · ${selectedEntry.workingCopy}`
+            : "Choose a repository"
+        }
+        onClick={() => setOpen((value) => !value)}
+        className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-accent/50 bg-accent/10 px-2 py-1 text-[11px] text-content"
+      >
+        <span className="max-w-28 truncate">{name}</span>
+        {data.branch ? (
+          <span className="max-w-24 truncate text-content/40">
+            {data.branch}
+          </span>
+        ) : null}
+        <ChildBadges stats={data.stats} delivery={data.delivery} />
+        <span className="shrink-0 text-content/40">
+          {task.children.length} repos
+        </span>
+        <ChevronDown
+          className={`size-3 shrink-0 text-content/45 ${open ? "rotate-180" : ""}`}
+          strokeWidth={1.75}
+        />
+      </button>
+      {open ? (
+        <Popover
+          anchor={anchor}
+          side="bottom"
+          align="start"
+          width={260}
+          onDismiss={() => setOpen(false)}
+        >
+          <ul role="menu" className="flex flex-col gap-0.5 p-1.5">
+            {task.children.map((entry) => (
+              <TaskChildMenuRow
+                key={entry.id}
+                task={task}
+                entry={entry}
+                selected={
+                  !!entry.workingCopy &&
+                  pathKey(entry.workingCopy) === pathKey(viewCwd)
+                }
+                enabled={enabled}
+                stores={stores}
+                onSelect={(cwd) => {
+                  setOpen(false);
+                  onSelect(cwd);
+                }}
+              />
+            ))}
+          </ul>
+        </Popover>
+      ) : null}
+    </div>
+  );
+}
+
+function TaskChildMenuRow({
+  task,
+  entry,
+  selected,
+  enabled,
+  stores,
+  onSelect,
+}: {
+  task: TaskWorkspace;
+  entry: TaskChild;
+  selected: boolean;
+  enabled: boolean;
+  stores: DeliveryStores;
+  onSelect: (cwd: string) => void;
+}) {
+  const data = useTaskChildData(task, entry, enabled, stores);
+  return (
+    <li role="none">
+      <button
+        type="button"
+        role="menuitem"
+        disabled={!data.prepared}
+        title={
+          data.prepared
+            ? `${data.repoName} · ${entry.workingCopy}`
+            : `${data.repoName} · not prepared yet`
+        }
+        onClick={() => entry.workingCopy && onSelect(entry.workingCopy)}
+        className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[11px] ${
+          selected
+            ? "bg-accent/10 text-content"
+            : "text-content/70 hover:bg-content/5 hover:text-content"
+        } disabled:opacity-40`}
+      >
+        <span className="w-3 shrink-0">
+          {selected ? (
+            <Check className="size-3 text-accent" strokeWidth={2} />
+          ) : null}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{data.repoName}</span>
+        {data.branch ? (
+          <span className="max-w-28 truncate text-content/40">
+            {data.branch}
+          </span>
+        ) : null}
+        <ChildBadges stats={data.stats} delivery={data.delivery} />
+      </button>
+    </li>
+  );
+}
+
+function useTaskChildData(
+  task: TaskWorkspace,
+  entry: TaskChild | null,
+  enabled: boolean,
+  stores: DeliveryStores,
+) {
+  const stats = useProjectDiffStats(
+    entry?.workingCopy ?? "",
+    enabled && !!entry?.workingCopy,
+  );
+  const branch = stats?.branch ?? entry?.branch;
+  const githubPr = useCachedBranchPr(entry?.workingCopy ?? "", branch);
+  const delivery = useMemo(
+    () =>
+      entry
+        ? childDelivery(
+            task,
+            entry,
+            [branch, entry.branch],
+            githubPr,
+            stores,
+          )
+        : EMPTY_DELIVERY,
+    [task, entry, branch, githubPr, stores],
+  );
+  const repo = entry ? repositoryForChild(task, entry) : undefined;
+  const repoName = repo
+    ? repositoryDisplayName(repo)
+    : entry?.workingCopy
+      ? basename(entry.workingCopy)
+      : "Repository";
+  const prepared = !!entry?.workingCopy && entry.workingCopy !== "~";
+  return { stats, branch, delivery, repoName, prepared };
+}
+
+function TaskChildChip({
+  task,
+  entry,
+  selected,
+  enabled,
+  stores,
+  onSelect,
+}: {
+  task: TaskWorkspace;
+  entry: TaskChild;
+  selected: boolean;
+  enabled: boolean;
+  stores: DeliveryStores;
+  onSelect: (cwd: string) => void;
+}) {
+  const { stats, branch, delivery, repoName, prepared } = useTaskChildData(
+    task,
+    entry,
+    enabled,
+    stores,
+  );
+  return (
+    <button
+      type="button"
+      disabled={!prepared}
+      title={
+        prepared
+          ? `${repoName} · ${entry.workingCopy}`
+          : `${repoName} · not prepared yet`
+      }
+      onClick={() => entry.workingCopy && onSelect(entry.workingCopy)}
+      className={`flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] ${
+        selected
+          ? "border-accent/50 bg-accent/10 text-content"
+          : "border-content/15 text-content/60 hover:border-content/25 hover:text-content"
+      } disabled:opacity-40`}
+    >
+      <span className="max-w-28 truncate">{repoName}</span>
+      {branch ? (
+        <span className="max-w-24 truncate text-content/40">{branch}</span>
+      ) : null}
+      <ChildBadges stats={stats} delivery={delivery} />
+    </button>
   );
 }
 
@@ -378,9 +853,12 @@ function ChangedFiles({
   onOpenFile: (path: string, kind: GitFileDiffKind) => void;
   onOpenAllChanges: () => void;
   onMutated: (
-    paths?: string[],
-    apply?: (index: GitDiffIndex) => GitDiffIndex,
-    touchWorktree?: boolean,
+    paths: string[] | undefined,
+    apply: ((index: GitDiffIndex) => GitDiffIndex) | undefined,
+    touchWorktree: boolean | undefined,
+    /** The working copy the git command ran against — captured when the
+     * action started, not when it resolved. */
+    mutationCwd: string,
   ) => void;
 }) {
   const [selectingContext, setSelectingContext] = useState(false);
@@ -450,8 +928,8 @@ function ChangedFiles({
       paths?: string[],
       apply?: (index: GitDiffIndex) => GitDiffIndex,
       touchWorktree?: boolean,
-    ) => onMutatedRef.current(paths, apply, touchWorktree),
-    [],
+    ) => onMutatedRef.current(paths, apply, touchWorktree, cwd),
+    [cwd],
   );
   const onOpenFileRef = useRef(onOpenFile);
   onOpenFileRef.current = onOpenFile;
@@ -460,12 +938,27 @@ function ChangedFiles({
       onOpenFileRef.current(path, kind),
     [],
   );
-  const [message, setMessage] = useState("");
+  // Commit message drafts are per working copy — switching a task's child
+  // chip must not carry one repo's draft into another's commit box.
+  const messageDrafts = useRef(new Map<string, string>());
+  const [message, setMessageState] = useState(
+    () => messageDrafts.current.get(cwd) ?? "",
+  );
+  const setMessage = useCallback(
+    (value: string) => {
+      messageDrafts.current.set(cwd, value);
+      setMessageState(value);
+    },
+    [cwd],
+  );
+  useEffect(() => {
+    setMessageState(messageDrafts.current.get(cwd) ?? "");
+  }, [cwd]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [stagedExpanded, setStagedExpanded] = useState(stagedOpen);
   const [changesExpanded, setChangesExpanded] = useState(changesOpen);
   const [view, setView] = useState<ChangesView>(changesView);
-  const { pr, reload: reloadPr } = usePrStatus(cwd, index?.branch);
+  const { pr, reload: reloadPr } = useBranchPr(cwd, index?.branch);
   const staged = useMemo(() => files.filter((file) => file.staged), [files]);
   const unstaged = useMemo(
     () => files.filter((file) => file.unstaged),
@@ -1011,53 +1504,6 @@ function ChangedFiles({
       ) : null}
     </aside>
   );
-}
-
-function usePrStatus(
-  cwd: string,
-  branch: string | null | undefined,
-): { pr: GitPr | null; reload: () => void } {
-  const [pr, setPr] = useState<GitPr | null>(() => cachedPr(cwd, branch));
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((value) => value + 1), []);
-
-  useEffect(() => {
-    if (!cwd || cwd === "~" || !branch) {
-      setPr(null);
-      return;
-    }
-    let cancelled = false;
-    const load = () => {
-      void gitPrStatus(cwd)
-        .then((next) => {
-          if (cancelled) return;
-          prByCwd.set(cwd, next);
-          setPr(next);
-        })
-        .catch(() => {
-          if (cancelled) return;
-          prByCwd.set(cwd, null);
-          setPr(null);
-        });
-    };
-    load();
-    const onResume = () => load();
-    window.addEventListener("focus", onResume);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("focus", onResume);
-    };
-  }, [branch, cwd, nonce]);
-
-  return { pr, reload };
-}
-
-function cachedPr(
-  cwd: string,
-  branch: string | null | undefined,
-): GitPr | null {
-  if (!cwd || cwd === "~" || !branch) return null;
-  return prByCwd.get(cwd) ?? null;
 }
 
 function syncStatusLabel(index: GitDiffIndex): string {
@@ -1734,7 +2180,7 @@ function useDiffIndex(
       if (!prev) return;
       const next = update(prev);
       if (next === prev) return;
-      indexByCwd.set(cwd, next);
+      indexByCwd.set(pathKey(cwd), next);
       indexRef.current = next;
       setIndex(next);
     },
@@ -1773,13 +2219,14 @@ function useDiffIndex(
           files: next.files.length,
           additions: next.additions,
           deletions: next.deletions,
+          branch: next.branch,
         });
         // A patch landed while this fetch was in flight; the mutation's
         // git-changed notification already queued a follow-up load.
         if (patchEpoch.current !== epoch) return;
         const prev = indexRef.current;
         if (sameIndex(prev, next)) return;
-        indexByCwd.set(cwd, next);
+        indexByCwd.set(pathKey(cwd), next);
         indexRef.current = next;
         setIndex(next);
         if (prev) {
@@ -1796,7 +2243,7 @@ function useDiffIndex(
         }
       } catch {
         if (!cancelled) {
-          indexByCwd.delete(cwd);
+          indexByCwd.delete(pathKey(cwd));
           indexRef.current = null;
           setIndex(null);
         }
@@ -1827,12 +2274,16 @@ function useDiffIndex(
     };
   }, [cwd, enabled]);
 
-  return { index, patch };
+  // Between a cwd-change render and the effect above, `index` still holds the
+  // previous repo's data — show the new cwd's cached index instead of the old
+  // repo's files (warmed by the task-child prefetch, so this is instant).
+  const shown = indexCwd.current === cwd ? index : cachedIndex(cwd);
+  return { index: shown, patch };
 }
 
 function cachedIndex(cwd: string | undefined): GitDiffIndex | null {
   if (!cwd || cwd === "~") return null;
-  return indexByCwd.get(cwd) ?? null;
+  return indexByCwd.get(pathKey(cwd)) ?? null;
 }
 
 function changedFilePaths(prev: GitDiffIndex, next: GitDiffIndex): string[] {

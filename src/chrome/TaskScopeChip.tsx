@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { basename } from "../lib/fs";
 import { prettyCwd } from "../lib/paths";
 import {
@@ -14,13 +14,35 @@ import {
   type TaskChild,
   type TaskWorkspace,
 } from "../lib/taskWorkspaces";
+import {
+  childDelivery,
+  deliveryStores,
+  type DeliveryStores,
+} from "../lib/taskDelivery";
+import { AZURE_PR_ASSOCIATIONS_CHANGED } from "../lib/azureRepos";
+import { AZURE_CI_SOURCES_CHANGED } from "../lib/azurePipelines";
+import {
+  diffStatsVersion,
+  peekProjectDiffStats,
+  subscribeDiffStatsVersion,
+  useProjectDiffStats,
+} from "../hooks/useProjectDiffStats";
+import {
+  branchPrVersion,
+  cachedBranchPr,
+  subscribeBranchPrVersion,
+  useCachedBranchPr,
+} from "../hooks/useBranchPr";
 import { Popover } from "./Popover";
 import {
   Check,
   ChevronDown,
   Task,
   CircleAlert,
+  CircleDashed,
   CircleDot,
+  GitBranch,
+  GitPullRequest,
   Loader,
 } from "./icons";
 
@@ -31,6 +53,170 @@ function childRepoName(task: TaskWorkspace, child: TaskChild): string {
     : child.workingCopy
       ? basename(child.workingCopy)
       : "Repository";
+}
+
+/** Delivery badges for a child row: linked PRs and CI pipelines, colored
+ * only when they need attention. Compact icons, never provider payloads. */
+function DeliveryBadges({
+  delivery,
+}: {
+  delivery: { prs: number; prNeedsAttention: boolean; ci: number; ciRunning: boolean; ciFailing: boolean };
+}) {
+  return (
+    <>
+      {delivery.prs ? (
+        <span
+          title={
+            delivery.prNeedsAttention
+              ? `${delivery.prs} pull request${delivery.prs === 1 ? "" : "s"} · needs attention`
+              : `${delivery.prs} pull request${delivery.prs === 1 ? "" : "s"}`
+          }
+          className={`flex shrink-0 items-center gap-0.5 ${
+            delivery.prNeedsAttention ? "text-red-400" : "text-content/45"
+          }`}
+        >
+          <GitPullRequest className="size-3" strokeWidth={1.75} />
+          {delivery.prs > 1 ? (
+            <span className="tabular-nums">{delivery.prs}</span>
+          ) : null}
+        </span>
+      ) : null}
+      {delivery.ci ? (
+        <span
+          title={
+            delivery.ciFailing
+              ? "A linked pipeline failed"
+              : delivery.ciRunning
+                ? "A linked pipeline is running"
+                : `${delivery.ci} pipeline${delivery.ci === 1 ? "" : "s"}`
+          }
+          className={`flex shrink-0 items-center gap-0.5 ${
+            delivery.ciFailing
+              ? "text-red-400"
+              : delivery.ciRunning
+                ? "text-amber-400"
+                : "text-content/45"
+          }`}
+        >
+          <CircleDashed className="size-3" strokeWidth={1.75} />
+          {delivery.ci > 1 ? (
+            <span className="tabular-nums">{delivery.ci}</span>
+          ) : null}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+function TaskChildRow({
+  task,
+  entry,
+  current,
+  needsInput,
+  stores,
+  onOpen,
+  onRetry,
+}: {
+  task: TaskWorkspace;
+  entry: TaskChild;
+  current: boolean;
+  needsInput: boolean;
+  stores: DeliveryStores;
+  onOpen?: () => void;
+  onRetry?: () => void;
+}) {
+  const ready =
+    entry.sessionIds.length > 0 || entry.launch.state === "ready";
+  const failed = entry.launch.state === "failed";
+  // Rows only mount while the popover is open — stats subscribe on sight.
+  const stats = useProjectDiffStats(
+    entry.workingCopy ?? "",
+    !!entry.workingCopy,
+  );
+  const branch = stats?.branch ?? entry.branch;
+  const githubPr = useCachedBranchPr(entry.workingCopy ?? "", branch);
+  const delivery = useMemo(
+    () => childDelivery(task, entry, [branch, entry.branch], githubPr, stores),
+    [task, entry, branch, githubPr, stores],
+  );
+  const detail =
+    branch || (stats?.files ?? 0) > 0 || delivery.prs > 0 || delivery.ci > 0;
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        type="button"
+        disabled={!ready}
+        onClick={onOpen}
+        className="flex min-w-0 flex-1 flex-col rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/5 disabled:opacity-50"
+      >
+        <span className="flex min-w-0 items-center gap-2 self-stretch">
+          {entry.launch.state === "failed" ? (
+            <CircleAlert
+              className="size-3.5 shrink-0 text-red-400"
+              strokeWidth={1.75}
+            />
+          ) : entry.launch.state === "working" ? (
+            <Loader className="size-3.5 shrink-0 animate-spin text-content/50" />
+          ) : ready ? (
+            <Check
+              className="size-3.5 shrink-0 text-emerald-400"
+              strokeWidth={2}
+            />
+          ) : (
+            <CircleDot className="size-3.5 shrink-0 text-content/30" />
+          )}
+          <span className="min-w-0 flex-1 truncate text-[12px]">
+            {childRepoName(task, entry)}
+          </span>
+          {needsInput ? (
+            <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
+          ) : null}
+          <DeliveryBadges delivery={delivery} />
+          <span className="shrink-0 truncate text-[10px] text-content/40">
+            {current
+              ? "Current"
+              : ready
+                ? ""
+                : entry.workingCopy
+                  ? prettyCwd(entry.workingCopy)
+                  : "Prepare later"}
+          </span>
+        </span>
+        {detail ? (
+          <span className="mt-0.5 flex min-w-0 items-center gap-2 self-stretch pl-5 text-[10px] text-content/45">
+            {branch ? (
+              <span className="flex min-w-0 items-center gap-1">
+                <GitBranch className="size-2.5 shrink-0" strokeWidth={1.75} />
+                <span className="truncate">{branch}</span>
+              </span>
+            ) : null}
+            {stats?.files ? (
+              <span className="shrink-0 tabular-nums">
+                <span className="text-emerald-400/80">+{stats.additions}</span>
+                {" "}
+                <span className="text-red-400/80">−{stats.deletions}</span>
+              </span>
+            ) : null}
+          </span>
+        ) : null}
+      </button>
+      {(failed ||
+        (!ready && entry.launch.state !== "working" && entry.workingCopy)) &&
+      onRetry ? (
+        <button
+          type="button"
+          title={
+            entry.launch.error ??
+            (failed ? "Retry launch" : "Start this repository")
+          }
+          onClick={onRetry}
+          className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-content/60 hover:bg-content/8 hover:text-content"
+        >
+          {failed ? "Retry" : "Start"}
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 /**
@@ -66,7 +252,53 @@ export function TaskScopeChip({
     [sessionId, cwd, tasksRaw, projectsRaw],
   );
   const [open, setOpen] = useState(false);
+  // Re-read saved provider links when they change so badges stay current.
+  const [deliveryTick, setDeliveryTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setDeliveryTick((value) => value + 1);
+    window.addEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, bump);
+    window.addEventListener(AZURE_CI_SOURCES_CHANGED, bump);
+    return () => {
+      window.removeEventListener(AZURE_PR_ASSOCIATIONS_CHANGED, bump);
+      window.removeEventListener(AZURE_CI_SOURCES_CHANGED, bump);
+    };
+  }, []);
+  const stores = useMemo(
+    () => deliveryStores(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deliveryTick],
+  );
   const anchor = useRef<HTMLButtonElement>(null);
+  // Re-derive when a stats or PR cache publish lands — the peeks below never
+  // subscribe or fetch, so the ticks are what keep the dot honest.
+  const statsV = useSyncExternalStore(
+    subscribeDiffStatsVersion,
+    diffStatsVersion,
+  );
+  const prV = useSyncExternalStore(subscribeBranchPrVersion, branchPrVersion);
+  // Task-level attention: a linked pipeline failed or PR needs the author —
+  // derived from saved links and already-cached data only; the closed chip
+  // never fetches.
+  const taskAttention = useMemo(
+    () =>
+      scope
+        ? scope.task.children.some((entry) => {
+            if (!entry.workingCopy) return false;
+            const branch =
+              peekProjectDiffStats(entry.workingCopy)?.branch ?? entry.branch;
+            const delivery = childDelivery(
+              scope.task,
+              entry,
+              [branch, entry.branch],
+              cachedBranchPr(entry.workingCopy, branch),
+              stores,
+            );
+            return delivery.ciFailing || delivery.prNeedsAttention;
+          })
+        : false,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scope, stores, tasksRaw, statsV, prV],
+  );
   if (!scope) return null;
   const { task, child } = scope;
   const anyNeedsInput =
@@ -103,6 +335,11 @@ export function TaskScopeChip({
             title="A repository in this task needs input"
             className="size-1.5 shrink-0 rounded-full bg-amber-400"
           />
+        ) : taskAttention ? (
+          <span
+            title="A linked pipeline failed or a pull request needs attention"
+            className="size-1.5 shrink-0 rounded-full bg-red-400"
+          />
         ) : null}
       </button>
       {open ? (
@@ -123,75 +360,39 @@ export function TaskScopeChip({
                 (current &&
                   task.sessionIds?.some((id) => needsInputIds?.has(id))) ||
                 entry.sessionIds.some((id) => needsInputIds?.has(id));
-              // "Ready" = the copy is prepared (or a legacy per-child
-              // session exists); the task's own session is separate.
               const ready =
                 entry.sessionIds.length > 0 ||
                 entry.launch.state === "ready";
               const failed = entry.launch.state === "failed";
               return (
-                <div key={entry.id} className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    disabled={!ready}
-                    onClick={() => {
-                      setOpen(false);
-                      onOpenChild?.(task.id, entry.id);
-                    }}
-                    className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/5 disabled:opacity-50"
-                  >
-                  {entry.launch.state === "failed" ? (
-                    <CircleAlert
-                      className="size-3.5 shrink-0 text-red-400"
-                      strokeWidth={1.75}
-                    />
-                  ) : entry.launch.state === "working" ? (
-                    <Loader className="size-3.5 shrink-0 animate-spin text-content/50" />
-                  ) : ready ? (
-                    <Check
-                      className="size-3.5 shrink-0 text-emerald-400"
-                      strokeWidth={2}
-                    />
-                  ) : (
-                    <CircleDot className="size-3.5 shrink-0 text-content/30" />
-                  )}
-                  <span className="min-w-0 flex-1 truncate text-[12px]">
-                    {childRepoName(task, entry)}
-                  </span>
-                  {needsInput ? (
-                    <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
-                  ) : null}
-                  <span className="shrink-0 truncate text-[10px] text-content/40">
-                    {current
-                      ? "Current"
-                      : ready
-                        ? ""
-                        : entry.workingCopy
-                          ? prettyCwd(entry.workingCopy)
-                          : "Prepare later"}
-                  </span>
-                  </button>
-                  {(failed ||
-                    (!ready &&
-                      entry.launch.state !== "working" &&
-                      entry.workingCopy)) &&
-                  onRetryChild ? (
-                    <button
-                      type="button"
-                      title={
-                        entry.launch.error ??
-                        (failed ? "Retry launch" : "Start this repository")
-                      }
-                      onClick={() => {
-                        setOpen(false);
-                        onRetryChild(task.id, entry.id);
-                      }}
-                      className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-content/60 hover:bg-content/8 hover:text-content"
-                    >
-                      {failed ? "Retry" : "Start"}
-                    </button>
-                  ) : null}
-                </div>
+                <TaskChildRow
+                  key={entry.id}
+                  task={task}
+                  entry={entry}
+                  current={current}
+                  needsInput={!!needsInput}
+                  stores={stores}
+                  onOpen={
+                    ready
+                      ? () => {
+                          setOpen(false);
+                          onOpenChild?.(task.id, entry.id);
+                        }
+                      : undefined
+                  }
+                  onRetry={
+                    (failed ||
+                      (!ready &&
+                        entry.launch.state !== "working" &&
+                        entry.workingCopy)) &&
+                    onRetryChild
+                      ? () => {
+                          setOpen(false);
+                          onRetryChild(task.id, entry.id);
+                        }
+                      : undefined
+                  }
+                />
               );
             })}
           </div>
