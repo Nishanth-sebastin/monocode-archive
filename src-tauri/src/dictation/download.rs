@@ -19,7 +19,9 @@ pub const PROGRESS_EVENT: &str = "dictation:model-progress";
 
 const CHUNK: usize = 256 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-operation timeouts — connect and each socket read/write. The overall
+/// transfer is intentionally unbounded: model files reach 1.6 GB.
+const HTTP_OP_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "MonoCode";
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,35 +70,35 @@ pub fn download_model(
             },
         ),
         Err(error) => {
-            let cancelled = cancel.load(Ordering::Relaxed) || error.0 == CANCELLED;
+            let cancelled = cancel.load(Ordering::Relaxed);
             DownloadProgress::emit(
                 app,
                 &DownloadProgress {
                     model_id: spec.id.into(),
                     phase: if cancelled { "cancelled" } else { "failed" },
-                    downloaded_bytes: 0,
+                    downloaded_bytes: error.downloaded,
                     total_bytes: spec.size_bytes,
-                    error: (!cancelled).then(|| error.0.clone()),
+                    error: (!cancelled).then_some(error.message),
                 },
             );
         }
     }
 }
 
-const CANCELLED: &str = "cancelled";
-
 #[derive(Debug)]
-struct DownloadError(String);
-
-impl From<String> for DownloadError {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
+struct DownloadError {
+    message: String,
+    /// Bytes on disk when the error hit — reported so the UI can show the
+    /// resume point on failed/cancelled.
+    downloaded: u64,
 }
 
-impl From<&str> for DownloadError {
-    fn from(value: &str) -> Self {
-        Self(value.into())
+impl DownloadError {
+    fn new(message: impl Into<String>, downloaded: u64) -> Self {
+        Self {
+            message: message.into(),
+            downloaded,
+        }
     }
 }
 
@@ -107,7 +109,8 @@ fn download_from(
     cancel: &AtomicBool,
     app: Option<&AppHandle>,
 ) -> Result<(), DownloadError> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create model directory: {e}"))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| DownloadError::new(format!("Cannot create model directory: {e}"), 0))?;
     let part = part_path(dir, spec);
     let final_path = final_path(dir, spec);
 
@@ -118,8 +121,23 @@ fn download_from(
         downloaded = 0;
     }
 
+    let mut hasher = Sha256::new();
+    if downloaded > 0 {
+        emit(app, spec, "verifying", downloaded);
+        // Hash the resumed prefix so the final digest covers the whole file.
+        hash_prefix(&part, downloaded, &mut hasher)
+            .map_err(|e| DownloadError::new(e, downloaded))?;
+        if downloaded == spec.size_bytes {
+            // Fetched previously but the process died before the rename —
+            // requesting `Range: bytes=<size>-` would just get a 416.
+            return verify_and_install(&part, &final_path, spec, hasher, downloaded);
+        }
+    }
+
     let mut request = ureq::AgentBuilder::new()
-        .timeout(HTTP_TIMEOUT)
+        .timeout_connect(HTTP_OP_TIMEOUT)
+        .timeout_read(HTTP_OP_TIMEOUT)
+        .timeout_write(HTTP_OP_TIMEOUT)
         .build()
         .get(url)
         .set("User-Agent", USER_AGENT);
@@ -129,13 +147,22 @@ fn download_from(
     let response = match request.call() {
         Ok(response) => response,
         Err(ureq::Error::Status(status, _)) => {
-            return Err(format!("Model download failed (HTTP {status})").into())
+            return Err(DownloadError::new(
+                format!("Model download failed (HTTP {status})"),
+                downloaded,
+            ))
         }
-        Err(error) => return Err(format!("Model download failed: {error}").into()),
+        Err(error) => {
+            return Err(DownloadError::new(
+                format!("Model download failed: {error}"),
+                downloaded,
+            ))
+        }
     };
 
     // A 200 to a Range request means the server ignored resumption — restart.
     if downloaded > 0 && response.status() == 200 {
+        hasher = Sha256::new();
         downloaded = 0;
     }
     let total = response
@@ -150,28 +177,23 @@ fn download_from(
         .truncate(downloaded == 0)
         .append(downloaded > 0)
         .open(&part)
-        .map_err(|e| format!("Cannot write model file: {e}"))?;
+        .map_err(|e| DownloadError::new(format!("Cannot write model file: {e}"), downloaded))?;
 
     let mut reader = response.into_reader();
-    let mut hasher = Sha256::new();
-    if downloaded > 0 {
-        // Hash the resumed prefix so the final digest covers the whole file.
-        hash_prefix(&part, downloaded, &mut hasher)?;
-    }
     let mut last_emit = Instant::now() - PROGRESS_INTERVAL;
     let mut buf = vec![0u8; CHUNK];
     loop {
         if cancel.load(Ordering::Relaxed) {
-            return Err(DownloadError(CANCELLED.into()));
+            return Err(DownloadError::new("cancelled", downloaded));
         }
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("Model download interrupted: {e}"))?;
+        let n = reader.read(&mut buf).map_err(|e| {
+            DownloadError::new(format!("Model download interrupted: {e}"), downloaded)
+        })?;
         if n == 0 {
             break;
         }
         file.write_all(&buf[..n])
-            .map_err(|e| format!("Cannot write model file: {e}"))?;
+            .map_err(|e| DownloadError::new(format!("Cannot write model file: {e}"), downloaded))?;
         hasher.update(&buf[..n]);
         downloaded += n as u64;
         if last_emit.elapsed() >= PROGRESS_INTERVAL {
@@ -191,26 +213,63 @@ fn download_from(
         }
     }
     file.flush().ok();
+    // fsync before rename: a power loss must not leave a size-correct but
+    // corrupt file that then passes the size-only installed check forever.
+    file.sync_all().ok();
     drop(file);
 
     if downloaded != spec.size_bytes {
-        return Err(format!(
-            "Model download truncated ({downloaded} of {} bytes)",
-            spec.size_bytes
-        )
-        .into());
+        return Err(DownloadError::new(
+            format!(
+                "Model download truncated ({downloaded} of {} bytes)",
+                spec.size_bytes
+            ),
+            downloaded,
+        ));
     }
 
+    emit(app, spec, "verifying", downloaded);
+    verify_and_install(&part, &final_path, spec, hasher, downloaded)
+}
+
+fn emit(app: Option<&AppHandle>, spec: &ModelSpec, phase: &'static str, downloaded: u64) {
+    if let Some(app) = app {
+        DownloadProgress::emit(
+            app,
+            &DownloadProgress {
+                model_id: spec.id.into(),
+                phase,
+                downloaded_bytes: downloaded,
+                total_bytes: spec.size_bytes,
+                error: None,
+            },
+        );
+    }
+}
+
+fn verify_and_install(
+    part: &Path,
+    final_path: &Path,
+    spec: &ModelSpec,
+    hasher: Sha256,
+    downloaded: u64,
+) -> Result<(), DownloadError> {
     let digest = format!("{:x}", hasher.finalize());
     if digest != spec.sha256 {
-        let _ = std::fs::remove_file(&part);
-        return Err("Model checksum mismatch — download deleted".into());
+        let _ = std::fs::remove_file(part);
+        return Err(DownloadError::new(
+            "Model checksum mismatch — download deleted",
+            downloaded,
+        ));
     }
-    std::fs::rename(&part, &final_path).map_err(|e| format!("Cannot store model: {e}"))?;
+    // fs::rename does not replace an existing destination on Windows.
+    let _ = std::fs::remove_file(final_path);
+    std::fs::rename(part, final_path)
+        .map_err(|e| DownloadError::new(format!("Cannot store model: {e}"), downloaded))?;
     Ok(())
 }
 
-fn hash_prefix(path: &Path, bytes: u64, hasher: &mut Sha256) -> Result<(), DownloadError> {
+fn hash_prefix(path: &Path, bytes: u64, hasher: &mut Sha256) -> Result<(), String> {
     let mut file =
         std::fs::File::open(path).map_err(|e| format!("Cannot read partial download: {e}"))?;
     let mut remaining = bytes;
@@ -319,7 +378,7 @@ mod tests {
         dir: &Path,
         cancel: &AtomicBool,
     ) -> Result<(), String> {
-        download_from(server_url, spec, dir, cancel, None).map_err(|e| e.0)
+        download_from(server_url, spec, dir, cancel, None).map_err(|e| e.message)
     }
 
     #[test]
@@ -381,8 +440,29 @@ mod tests {
             &cancel,
         )
         .unwrap_err();
-        assert_eq!(err, CANCELLED);
+        assert_eq!(err, "cancelled");
         assert!(!final_path(&dir, spec).exists());
+    }
+
+    #[test]
+    fn completed_part_verifies_without_http() {
+        let body: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let server = TestServer::serve(body.clone());
+        let spec: &'static ModelSpec = spec_for(&server);
+        let dir = tempfile_dir();
+        // Simulates a kill between the last byte and the rename: the .part is
+        // complete but a Range request at EOF would get a 416 — so none is sent.
+        std::fs::write(part_path(&dir, spec), &body).unwrap();
+        let cancel = AtomicBool::new(false);
+        download_test_model(
+            &format!("{}/ggml-test.bin", server.base),
+            spec,
+            &dir,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(final_path(&dir, spec)).unwrap(), body);
+        assert!(server.requests.lock().unwrap().is_empty());
     }
 
     #[test]

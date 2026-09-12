@@ -12,6 +12,9 @@ use super::resample::{Resampler, WHISPER_RATE};
 /// Keep at most this much captured audio; older audio is dropped so a long
 /// session cannot grow memory without bound.
 const MAX_BUFFER_SAMPLES: usize = WHISPER_RATE as usize * 60 * 10;
+/// Trim only once the buffer exceeds MAX + SLACK so the O(n) drain is
+/// amortized — draining every callback would shift ~38 MB per RT callback.
+const TRIM_SLACK: usize = WHISPER_RATE as usize * 30;
 
 /// Shared capture output. `samples[0]` is absolute sample index `base`.
 #[derive(Default)]
@@ -28,7 +31,7 @@ impl AudioBuffer {
 
     fn push(&mut self, data: &[f32]) {
         self.samples.extend_from_slice(data);
-        if self.samples.len() > MAX_BUFFER_SAMPLES {
+        if self.samples.len() > MAX_BUFFER_SAMPLES + TRIM_SLACK {
             let drop = self.samples.len() - MAX_BUFFER_SAMPLES;
             self.samples.drain(..drop);
             self.base += drop as u64;
@@ -58,6 +61,16 @@ impl AudioBuffer {
             error: self.error.clone(),
         }
     }
+
+    /// End/base/error without cloning — lets the worker poll every tick and
+    /// only pay for `tail`/`snapshot` when a pass will actually run.
+    pub fn stats(&self) -> (u64, u64, Option<String>) {
+        (
+            self.base + self.samples.len() as u64,
+            self.base,
+            self.error.clone(),
+        )
+    }
 }
 
 pub struct BufferSnapshot {
@@ -75,20 +88,14 @@ impl BufferSnapshot {
 }
 
 pub struct Capture {
-    stream: cpal::Stream,
+    /// Held only for its Drop — dropping the stream stops the OS tap.
+    _stream: cpal::Stream,
     device_name: String,
 }
 
 impl Capture {
     pub fn device_name(&self) -> &str {
         &self.device_name
-    }
-}
-
-impl Drop for Capture {
-    fn drop(&mut self) {
-        // Dropping the stream stops the OS tap.
-        let _ = &self.stream;
     }
 }
 
@@ -107,7 +114,7 @@ pub fn start(sink: Arc<Mutex<AudioBuffer>>) -> Result<Capture, String> {
     let supported = device
         .default_input_config()
         .map_err(|error| format!("Cannot read microphone config on {device_name}: {error}"))?;
-    let channels = supported.channels() as usize;
+    let channels = (supported.channels() as usize).max(1);
     let input_rate = supported.sample_rate();
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
@@ -124,7 +131,7 @@ pub fn start(sink: Arc<Mutex<AudioBuffer>>) -> Result<Capture, String> {
         .play()
         .map_err(|error| format!("Cannot start microphone on {device_name}: {error}"))?;
     Ok(Capture {
-        stream,
+        _stream: stream,
         device_name,
     })
 }
@@ -143,8 +150,10 @@ where
     let sink_data = Arc::clone(sink);
     let sink_err = Arc::clone(sink);
     let mut resampler = Resampler::new(input_rate, WHISPER_RATE);
-    let mut mono = Vec::new();
-    let mut resampled = Vec::new();
+    // Pre-allocate for a typical ~10 ms callback so the audio path doesn't
+    // grow vectors while streaming.
+    let mut mono = Vec::with_capacity(1024);
+    let mut resampled = Vec::with_capacity(1024);
     device
         .build_input_stream(
             *config,
@@ -159,13 +168,22 @@ where
                     mono.push(sum / channels as f32);
                 }
                 resampler.process(&mono, &mut resampled);
-                sink_data.lock().unwrap().push(&resampled);
+                // A poisoned mutex means the worker panicked — nothing to do.
+                if let Ok(mut buffer) = sink_data.lock() {
+                    buffer.push(&resampled);
+                }
             },
             move |error: cpal::Error| {
-                sink_err
-                    .lock()
-                    .unwrap()
-                    .fail(format!("Microphone stream failed: {error}"));
+                use cpal::ErrorKind;
+                match error.kind() {
+                    // Reroute/overrun/latency notices — the stream stays alive.
+                    ErrorKind::DeviceChanged | ErrorKind::Xrun | ErrorKind::RealtimeDenied => {}
+                    _ => {
+                        if let Ok(mut buffer) = sink_err.lock() {
+                            buffer.fail(format!("Microphone stream failed: {error}"));
+                        }
+                    }
+                }
             },
             None,
         )
@@ -265,11 +283,24 @@ mod tests {
     fn buffer_caps_and_tracks_base() {
         let mut buffer = AudioBuffer::default();
         buffer.push(&vec![1.0; MAX_BUFFER_SAMPLES]);
+        // Below the slack threshold nothing is dropped.
         buffer.push(&[2.0; 100]);
+        assert_eq!(buffer.samples.len(), MAX_BUFFER_SAMPLES + 100);
+        assert_eq!(buffer.base, 0);
+        // Past MAX + SLACK the buffer trims back to MAX.
+        buffer.push(&vec![3.0; TRIM_SLACK]);
         assert_eq!(buffer.samples.len(), MAX_BUFFER_SAMPLES);
-        assert_eq!(buffer.base, 100);
+        assert_eq!(buffer.base, TRIM_SLACK as u64 + 100);
         let snap = buffer.tail(50);
-        assert_eq!(snap.base, 100 + MAX_BUFFER_SAMPLES as u64 - 50);
+        assert_eq!(
+            snap.base,
+            TRIM_SLACK as u64 + 100 + MAX_BUFFER_SAMPLES as u64 - 50
+        );
         assert_eq!(snap.samples.len(), 50);
+        // stats() reports end/base without copying.
+        let (end, base, error) = buffer.stats();
+        assert_eq!(end, snap.base + 50);
+        assert_eq!(base, TRIM_SLACK as u64 + 100);
+        assert!(error.is_none());
     }
 }

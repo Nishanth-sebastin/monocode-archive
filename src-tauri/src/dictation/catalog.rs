@@ -87,7 +87,11 @@ mod tests {
             assert!(ids.insert(model.id), "duplicate id {}", model.id);
             assert!(model.url().starts_with("https://huggingface.co/"));
             assert_eq!(model.sha256.len(), 64);
-            assert!(model.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+            // The digest compare is case-sensitive — pins must be lowercase.
+            assert!(model
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
             assert!(model.size_bytes > 0);
             assert!(!model.file.contains(".en."));
         }

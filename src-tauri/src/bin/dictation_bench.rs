@@ -8,7 +8,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Instant;
 
 use monocode_lib::dictation::audio_file::read_wav_mono;
 use monocode_lib::dictation::engine::{Engine, TranscribeOptions};
@@ -26,7 +25,13 @@ fn main() {
             "--wav" => wav = args.next().map(PathBuf::from),
             "--lang" => lang = args.next(),
             "--translate" => translate = true,
-            "--runs" => runs = args.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "--runs" => {
+                runs = args
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .max(1)
+            }
             other => {
                 eprintln!("unknown arg {other}");
                 std::process::exit(2);
@@ -63,10 +68,13 @@ fn main() {
         language: lang,
         translate,
         no_context: false,
+        temperature_inc: 0.2,
     };
     for run in 1..=runs {
-        let t = Instant::now();
-        match engine.transcribe(&samples, &opts, &cancel) {
+        match engine.transcribe(&samples, &opts, {
+            let cancel = Arc::clone(&cancel);
+            move || cancel.load(std::sync::atomic::Ordering::Relaxed)
+        }) {
             Ok(tr) => println!(
                 "run{run}\tinfer_ms={} first_segment_ms={:?} lang={:?} rss={} MB\ntext={:?}",
                 tr.infer_ms,
@@ -80,7 +88,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        let _ = t;
     }
     drop(engine);
     // Give the allocator a beat to return pages.

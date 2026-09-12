@@ -63,6 +63,8 @@ pub struct DictationModelInfo {
 #[serde(rename_all = "camelCase")]
 pub struct DictationStatus {
     pub mic_permission: MicPermission,
+    /// idle | starting | recording | finishing (final pass running)
+    pub phase: &'static str,
     pub recording: bool,
     pub session_id: Option<u64>,
     pub model_id: Option<String>,
@@ -84,6 +86,13 @@ pub struct DictationResult {
     pub audio_ms: u64,
     pub model_load_ms: u64,
     pub infer_ms: u64,
+    /// Milliseconds of audio dropped from the start because the session
+    /// exceeded the buffer cap — its committed text is preserved in `text`.
+    pub dropped_audio_ms: u64,
+    /// Capture stream error recorded before stop, if any. The final
+    /// transcript still covers whatever audio was captured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,12 +138,21 @@ pub struct DictationHost {
 
 #[derive(Default)]
 struct HostState {
-    /// model_id → cancel flag; presence means a download is running.
-    downloads: HashMap<String, Arc<AtomicBool>>,
+    /// model_id → download; presence means a download thread is alive
+    /// (including winding down after cancel).
+    downloads: HashMap<String, Download>,
     session: Option<Session>,
     /// Set while a worker starts up so two concurrent starts cannot both
     /// spawn — `session` only exists once the join handle does.
     starting: bool,
+    /// The session's cancel flag while stop/cancel joins the worker — keeps
+    /// the final pass abortable and blocks an overlapping start.
+    finishing: Option<Arc<AtomicBool>>,
+}
+
+struct Download {
+    cancel: Arc<AtomicBool>,
+    join: std::thread::JoinHandle<()>,
 }
 
 struct Session {
@@ -188,11 +206,45 @@ pub fn dictation_catalog(
         .collect())
 }
 
+/// The model file exists at its expected size (checksum was verified when it
+/// was installed — re-hashing on every check would be gratuitous IO).
+fn installed_path(dir: &Path, spec: &ModelSpec) -> Option<PathBuf> {
+    let path = download::final_path(dir, spec);
+    path.metadata()
+        .ok()
+        .filter(|m| m.len() == spec.size_bytes)
+        .map(|_| path)
+}
+
+/// Shared validation for the dictation paths that need a model on disk.
+fn resolve_model(
+    app: &AppHandle,
+    model_id: &str,
+    language: &Option<String>,
+    translate: bool,
+) -> Result<PathBuf, String> {
+    if let Some(lang) = language.as_deref() {
+        if !engine::valid_language(lang) {
+            return Err(format!("Unknown dictation language \"{lang}\""));
+        }
+    }
+    let spec = catalog::find(model_id).ok_or("Unknown dictation model")?;
+    if translate && !spec.supports_translate {
+        return Err(format!(
+            "Model \"{}\" cannot translate to English — pick a translate-capable model",
+            spec.label
+        ));
+    }
+    installed_path(&models_dir(app)?, spec).ok_or_else(|| {
+        format!(
+            "Model \"{}\" is not installed — download it first",
+            spec.label
+        )
+    })
+}
+
 fn model_info(dir: &Path, spec: &ModelSpec, state: &HostState) -> DictationModelInfo {
-    let installed = download::final_path(dir, spec)
-        .metadata()
-        .map(|m| m.len() == spec.size_bytes)
-        .unwrap_or(false);
+    let installed = installed_path(dir, spec).is_some();
     let partial_bytes = download::part_path(dir, spec)
         .metadata()
         .map(|m| m.len())
@@ -217,28 +269,46 @@ pub fn dictation_model_install(
 ) -> Result<(), String> {
     let spec = catalog::find(&model_id).ok_or("Unknown dictation model")?;
     let dir = models_dir(&app)?;
+    loop {
+        let winding_down = {
+            let mut state = host.inner.lock().unwrap();
+            match state.downloads.get(spec.id) {
+                Some(d) if !d.cancel.load(Ordering::Relaxed) => {
+                    return Ok(()); // already running
+                }
+                // Cancelled but the thread is still inside its read loop —
+                // join it before spawning a new writer for the same .part.
+                Some(_) => state.downloads.remove(spec.id),
+                None => {
+                    if installed_path(&dir, spec).is_some() {
+                        return Ok(());
+                    }
+                    None
+                }
+            }
+        };
+        let Some(download) = winding_down else { break };
+        let _ = download.join.join();
+    }
+
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut state = host.inner.lock().unwrap();
-        if state.downloads.contains_key(spec.id) {
-            return Ok(()); // already running
+        if state.downloads.contains_key(spec.id) || installed_path(&dir, spec).is_some() {
+            return Ok(()); // another caller finished or restarted meanwhile
         }
-        let installed = download::final_path(&dir, spec)
-            .metadata()
-            .map(|m| m.len() == spec.size_bytes)
-            .unwrap_or(false);
-        if installed {
-            return Ok(());
-        }
-        state.downloads.insert(spec.id.into(), Arc::clone(&cancel));
+        let thread_app = app.clone();
+        let thread_host = host.inner.clone();
+        let thread_id = spec.id.to_string();
+        let thread_cancel = Arc::clone(&cancel);
+        let join = std::thread::spawn(move || {
+            download::download_model(&thread_app, spec, &dir, thread_cancel);
+            thread_host.lock().unwrap().downloads.remove(&thread_id);
+        });
+        state
+            .downloads
+            .insert(spec.id.into(), Download { cancel, join });
     }
-    let thread_app = app.clone();
-    let thread_host = host.inner.clone();
-    let thread_id = spec.id.to_string();
-    std::thread::spawn(move || {
-        download::download_model(&thread_app, spec, &dir, cancel);
-        thread_host.lock().unwrap().downloads.remove(&thread_id);
-    });
     Ok(())
 }
 
@@ -247,13 +317,33 @@ pub fn dictation_model_cancel_download(
     host: State<'_, DictationHost>,
     model_id: String,
 ) -> Result<(), String> {
-    let mut state = host.inner.lock().unwrap();
-    match state.downloads.remove(&model_id) {
-        Some(cancel) => {
-            cancel.store(true, Ordering::Relaxed);
+    let state = host.inner.lock().unwrap();
+    match state.downloads.get(&model_id) {
+        // Keep the map entry until the thread exits so catalog/status still
+        // show the download winding down and a fresh install can't race it.
+        Some(download) => {
+            download.cancel.store(true, Ordering::Relaxed);
             Ok(())
         }
         None => Err("No download in progress for that model".into()),
+    }
+}
+
+/// Reap a session whose worker already exited (stream error, panic) so a
+/// stale entry cannot block later operations. Emits the session event the
+/// worker itself could not send if it panicked.
+fn reap_finished_session(state: &mut HostState, app: &AppHandle) {
+    let stale = match state.session.as_ref() {
+        Some(s) if s.join.is_finished() => state.session.take().unwrap(),
+        _ => return,
+    };
+    if stale.join.join().is_err() {
+        emit_session(
+            app,
+            stale.id,
+            "error",
+            Some("Dictation worker panicked".into()),
+        );
     }
 }
 
@@ -265,9 +355,13 @@ pub fn dictation_model_remove(
 ) -> Result<(), String> {
     let spec = catalog::find(&model_id).ok_or("Unknown dictation model")?;
     {
-        let state = host.inner.lock().unwrap();
+        let mut state = host.inner.lock().unwrap();
+        reap_finished_session(&mut state, &app);
         if state.downloads.contains_key(spec.id) {
             return Err("Cancel the download before removing this model".into());
+        }
+        if state.starting || state.finishing.is_some() {
+            return Err("A dictation session is starting or finishing".into());
         }
         if state.session.as_ref().map(|s| s.model_id.as_str()) == Some(spec.id) {
             return Err("Model is in use by an active dictation".into());
@@ -284,17 +378,30 @@ pub fn dictation_model_remove(
 // ── Permission / status commands ────────────────────────────────────────────
 
 #[tauri::command]
-pub fn dictation_status(host: State<'_, DictationHost>) -> DictationStatus {
-    let state = host.inner.lock().unwrap();
+pub fn dictation_status(app: AppHandle, host: State<'_, DictationHost>) -> DictationStatus {
+    // TCC can stall — never call the framework while holding the host lock.
+    let mic_permission = capture::mic_permission();
+    let mut state = host.inner.lock().unwrap();
+    reap_finished_session(&mut state, &app);
     let active = state
         .session
         .as_ref()
         .is_some_and(|s| !s.join.is_finished());
+    let phase = if active {
+        "recording"
+    } else if state.starting {
+        "starting"
+    } else if state.finishing.is_some() || state.session.is_some() {
+        "finishing"
+    } else {
+        "idle"
+    };
     DictationStatus {
-        mic_permission: capture::mic_permission(),
+        mic_permission,
+        phase,
         recording: active,
-        session_id: active.then(|| state.session.as_ref().unwrap().id),
-        model_id: active.then(|| state.session.as_ref().unwrap().model_id.clone()),
+        session_id: state.session.as_ref().map(|s| s.id),
+        model_id: state.session.as_ref().map(|s| s.model_id.clone()),
     }
 }
 
@@ -325,29 +432,7 @@ pub fn dictation_start(
     language: Option<String>,
     translate: bool,
 ) -> Result<DictationStarted, String> {
-    if let Some(lang) = language.as_deref() {
-        if !engine::valid_language(lang) {
-            return Err(format!("Unknown dictation language \"{lang}\""));
-        }
-    }
-    let spec = catalog::find(&model_id).ok_or("Unknown dictation model")?;
-    if translate && !spec.supports_translate {
-        return Err(format!(
-            "Model \"{}\" cannot translate to English — pick a translate-capable model",
-            spec.label
-        ));
-    }
-    let model_path = {
-        let dir = models_dir(&app)?;
-        let path = download::final_path(&dir, spec);
-        if !path.exists() {
-            return Err(format!(
-                "Model \"{}\" is not installed — download it first",
-                spec.label
-            ));
-        }
-        path
-    };
+    let model_path = resolve_model(&app, &model_id, &language, translate)?;
     match capture::mic_permission() {
         MicPermission::Denied | MicPermission::Restricted => {
             return Err(
@@ -356,21 +441,16 @@ pub fn dictation_start(
             )
         }
         MicPermission::NotDetermined => {
+            // Sentinel the frontend matches to trigger the TCC prompt via
+            // dictation_request_mic_permission, then retry.
             return Err("mic-permission-not-determined".into())
         }
         _ => {}
     }
     {
         let mut state = host.inner.lock().unwrap();
-        // Reap a worker that already exited (stream error, panic) so a stale
-        // entry cannot block the next start.
-        if let Some(session) = state.session.as_ref() {
-            if session.join.is_finished() {
-                let stale = state.session.take().unwrap();
-                let _ = stale.join.join();
-            }
-        }
-        if state.session.is_some() || state.starting {
+        reap_finished_session(&mut state, &app);
+        if state.session.is_some() || state.starting || state.finishing.is_some() {
             return Err("A dictation session is already running".into());
         }
         state.starting = true;
@@ -382,7 +462,7 @@ pub fn dictation_start(
     let buffer = AudioBuffer::shared();
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
 
-    let join = {
+    let spawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let app = app.clone();
         let stop = Arc::clone(&stop);
         let cancel = Arc::clone(&cancel);
@@ -390,7 +470,7 @@ pub fn dictation_start(
         std::thread::spawn(move || {
             // Capture is created on this thread so the cpal stream never
             // crosses threads; start errors come back through `tx`.
-            let _capture = match capture::start(Arc::clone(&buffer)) {
+            let capture = match capture::start(Arc::clone(&buffer)) {
                 Ok(capture) => {
                     let _ = tx.send(Ok(capture.device_name().to_string()));
                     capture
@@ -406,8 +486,15 @@ pub fn dictation_start(
                 stop: &stop,
                 cancel: &cancel,
             };
-            run_session(&io, id, &model_path, language, translate)
+            run_session(&io, id, &model_path, language, translate, capture)
         })
+    }));
+    let join = match spawn {
+        Ok(join) => join,
+        Err(_) => {
+            host.inner.lock().unwrap().starting = false;
+            return Err("Cannot start the dictation worker".into());
+        }
     };
 
     let outcome = rx.recv();
@@ -440,26 +527,62 @@ pub fn dictation_start(
 }
 
 #[tauri::command(async)]
-pub fn dictation_stop(host: State<'_, DictationHost>) -> Result<DictationResult, String> {
-    let session = host.inner.lock().unwrap().session.take();
-    let Some(session) = session else {
-        return Err("No dictation in progress".into());
+pub fn dictation_stop(
+    app: AppHandle,
+    host: State<'_, DictationHost>,
+) -> Result<DictationResult, String> {
+    let session = {
+        let mut state = host.inner.lock().unwrap();
+        let Some(session) = state.session.take() else {
+            return Err("No dictation in progress".into());
+        };
+        session.stop.store(true, Ordering::Relaxed);
+        // Keep the cancel flag reachable so the final pass can still abort,
+        // and block a new session from overlapping this one.
+        state.finishing = Some(Arc::clone(&session.cancel));
+        session
     };
-    session.stop.store(true, Ordering::Relaxed);
-    session
-        .join
-        .join()
-        .map_err(|_| "Dictation worker panicked".to_string())?
+    let id = session.id;
+    let outcome = session.join.join();
+    host.inner.lock().unwrap().finishing = None;
+    match outcome {
+        Ok(result) => result,
+        Err(_) => {
+            emit_session(&app, id, "error", Some("Dictation worker panicked".into()));
+            Err("Dictation worker panicked".into())
+        }
+    }
 }
 
-#[tauri::command]
-pub fn dictation_cancel(host: State<'_, DictationHost>) -> Result<(), String> {
-    let session = host.inner.lock().unwrap().session.take();
-    let Some(session) = session else {
-        return Err("No dictation in progress".into());
+#[tauri::command(async)]
+pub fn dictation_cancel(app: AppHandle, host: State<'_, DictationHost>) -> Result<(), String> {
+    let session = {
+        let mut state = host.inner.lock().unwrap();
+        match state.session.take() {
+            Some(session) => {
+                session.cancel.store(true, Ordering::Relaxed);
+                state.finishing = Some(Arc::clone(&session.cancel));
+                session
+            }
+            None => {
+                // Stop already took the session — abort its final pass.
+                return match state.finishing.as_ref() {
+                    Some(cancel) => {
+                        cancel.store(true, Ordering::Relaxed);
+                        Ok(())
+                    }
+                    None if state.starting => Err("Dictation is starting — try again".into()),
+                    None => Err("No dictation in progress".into()),
+                };
+            }
+        }
     };
-    session.cancel.store(true, Ordering::Relaxed);
-    let _ = session.join.join();
+    let id = session.id;
+    let outcome = session.join.join();
+    host.inner.lock().unwrap().finishing = None;
+    if outcome.is_err() {
+        emit_session(&app, id, "error", Some("Dictation worker panicked".into()));
+    }
     Ok(())
 }
 
@@ -479,6 +602,7 @@ fn run_session(
     model_path: &Path,
     language: Option<String>,
     translate: bool,
+    capture: capture::Capture,
 ) -> Result<DictationResult, String> {
     let SessionIo {
         app,
@@ -499,6 +623,7 @@ fn run_session(
         language: language.clone(),
         translate,
         no_context: true,
+        temperature_inc: 0.0,
     };
     let mut committed = String::new();
     let mut committed_end_ms: i64 = 0;
@@ -511,20 +636,28 @@ fn run_session(
             // `engine` drops here → model memory released.
             return Err("cancelled".into());
         }
-        let snapshot = buffer.lock().unwrap().tail(PARTIAL_WINDOW);
-        if let Some(error) = snapshot.error.clone() {
+        // Peek without cloning — `tail` would copy ~512 KB every 60 ms tick.
+        let (end_abs, base, stream_error) = buffer.lock().unwrap().stats();
+        if let Some(error) = stream_error {
             emit_session(app, session_id, "error", Some(error.clone()));
             return Err(error);
         }
-        let end_abs = snapshot.end();
         let enough_new = end_abs.saturating_sub(last_partial_end) >= PARTIAL_EVERY;
-        let enough_total = end_abs.saturating_sub(snapshot.base) >= MIN_PARTIAL_SAMPLES;
+        let enough_total = end_abs.saturating_sub(base) >= MIN_PARTIAL_SAMPLES;
         if stop.load(Ordering::Relaxed) {
             break;
         }
         if enough_new && enough_total {
             last_partial_end = end_abs;
-            match engine.transcribe(&snapshot.samples, &opts, cancel) {
+            let snapshot = buffer.lock().unwrap().tail(PARTIAL_WINDOW);
+            // Abort a partial pass on stop too — it would otherwise finish
+            // before the loop notices and delay the final pass by seconds.
+            let abort = {
+                let stop = Arc::clone(stop);
+                let cancel = Arc::clone(cancel);
+                move || stop.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed)
+            };
+            match engine.transcribe(&snapshot.samples, &opts, abort) {
                 Ok(transcript) => {
                     let window_start_ms = (snapshot.base * 1000 / WHISPER_RATE as u64) as i64;
                     let now_ms = (end_abs * 1000 / WHISPER_RATE as u64) as i64;
@@ -569,6 +702,9 @@ fn run_session(
                         emit_session(app, session_id, "cancelled", None);
                         return Err("cancelled".into());
                     }
+                    if stop.load(Ordering::Relaxed) {
+                        break; // the partial was aborted by stop, not a failure
+                    }
                     emit_session(app, session_id, "error", Some(error.clone()));
                     return Err(error);
                 }
@@ -577,24 +713,49 @@ fn run_session(
         std::thread::sleep(TICK);
     }
 
-    // Final pass over everything captured — replaces all partials.
+    // Stop the stream before the big snapshot so nothing is pushing — and so
+    // the lock isn't held while the copy contends with the RT callback.
+    drop(capture);
+
+    // Final pass over everything still buffered — replaces all partials.
     let snapshot = buffer.lock().unwrap().snapshot();
+    let dropped_audio_ms = snapshot.base * 1000 / WHISPER_RATE as u64;
     let audio_ms = snapshot.end() * 1000 / WHISPER_RATE as u64;
+    let stream_error = snapshot.error.clone();
     let final_opts = TranscribeOptions {
         language,
         translate,
         no_context: false,
+        temperature_inc: 0.2,
+    };
+    let abort = {
+        // `stop` is already set — the final pass must only abort on cancel.
+        let cancel = Arc::clone(cancel);
+        move || cancel.load(Ordering::Relaxed)
     };
     // `engine` drops on every return path → model memory released.
-    match engine.transcribe(&snapshot.samples, &final_opts, cancel) {
+    match engine.transcribe(&snapshot.samples, &final_opts, abort) {
         Ok(transcript) => {
+            // When the buffer cap dropped the session's head, that speech is
+            // absent from the snapshot — recover it from the text committed
+            // by partial passes. The seam can overlap by a few words.
+            let text =
+                if dropped_audio_ms > 0 && !committed.is_empty() && !transcript.text.is_empty() {
+                    format!("{} {}", committed, transcript.text)
+                } else if dropped_audio_ms > 0 && !committed.is_empty() {
+                    committed
+                } else {
+                    transcript.text
+                };
             emit_session(app, session_id, "finished", None);
             Ok(DictationResult {
-                text: transcript.text,
+                text,
                 language: transcript.language,
                 audio_ms,
                 model_load_ms: load_ms,
                 infer_ms: transcript.infer_ms,
+                dropped_audio_ms,
+                stream_error,
             })
         }
         Err(error) => {
@@ -620,22 +781,7 @@ pub fn dictation_transcribe_file(
     language: Option<String>,
     translate: bool,
 ) -> Result<FileTranscript, String> {
-    if let Some(lang) = language.as_deref() {
-        if !engine::valid_language(lang) {
-            return Err(format!("Unknown dictation language \"{lang}\""));
-        }
-    }
-    let spec = catalog::find(&model_id).ok_or("Unknown dictation model")?;
-    if translate && !spec.supports_translate {
-        return Err(format!(
-            "Model \"{}\" cannot translate to English — pick a translate-capable model",
-            spec.label
-        ));
-    }
-    let model_path = download::final_path(&models_dir(&app)?, spec);
-    if !model_path.exists() {
-        return Err(format!("Model \"{}\" is not installed", spec.label));
-    }
+    let model_path = resolve_model(&app, &model_id, &language, translate)?;
     let samples = audio_file::read_wav_mono(std::path::Path::new(&path))?;
     let audio_ms = samples.len() as u64 * 1000 / WHISPER_RATE as u64;
     let (engine, load_ms) = Engine::load(&model_path)?;
@@ -644,8 +790,9 @@ pub fn dictation_transcribe_file(
         language,
         translate,
         no_context: false,
+        temperature_inc: 0.2,
     };
-    let transcript = engine.transcribe(&samples, &opts, &cancel)?;
+    let transcript = engine.transcribe(&samples, &opts, move || cancel.load(Ordering::Relaxed))?;
     Ok(FileTranscript {
         text: transcript.text,
         language: transcript.language,

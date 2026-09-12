@@ -5,10 +5,19 @@ use std::path::Path;
 
 use super::resample::{to_mono, Resampler, WHISPER_RATE};
 
+/// Diagnostics are for short clips; bound decoded duration so a large file
+/// can't OOM the process through an IPC-reachable command.
+const MAX_FILE_SECONDS: u64 = 30 * 60;
+
 pub fn read_wav_mono(path: &Path) -> Result<Vec<f32>, String> {
     let mut reader = hound::WavReader::open(path)
         .map_err(|e| format!("Cannot read audio file {}: {e}", path.display()))?;
     let spec = reader.spec();
+    // A bogus rate (e.g. 0) would make the resampler emit thousands of
+    // output samples per input sample — a small file could OOM the process.
+    if !(4_000..=768_000).contains(&spec.sample_rate) {
+        return Err(format!("Unsupported sample rate {} Hz", spec.sample_rate));
+    }
     let channels = spec.channels.max(1) as usize;
     let samples: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Float => reader
@@ -26,16 +35,21 @@ pub fn read_wav_mono(path: &Path) -> Result<Vec<f32>, String> {
                 .collect()
         }
     };
-    let mut mono = Vec::new();
+    if samples.len() as u64 / channels as u64 > spec.sample_rate as u64 * MAX_FILE_SECONDS {
+        return Err("Audio file is too long for the dictation diagnostics path".into());
+    }
+    let mut mono = Vec::with_capacity(samples.len() / channels);
     to_mono(&samples, channels, &mut mono);
     let mut resampler = Resampler::new(spec.sample_rate, WHISPER_RATE);
-    let mut out = Vec::new();
+    let mut out =
+        Vec::with_capacity(mono.len() * WHISPER_RATE as usize / spec.sample_rate as usize + 64);
     resampler.process(&mono, &mut out);
     resampler.finish(&mut out);
     Ok(out)
 }
 
 /// Write 16 kHz mono f32 as 16-bit PCM WAV — used by tests and tooling.
+#[cfg(test)]
 pub fn write_wav_mono(path: &Path, samples: &[f32]) -> Result<(), String> {
     let spec = hound::WavSpec {
         channels: 1,

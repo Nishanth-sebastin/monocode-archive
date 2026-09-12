@@ -6,11 +6,12 @@
 //! are always dedicated worker threads, never the UI.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 #[derive(Debug, Clone)]
 pub struct TranscribeOptions {
@@ -21,6 +22,10 @@ pub struct TranscribeOptions {
     /// Let segments in this pass prompt later ones. Off for the overlapping
     /// partial windows (context bleeds repeated text); on for the final pass.
     pub no_context: bool,
+    /// Temperature fallback increment — 0 disables low-confidence retries.
+    /// Off for partial windows (retries can multiply their latency ~6×);
+    /// whisper's default 0.2 for the final pass.
+    pub temperature_inc: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +50,9 @@ pub struct Transcript {
 
 pub struct Engine {
     ctx: WhisperContext,
+    /// Reused across passes — creating a state re-initializes the GPU backend
+    /// and reallocates KV buffers (tens of MB), which would run every partial.
+    state: Mutex<Option<WhisperState>>,
 }
 
 impl Engine {
@@ -64,16 +72,22 @@ impl Engine {
             return Err("Dictation model is not multilingual".into());
         }
         let load_ms = started.elapsed().as_millis() as u64;
-        Ok((Self { ctx }, load_ms))
+        Ok((
+            Self {
+                ctx,
+                state: Mutex::new(None),
+            },
+            load_ms,
+        ))
     }
 
-    /// Run one transcription pass over 16 kHz mono f32 audio. `cancel` aborts
-    /// the pass at the next decoding step (checked via whisper's abort hook).
+    /// Run one transcription pass over 16 kHz mono f32 audio. `abort` is
+    /// checked at each decoding step via whisper's abort hook.
     pub fn transcribe(
         &self,
         samples: &[f32],
         opts: &TranscribeOptions,
-        cancel: &Arc<AtomicBool>,
+        abort: impl FnMut() -> bool + 'static,
     ) -> Result<Transcript, String> {
         if samples.is_empty() {
             return Ok(Transcript {
@@ -84,10 +98,15 @@ impl Engine {
                 first_segment_ms: None,
             });
         }
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|error| format!("Cannot start transcription: {error}"))?;
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(
+                self.ctx
+                    .create_state()
+                    .map_err(|error| format!("Cannot start transcription: {error}"))?,
+            );
+        }
+        let state = guard.as_mut().unwrap();
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         match opts
             .language
@@ -106,17 +125,17 @@ impl Engine {
         }
         params.set_translate(opts.translate);
         params.set_no_context(opts.no_context);
+        params.set_temperature_inc(opts.temperature_inc);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_special(false);
         params.set_print_timestamps(false);
         params.set_suppress_nst(true);
-        let cancel_flag = Arc::clone(cancel);
         // The `Into<Option<F>>` bound needs both generic parameters spelled
         // out; a bare `Some(closure)` leaves `F` ambiguous.
         params
             .set_abort_callback_safe::<Option<Box<dyn FnMut() -> bool>>, Box<dyn FnMut() -> bool>>(
-                Some(Box::new(move || cancel_flag.load(Ordering::Relaxed))),
+                Some(Box::new(abort)),
             );
         let started = Instant::now();
         let first_segment = Arc::new(Mutex::new(None::<u64>));
