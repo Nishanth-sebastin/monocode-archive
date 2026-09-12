@@ -87,6 +87,12 @@ export type GitDiffIndex = {
   ahead: number;
   behind: number;
   aheadOfDefault: number;
+  /** A merge, rebase, cherry-pick or revert is in progress. */
+  opInProgress: boolean;
+  /** Unmerged paths while an operation is in progress (bounded). */
+  conflicts: string[];
+  /** Short SHA of MERGE_HEAD (or the rebased head) when known. */
+  mergeHead: string | null;
 };
 
 export function gitDiffIndex(cwd: string): Promise<GitDiffIndex> {
@@ -257,6 +263,46 @@ export function gitUpdateFromDefault(
 /** Abort an in-progress merge or rebase, leaving the checkout clean. */
 export function gitMergeAbort(cwd: string): Promise<void> {
   return invoke<void>("git_merge_abort", { cwd });
+}
+
+export type GitSyncResult = {
+  /** "merged" | "up-to-date" | "conflicted" | "refused" */
+  outcome: string;
+  branch: string;
+  /** The remote ref merged, e.g. "origin/main". */
+  syncedWith: string;
+  /** Subjects of the incoming commits the merge brought in (bounded). */
+  commits: string[];
+  /** Conflicted paths when the merge stopped; left in progress. */
+  conflicts: string[];
+  /** Why a refused sync did not run. */
+  reason: string;
+};
+
+/**
+ * Fetch the remote default branch and merge `remote/<default>` into this
+ * exact working copy on its own host. Merge only; never pushes. A dirty
+ * tree, an operation already in progress, or a second concurrent sync is
+ * refused as data — nothing is stashed or queued.
+ */
+export function gitSyncBranch(cwd: string): Promise<GitSyncResult> {
+  return invoke<GitSyncResult>("git_sync_branch", { cwd });
+}
+
+export type GitMergeContext = {
+  /** A merge, rebase, cherry-pick or revert is in progress. */
+  merging: boolean;
+  /** Unmerged paths (bounded). */
+  conflicts: string[];
+  /** Short SHA of MERGE_HEAD (or the rebased head) when known. */
+  mergeHead: string | null;
+  /** Bounded combined diff of the conflicted paths — both sides. */
+  diff: string;
+};
+
+/** Live merge state — honest after restart, unlike a remembered result. */
+export function gitMergeContext(cwd: string): Promise<GitMergeContext> {
+  return invoke<GitMergeContext>("git_merge_context", { cwd });
 }
 
 export type GitRangeContext = {

@@ -221,6 +221,8 @@ type Props = {
   ) => void;
   onPinSession?: (sessionId: string, pinned: boolean) => void;
   onPinSessions?: (sessionIds: readonly string[], pinned: boolean) => void;
+  /** Sync the session's working copy with the remote default branch. */
+  onSyncSession?: (session: SessionSummary) => void;
   reminders?: readonly SessionReminder[];
   onSetReminders?: (sessionIds: readonly string[], dueAt: number) => void;
   onCancelReminders?: (sessionIds: readonly string[]) => void;
@@ -317,6 +319,7 @@ function SidebarComponent({
   onArchiveSessions,
   onPinSession,
   onPinSessions,
+  onSyncSession,
   reminders = [],
   onSetReminders,
   onCancelReminders,
@@ -808,6 +811,15 @@ function SidebarComponent({
       disabled: !onSetReminders,
       submenu: sessionReminderPresets(),
     },
+    ...(!multipleMenuSessions && onSyncSession
+      ? [
+          {
+            kind: "item" as const,
+            id: "sync-default",
+            label: "Sync with remote default…",
+          },
+        ]
+      : []),
     { kind: "sep" as const },
     { kind: "item" as const, id: "folder-new", label: "New folder" },
     ...(sessionFolders.length > 0 ? [{ kind: "sep" as const }] : []),
@@ -921,6 +933,13 @@ function SidebarComponent({
       } else {
         for (const id of sessionIds) onPinSession?.(id, !pinned);
       }
+      return;
+    }
+    if (id === "sync-default") {
+      const summary =
+        menuSessions.find((session) => session.id === sessionId) ??
+        menuSessions[0];
+      if (summary) onSyncSession?.(summary);
       return;
     }
     if (id === "rename") {

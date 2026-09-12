@@ -115,6 +115,7 @@ import {
   type GitFileDiffKind,
   type GitHistoryCommit,
 } from "./lib/fs";
+import { syncWithDefaultBranch } from "./lib/syncDefault";
 import {
   invalidateProjectFiles,
   prefetchProjectFiles,
@@ -6942,6 +6943,25 @@ export default function App({
     [],
   );
 
+  /** Session-row "Sync with remote default": the session owns its working
+   * copy — the sync runs there and conflicts route back to this
+   * conversation. The shared flow confirms the exact ref/host first. */
+  const onSyncSessionDefault = useCallback(async (summary: SessionSummary) => {
+    const cwd = sessionWorkCwd(summary);
+    try {
+      await syncWithDefaultBranch({
+        cwd,
+        sessionId: summary.id,
+        title: sessionDisplayTitle(summary.title, summary.harness),
+      });
+    } catch (error) {
+      await message(error instanceof Error ? error.message : String(error), {
+        title: "Sync with remote default",
+        kind: "warning",
+      });
+    }
+  }, []);
+
   const onAttentionAction = useCallback(
     async (item: AttentionItem) => {
       const action = item.action;
@@ -7876,6 +7896,7 @@ export default function App({
         onArchiveSessions={onArchiveHistorySessions}
         onPinSession={onPinHistorySession}
         onPinSessions={onPinHistorySessions}
+        onSyncSession={onSyncSessionDefault}
         reminders={sessionReminders.reminders}
         onSetReminders={sessionReminders.schedule}
         onCancelReminders={sessionReminders.cancel}
