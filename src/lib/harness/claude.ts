@@ -10,7 +10,7 @@ import {
   watchChild,
   writeChild,
 } from "./child";
-import { resolveClaudeProfileEnv } from "./claudeProfiles";
+import { CLAUDE_PROFILE_DEFAULT, resolveClaudeProfileEnv } from "./claudeProfiles";
 import {
   askUserQuestionAllowInput,
   assistantTextBlocks,
@@ -114,6 +114,10 @@ type LiveAgentTask = {
 type Live = {
   cwd: string;
   claudeSessionId: string;
+  /** Which account (CLAUDE_CONFIG_DIR) this process was spawned under —
+   * needed so a later resume attempt can tell it apart from a different
+   * profile's conversation history. See claudeProfiles.ts. */
+  profileId: string;
   runtimeMode: RuntimeMode;
   planning: boolean;
   settingsKey: string;
@@ -145,6 +149,9 @@ type Live = {
 type Resume = {
   sessionId: string;
   cwd: string;
+  /** Undefined means "recorded before profiles existed" — treated as the
+   * default profile when compared, since that was the only account then. */
+  profileId?: string;
 };
 
 const INIT_TIMEOUT_MS = 8_000;
@@ -375,15 +382,28 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   }
   if (existing) {
     // Model and launch-setting changes require a fresh Claude process, but
-    // they must resume the same provider conversation. Only a cwd change
-    // invalidates the stored session because Claude sessions are cwd-bound.
+    // they must resume the same provider conversation. A cwd change, or a
+    // switch to a different account (CLAUDE_CONFIG_DIR), invalidates the
+    // stored session instead — Claude conversations are both cwd- and
+    // account-bound, so resuming across either lands on a conversation ID
+    // that simply doesn't exist there.
     if (existing.cwd !== input.cwd) resumeByThread.delete(input.sessionId);
     await stopClaudeSession(input.sessionId);
   }
 
+  const home = await homeDir(input.cwd);
+  const { env, profileId, warning } = resolveClaudeProfileEnv(
+    input.modelSettings?.profile,
+    input.cwd,
+    home,
+  );
+
   const resume = resumeByThread.get(input.sessionId);
-  const canResume = resume != null && resume.cwd === input.cwd;
-  if (resume && resume.cwd !== input.cwd) {
+  const resumeProfileMatches =
+    resume != null && (resume.profileId ?? CLAUDE_PROFILE_DEFAULT) === profileId;
+  const canResume =
+    resume != null && resume.cwd === input.cwd && resumeProfileMatches;
+  if (resume && (resume.cwd !== input.cwd || !resumeProfileMatches)) {
     resumeByThread.delete(input.sessionId);
   }
 
@@ -401,6 +421,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   const live: Live = {
     cwd: input.cwd,
     claudeSessionId,
+    profileId,
     runtimeMode: input.runtimeMode,
     planning,
     settingsKey,
@@ -453,12 +474,6 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     },
   );
 
-  const home = await homeDir(input.cwd);
-  const { env, warning } = resolveClaudeProfileEnv(
-    input.modelSettings?.profile,
-    input.cwd,
-    home,
-  );
   if (warning) live.onEvent({ type: "status", text: warning });
 
   await spawnChild(
@@ -474,6 +489,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
   resumeByThread.set(input.sessionId, {
     sessionId: claudeSessionId,
     cwd: input.cwd,
+    profileId,
   });
 
   try {
@@ -590,6 +606,7 @@ function handleLine(sessionId: string, live: Live, line: string): void {
     resumeByThread.set(sessionId, {
       sessionId: sessionIdFromLine,
       cwd: live.cwd,
+      profileId: live.profileId,
     });
     live.onEvent({
       type: "session.providerBound",
