@@ -5,60 +5,47 @@ import {
 } from "./claudeProfiles";
 
 describe("claudeProfileOptionsFor", () => {
-  it("allows all three profiles outside yuko", () => {
+  it("allows all three profiles everywhere", () => {
     expect(
       claudeProfileOptionsFor("/Users/cartrabbit/Documents/personal/poynt").map(
         (option) => option.value,
       ),
-    ).toEqual(["personal", "dharani", "office2"]);
-  });
-
-  it("restricts yuko projects to personal and office2", () => {
+    ).toEqual(["personal", "nishanth", "benitto"]);
     expect(
       claudeProfileOptionsFor(
         "/Users/cartrabbit/Documents/yuko/yuko-backend",
       ).map((option) => option.value),
-    ).toEqual(["personal", "office2"]);
-    expect(
-      claudeProfileOptionsFor(
-        "/Users/cartrabbit/Documents/yuko/yuko-frontend",
-      ).map((option) => option.value),
-    ).toEqual(["personal", "office2"]);
+    ).toEqual(["personal", "nishanth", "benitto"]);
   });
 });
 
 describe("resolveClaudeProfileEnv", () => {
   const home = "/Users/cartrabbit";
+  const cwd = "/Users/cartrabbit/Documents/personal/poynt";
 
-  it("points CLAUDE_CONFIG_DIR at the requested profile when allowed", () => {
-    const result = resolveClaudeProfileEnv(
-      "office2",
-      "/Users/cartrabbit/Documents/yuko/yuko-backend",
-      home,
-    );
-    expect(result.profileId).toBe("office2");
-    expect(result.env.CLAUDE_CONFIG_DIR).toBe("/Users/cartrabbit/.claude-office2");
+  it("Personal has no CLAUDE_CONFIG_DIR override — the plain default account", () => {
+    const result = resolveClaudeProfileEnv("personal", cwd, home);
+    expect(result.profileId).toBe("personal");
+    expect(result.env).toEqual({});
     expect(result.warning).toBeUndefined();
   });
 
-  it("falls back and warns when the requested profile is disallowed for the folder", () => {
-    const result = resolveClaudeProfileEnv(
-      "dharani",
-      "/Users/cartrabbit/Documents/yuko/yuko-frontend",
-      home,
-    );
-    expect(result.profileId).toBe("personal");
+  it("Nishanth points CLAUDE_CONFIG_DIR at claudo's dir", () => {
+    const result = resolveClaudeProfileEnv("nishanth", cwd, home);
+    expect(result.profileId).toBe("nishanth");
     expect(result.env.CLAUDE_CONFIG_DIR).toBe("/Users/cartrabbit/.claude-personal");
-    expect(result.warning).toMatch(/not allowed|isn't allowed/);
   });
 
-  it("defaults to personal when no profile was requested", () => {
-    const result = resolveClaudeProfileEnv(
-      undefined,
-      "/Users/cartrabbit/Documents/personal/poynt",
-      home,
-    );
+  it("Benitto points CLAUDE_CONFIG_DIR at claudz's dir", () => {
+    const result = resolveClaudeProfileEnv("benitto", cwd, home);
+    expect(result.profileId).toBe("benitto");
+    expect(result.env.CLAUDE_CONFIG_DIR).toBe("/Users/cartrabbit/.claude-office2");
+  });
+
+  it("defaults to Personal (no override) when no profile was requested", () => {
+    const result = resolveClaudeProfileEnv(undefined, cwd, home);
     expect(result.profileId).toBe("personal");
+    expect(result.env).toEqual({});
     expect(result.warning).toBeUndefined();
   });
 });
