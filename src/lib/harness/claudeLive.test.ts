@@ -10,6 +10,10 @@ const writeChild = vi.fn(async (_id: string, line: string) => {
   sent.push(line);
 });
 
+vi.mock("../fs", () => ({
+  homeDir: async () => "/Users/fake",
+}));
+
 vi.mock("./child", () => ({
   resolveClaudeBinary: async () => ({ path: "/fake/claude" }),
   spawnChild: async (_id: string, _path: string, args: string[]) => {

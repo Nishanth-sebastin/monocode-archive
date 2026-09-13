@@ -957,6 +957,7 @@ export function claudeSettingsKey(input: {
   fast?: string;
   thinking?: string;
   context?: string;
+  profile?: string;
   runtimeMode: RuntimeMode;
   hooks?: boolean;
 }): string {
@@ -966,6 +967,7 @@ export function claudeSettingsKey(input: {
     input.fast ?? "",
     input.thinking ?? "",
     input.context ?? "",
+    input.profile ?? "",
     input.runtimeMode,
     input.hooks === false ? "nohooks" : "hooks",
   ].join("|");

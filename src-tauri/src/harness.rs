@@ -463,6 +463,7 @@ pub fn harness_spawn(
     command: String,
     args: Vec<String>,
     cwd: String,
+    env: Option<HashMap<String, String>>,
 ) -> Result<u32, String> {
     let location = crate::wsl::location(&cwd)?;
     let _worktree_guard = crate::fs::worktrees::LIFECYCLE
@@ -492,6 +493,14 @@ pub fn harness_spawn(
         prepare_child(&mut cmd, &command);
         (cmd, None, None)
     };
+    // Caller-supplied overrides (e.g. a per-session CLAUDE_CONFIG_DIR for
+    // profile switching) — applied last so they win over `prepare_child`'s
+    // defaults, for both the native and WSL-bridge branches above.
+    if let Some(env) = &env {
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+    }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
