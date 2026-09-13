@@ -1946,7 +1946,13 @@ export default function App({
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
-    const cwd = active?.cwd ?? sessionDefaults?.cwd ?? projectCwd;
+    // The focused tab may have no session at all (e.g. it's showing a file
+    // in the editor, not a chat) — active is legitimately undefined then.
+    // Falling back to sessionDefaults?.cwd in that case would silently pick
+    // whichever session happens to be first in the whole app's session
+    // list, unrelated to the project you're actually looking at. The
+    // project you're viewing (projectCwd) is always the right fallback.
+    const cwd = active?.cwd ?? projectCwd;
     const session = newDefaultSession(cwd, sessionDefaults?.runtimeMode);
     const tab = newTab(session.id);
     setSessions((prev) => [...prev, session]);
@@ -1954,13 +1960,7 @@ export default function App({
     setActiveTabId(tab.id);
     setComposerFocused(true);
     return session.id;
-  }, [
-    active?.cwd,
-    appendTab,
-    sessionDefaults?.cwd,
-    sessionDefaults?.runtimeMode,
-    projectCwd,
-  ]);
+  }, [active?.cwd, appendTab, sessionDefaults?.runtimeMode, projectCwd]);
 
   const [inboxMounted, setInboxMounted] = useState(inboxViewOpen);
   useEffect(() => {
@@ -2110,7 +2110,6 @@ export default function App({
           ? card.sourceCwd
           : undefined) ||
         active?.cwd ||
-        sessionDefaults?.cwd ||
         projectCwd;
       const title = card.title.trim();
       const session = {
@@ -2124,13 +2123,7 @@ export default function App({
       setActiveTabId(tab.id);
       setComposerFocused(true);
     },
-    [
-      active?.cwd,
-      appendTab,
-      sessionDefaults?.cwd,
-      sessionDefaults?.runtimeMode,
-      projectCwd,
-    ],
+    [active?.cwd, appendTab, sessionDefaults?.runtimeMode, projectCwd],
   );
 
   useEffect(() => {
@@ -2180,7 +2173,7 @@ export default function App({
     (dir: SplitDir) => {
       if (!activeTab) return;
       const session = newDefaultSession(
-        sessionDefaults?.cwd ?? projectCwd,
+        active?.cwd ?? projectCwd,
         sessionDefaults?.runtimeMode,
       );
       setSessions((prev) => [...prev, session]);
@@ -2196,7 +2189,7 @@ export default function App({
       );
       setComposerFocused(true);
     },
-    [activeTab, projectCwd, sessionDefaults?.cwd, sessionDefaults?.runtimeMode],
+    [activeTab, active?.cwd, projectCwd, sessionDefaults?.runtimeMode],
   );
 
   const focusProjectTerminal = useCallback(() => {
@@ -5569,8 +5562,7 @@ export default function App({
     async (request: AgentContextRequest) => {
       const done = () => request.onPrepared?.();
       if (request.newTask || !request.taskId) {
-        const path =
-          request.cwd || active?.cwd || sessionDefaults?.cwd || projectCwd;
+        const path = request.cwd || active?.cwd || projectCwd;
         const project = await ensureTaskProject(path);
         if (!project) {
           // Nothing to hang the task on — fall back to the context picker.
@@ -5712,7 +5704,6 @@ export default function App({
       launchTaskChildren,
       onSelectHistorySession,
       projectCwd,
-      sessionDefaults?.cwd,
       taskSessionAlive,
     ],
   );
@@ -5751,8 +5742,7 @@ export default function App({
         onOpenTask(taskId);
         return;
       }
-      const path =
-        item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
+      const path = item.projectPath || active?.cwd || projectCwd;
       const project = await ensureTaskProject(path);
       if (!project)
         throw new Error("Choose a local project before sending to an agent");
@@ -5763,13 +5753,7 @@ export default function App({
         ...(linked ? { initialTickets: [linked] } : {}),
       });
     },
-    [
-      active?.cwd,
-      ensureTaskProject,
-      onOpenTask,
-      projectCwd,
-      sessionDefaults?.cwd,
-    ],
+    [active?.cwd, ensureTaskProject, onOpenTask, projectCwd],
   );
 
   /** Inbox multi-select — every picked item links onto the new task; the
@@ -5779,11 +5763,7 @@ export default function App({
       const linked = items
         .map(linkedWorkItemFromInboxItem)
         .filter((entry): entry is LinkedWorkItem => !!entry);
-      const path =
-        items[0]?.projectPath ||
-        active?.cwd ||
-        sessionDefaults?.cwd ||
-        projectCwd;
+      const path = items[0]?.projectPath || active?.cwd || projectCwd;
       const project = await ensureTaskProject(path);
       if (!project)
         throw new Error("Choose a local project before sending to an agent");
@@ -5794,7 +5774,7 @@ export default function App({
         ...(linked.length ? { initialTickets: linked } : {}),
       });
     },
-    [active?.cwd, ensureTaskProject, projectCwd, sessionDefaults?.cwd],
+    [active?.cwd, ensureTaskProject, projectCwd],
   );
 
   const onUpdatePlan = useCallback(
